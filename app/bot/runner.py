@@ -223,6 +223,7 @@ class BotRunner:
             "uptime_seconds": uptime,
             "start_time": self.start_time.isoformat() if self.start_time else None,
             "error_message": self.error_message,
+            "balance": bot_state.balance,
             "statistics": bot_state.get_statistics()
         }
     

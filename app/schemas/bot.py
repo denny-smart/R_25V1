@@ -9,6 +9,7 @@ class BotStatusResponse(BaseModel):
     uptime_seconds: Optional[int]
     start_time: Optional[str]
     error_message: Optional[str]
+    balance: float
     statistics: Dict
 
 class BotControlResponse(BaseModel):
