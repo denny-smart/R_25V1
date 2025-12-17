@@ -19,8 +19,8 @@ async def get_current_config():
             "symbol": config.SYMBOL,
             "multiplier": config.MULTIPLIER,
             "fixed_stake": config.FIXED_STAKE,
-            "fixed_tp": config.FIXED_TP,
-            "max_loss_per_trade": config.MAX_LOSS_PER_TRADE,
+            "take_profit_percent": config.TAKE_PROFIT_PERCENT,
+            "stop_loss_percent": config.STOP_LOSS_PERCENT,
         },
         "risk_management": {
             "max_trades_per_day": config.MAX_TRADES_PER_DAY,

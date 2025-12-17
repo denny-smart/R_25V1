@@ -413,8 +413,8 @@ class BotRunner:
         # Validate trade parameters
         valid, msg = self.risk_manager.validate_trade_parameters(
             config.FIXED_STAKE,
-            config.FIXED_TP,
-            config.MAX_LOSS_PER_TRADE
+            config.TAKE_PROFIT_PERCENT,
+            config.STOP_LOSS_PERCENT
         )
         
         if not valid:
@@ -428,8 +428,8 @@ class BotRunner:
         trade_info = await self.trade_engine.open_trade(
             direction=signal['signal'],
             stake=config.FIXED_STAKE,
-            take_profit=config.FIXED_TP,
-            stop_loss=config.MAX_LOSS_PER_TRADE
+            take_profit_percent=config.TAKE_PROFIT_PERCENT,
+            stop_loss_percent=config.STOP_LOSS_PERCENT
         )
         
         if not trade_info:

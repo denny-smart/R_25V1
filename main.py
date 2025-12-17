@@ -95,8 +95,8 @@ class TradingBot:
             logger.info(f"📊 Symbol: {config.SYMBOL}")
             logger.info(f"📈 Multiplier: {config.MULTIPLIER}x")
             logger.info(f"💵 Stake: {format_currency(config.FIXED_STAKE)}")
-            logger.info(f"🎯 Take Profit: {format_currency(config.FIXED_TP)}")
-            logger.info(f"🛑 Stop Loss: {format_currency(config.MAX_LOSS_PER_TRADE)}")
+            logger.info(f"🎯 Take Profit: {config.TAKE_PROFIT_PERCENT}%")
+            logger.info(f"🛑 Stop Loss: {config.STOP_LOSS_PERCENT}%")
             logger.info(f"⏰ Cooldown: {config.COOLDOWN_SECONDS}s")
             logger.info(f"🔢 Max Daily Trades: {config.MAX_TRADES_PER_DAY}")
             logger.info(f"💸 Max Daily Loss: {format_currency(config.MAX_DAILY_LOSS)}")
@@ -174,8 +174,8 @@ class TradingBot:
             # Validate trade parameters
             valid, msg = self.risk_manager.validate_trade_parameters(
                 config.FIXED_STAKE,
-                config.FIXED_TP,
-                config.MAX_LOSS_PER_TRADE
+                config.TAKE_PROFIT_PERCENT,
+                config.STOP_LOSS_PERCENT
             )
             
             if not valid:

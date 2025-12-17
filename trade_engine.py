@@ -173,15 +173,15 @@ class TradeEngine:
             return {"error": {"message": str(e)}}
     
     async def open_trade(self, direction: str, stake: float, 
-                        take_profit: float, stop_loss: float) -> Optional[Dict]:
+                        take_profit_percent: float, stop_loss_percent: float) -> Optional[Dict]:
         """
         Open a multiplier trade
         
         Args:
             direction: 'UP' or 'DOWN' or 'BUY' or 'SELL'
             stake: Stake amount
-            take_profit: Take profit amount
-            stop_loss: Stop loss amount
+            take_profit_percent: Take profit as percentage of entry price
+            stop_loss_percent: Stop loss as percentage of entry price
         
         Returns:
             Trade information dictionary or None if failed
@@ -193,7 +193,7 @@ class TradeEngine:
             else:
                 contract_type = config.CONTRACT_TYPE_DOWN  # MULTDOWN
             
-            # Build the buy request
+            # Build the buy request (without limit orders initially)
             buy_request = {
                 "buy": 1,
                 "price": stake,
@@ -207,15 +207,8 @@ class TradeEngine:
                 }
             }
             
-            # Add limit orders if provided
-            if take_profit and stop_loss:
-                buy_request["parameters"]["limit_order"] = {
-                    "take_profit": take_profit,
-                    "stop_loss": stop_loss
-                }
-            
             logger.info(f"📤 Sending {direction} trade request...")
-            logger.info(f"   Stake: {format_currency(stake)} | TP: {format_currency(take_profit)} | SL: {format_currency(stop_loss)}")
+            logger.info(f"   Stake: {format_currency(stake)} | TP: {take_profit_percent}% | SL: {stop_loss_percent}%")
             
             response = await self.send_request(buy_request)
             
@@ -236,6 +229,10 @@ class TradeEngine:
             contract_id = buy_info["contract_id"]
             entry_price = float(buy_info.get("buy_price", 0))
             
+            # Calculate TP and SL amounts based on entry price and percentages
+            take_profit_amount = entry_price * (take_profit_percent / 100)
+            stop_loss_amount = entry_price * (stop_loss_percent / 100)
+            
             self.active_contract_id = contract_id
             
             trade_info = {
@@ -243,8 +240,10 @@ class TradeEngine:
                 'direction': direction,
                 'stake': stake,
                 'entry_price': entry_price,
-                'take_profit': take_profit,
-                'stop_loss': stop_loss,
+                'take_profit': take_profit_amount,
+                'stop_loss': stop_loss_amount,
+                'take_profit_percent': take_profit_percent,
+                'stop_loss_percent': stop_loss_percent,
                 'multiplier': config.MULTIPLIER,
                 'open_time': datetime.now(),
                 'status': 'open'
@@ -254,6 +253,8 @@ class TradeEngine:
             logger.info(f"   Contract ID: {contract_id}")
             logger.info(f"   Entry Price: {entry_price:.2f}")
             logger.info(f"   Direction: {direction}")
+            logger.info(f"   TP: {format_currency(take_profit_amount)} ({take_profit_percent}%)")
+            logger.info(f"   SL: {format_currency(stop_loss_amount)} ({stop_loss_percent}%)")
             
             # Send Telegram notification
             if notifier is not None:
@@ -542,8 +543,8 @@ class TradeEngine:
             trade_info = await self.open_trade(
                 direction=direction,
                 stake=config.FIXED_STAKE,
-                take_profit=config.FIXED_TP,
-                stop_loss=config.MAX_LOSS_PER_TRADE
+                take_profit_percent=config.TAKE_PROFIT_PERCENT,
+                stop_loss_percent=config.STOP_LOSS_PERCENT
             )
             
             if not trade_info:

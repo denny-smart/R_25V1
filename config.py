@@ -37,8 +37,8 @@ CONTRACT_TYPE_DOWN = "MULTDOWN"    # Multiplier Down (Sell)
 # ==================== RISK MANAGEMENT ====================
 FIXED_STAKE = 10.0                  # Stake amount per trade (USD)
 MULTIPLIER = 160                   # Conservative multiplier (160x)
-FIXED_TP = 2.0                    # Take profit in USD
-MAX_LOSS_PER_TRADE = 3.0          # Stop loss in USD
+TAKE_PROFIT_PERCENT = 20.0        # Take profit as percentage (20%)
+STOP_LOSS_PERCENT = 8.0           # Stop loss as percentage (8%)
 COOLDOWN_SECONDS = 120             # Wait time between trades (2 minutes)
 MAX_TRADES_PER_DAY = 50           # Maximum trades allowed per day
 MAX_DAILY_LOSS = 30.0             # Stop trading if daily loss exceeds this
@@ -103,10 +103,10 @@ def validate_config():
     # Validate risk parameters
     if FIXED_STAKE <= 0:
         errors.append("FIXED_STAKE must be positive")
-    if FIXED_TP <= 0:
-        errors.append("FIXED_TP must be positive")
-    if MAX_LOSS_PER_TRADE <= 0:
-        errors.append("MAX_LOSS_PER_TRADE must be positive")
+    if TAKE_PROFIT_PERCENT <= 0:
+        errors.append("TAKE_PROFIT_PERCENT must be positive")
+    if STOP_LOSS_PERCENT <= 0:
+        errors.append("STOP_LOSS_PERCENT must be positive")
     if MULTIPLIER not in VALID_MULTIPLIERS:
         errors.append(f"MULTIPLIER must be one of {VALID_MULTIPLIERS}")
     
@@ -142,8 +142,8 @@ if __name__ == "__main__":
         print("✅ Configuration validation passed!")
         print(f"📊 Symbol: {SYMBOL}")
         print(f"💰 Stake: ${FIXED_STAKE}")
-        print(f"🎯 Take Profit: ${FIXED_TP}")
-        print(f"🛑 Stop Loss: ${MAX_LOSS_PER_TRADE}")
+        print(f"🎯 Take Profit: {TAKE_PROFIT_PERCENT}%")
+        print(f"🛑 Stop Loss: {STOP_LOSS_PERCENT}%")
         print(f"📈 Multiplier: {MULTIPLIER}x")
         print(f"⏰ Cooldown: {COOLDOWN_SECONDS}s")
         print(f"🔢 Max Daily Trades: {MAX_TRADES_PER_DAY}")
