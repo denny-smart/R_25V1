@@ -71,8 +71,8 @@ class TelegramNotifier:
             f"📊 Symbol: {config.SYMBOL}\n"
             f"📈 Multiplier: {config.MULTIPLIER}x\n"
             f"💵 Stake: {format_currency(config.FIXED_STAKE)}\n"
-            f"🎯 Take Profit: {format_currency(config.FIXED_TP)}\n"
-            f"🛑 Stop Loss: {format_currency(config.MAX_LOSS_PER_TRADE)}\n"
+            f"🎯 Take Profit: {config.TAKE_PROFIT_PERCENT}%\n"
+            f"🛑 Stop Loss: {config.STOP_LOSS_PERCENT}%\n"
             f"🔢 Max Daily Trades: {config.MAX_TRADES_PER_DAY}\n\n"
             f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         )

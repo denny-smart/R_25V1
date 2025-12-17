@@ -86,7 +86,10 @@ class TradingBot:
             balance = await self.data_fetcher.get_balance()
             if balance:
                 logger.info(f"💰 Account Balance: {format_currency(balance)}")
-                await notifier.notify_bot_started(balance)  # TELEGRAM NOTIFICATION
+                try:
+                    await notifier.notify_bot_started(balance)  # TELEGRAM NOTIFICATION
+                except Exception as e:
+                    logger.error(f"❌ Telegram notification failed: {e}")
             
             # Log trading parameters
             logger.info("="*60)
