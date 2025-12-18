@@ -1,6 +1,7 @@
 ﻿"""
 Bot Runner - Manages the lifecycle of the trading bot
 Wraps existing bot logic without modifying it
+FIXED VERSION - Matches TradeEngine interface
 """
 
 import asyncio
@@ -413,76 +414,41 @@ class BotRunner:
         # Record signal
         bot_state.add_signal(signal)
         
-        # Validate trade parameters
+        # ✅ FIXED: Validate only stake (TP/SL handled by TradeEngine)
         valid, msg = self.risk_manager.validate_trade_parameters(
-            config.FIXED_STAKE,
-            config.TAKE_PROFIT_PERCENT,
-            config.STOP_LOSS_PERCENT
+            stake=config.FIXED_STAKE
         )
         
         if not valid:
             logger.warning(f"Invalid trade parameters: {msg}")
             return
         
-        # Execute trade
+        # Execute trade using the integrated execute_trade method
         logger.info(f"Executing {signal['signal']} trade...")
         
-        # Open trade
-        trade_info = await self.trade_engine.open_trade(
-            direction=signal['signal'],
-            stake=config.FIXED_STAKE,
-            take_profit_percent=config.TAKE_PROFIT_PERCENT,
-            stop_loss_percent=config.STOP_LOSS_PERCENT
-        )
+        # ✅ FIXED: Use execute_trade which handles the complete lifecycle
+        result = await self.trade_engine.execute_trade(signal, self.risk_manager)
         
-        if not trade_info:
-            logger.error("Failed to open trade")
-            return
-        
-        # Record trade opening
-        self.risk_manager.record_trade_open(trade_info)
-        bot_state.add_trade(trade_info)
-        
-        # NOTIFY TELEGRAM: Trade opened
-        try:
-            await self.telegram_bridge.notify_trade_opened(trade_info)
-        except:
-            pass
-        
-        # Broadcast trade opened event to WebSockets
-        await event_manager.broadcast({
-            "type": "trade_opened",
-            "trade": trade_info,
-            "timestamp": datetime.now().isoformat()
-        })
-        
-        # Monitor trade
-        final_status = await self.trade_engine.monitor_trade(
-            trade_info['contract_id'],
-            trade_info,
-            max_duration=config.MAX_TRADE_DURATION,
-            risk_manager=self.risk_manager
-        )
-        
-        if final_status:
-            # Record trade closure
-            pnl = final_status.get('profit', 0.0)
-            status = final_status.get('status', 'unknown')
-            contract_id = final_status.get('contract_id')
+        if result:
+            # Trade completed successfully
+            pnl = result.get('profit', 0.0)
+            status = result.get('status', 'unknown')
+            contract_id = result.get('contract_id')
             
+            # Record trade closure (opening was already recorded in execute_trade)
             self.risk_manager.record_trade_close(contract_id, pnl, status)
-            bot_state.update_trade(contract_id, final_status)
+            bot_state.update_trade(contract_id, result)
             
             # NOTIFY TELEGRAM: Trade closed
             try:
-                await self.telegram_bridge.notify_trade_closed(final_status, pnl, status)
+                await self.telegram_bridge.notify_trade_closed(result, pnl, status)
             except:
                 pass
             
             # Broadcast trade closed event to WebSockets
             await event_manager.broadcast({
                 "type": "trade_closed",
-                "trade": final_status,
+                "trade": result,
                 "pnl": pnl,
                 "status": status,
                 "timestamp": datetime.now().isoformat()
@@ -498,6 +464,8 @@ class BotRunner:
                 "stats": stats,
                 "timestamp": datetime.now().isoformat()
             })
+        else:
+            logger.error("Trade execution failed")
 
 # Global bot runner instance
 bot_runner = BotRunner()
