@@ -1,5 +1,6 @@
 """
 Telegram Notifier for Deriv R_25 Trading Bot
+FIXED VERSION - Handles None values and cancellation phases
 Sends trade notifications via Telegram
 """
 
@@ -35,6 +36,17 @@ class TelegramNotifier:
         else:
             logger.info("ℹ️ Telegram notifications disabled (no credentials)")
     
+    def _safe_format(self, value, default: str = "N/A") -> str:
+        """Safely format a value, handling None cases"""
+        if value is None:
+            return default
+        try:
+            if isinstance(value, (int, float)):
+                return format_currency(value)
+            return str(value)
+        except Exception:
+            return default
+    
     async def send_message(self, message: str, parse_mode: str = "HTML") -> bool:
         """
         Send a message via Telegram
@@ -65,14 +77,24 @@ class TelegramNotifier:
     
     async def notify_bot_started(self, balance: float):
         """Notify that bot has started"""
+        if config.ENABLE_CANCELLATION:
+            tp_text = f"Phase 2 TP: {config.POST_CANCEL_TAKE_PROFIT_PERCENT}%"
+            sl_text = f"Phase 2 SL: {config.POST_CANCEL_STOP_LOSS_PERCENT}%"
+            cancel_text = f"🛡️ Cancellation: {config.CANCELLATION_DURATION}s\n"
+        else:
+            tp_text = f"🎯 Take Profit: {config.TAKE_PROFIT_PERCENT}%"
+            sl_text = f"🛑 Stop Loss: {config.STOP_LOSS_PERCENT}%"
+            cancel_text = ""
+        
         message = (
             "🤖 <b>Trading Bot Started</b>\n\n"
             f"💰 Balance: {format_currency(balance)}\n"
             f"📊 Symbol: {config.SYMBOL}\n"
             f"📈 Multiplier: {config.MULTIPLIER}x\n"
             f"💵 Stake: {format_currency(config.FIXED_STAKE)}\n"
-            f"🎯 Take Profit: {config.TAKE_PROFIT_PERCENT}%\n"
-            f"🛑 Stop Loss: {config.STOP_LOSS_PERCENT}%\n"
+            f"{cancel_text}"
+            f"{tp_text}\n"
+            f"{sl_text}\n"
             f"🔢 Max Daily Trades: {config.MAX_TRADES_PER_DAY}\n\n"
             f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         )
@@ -80,7 +102,7 @@ class TelegramNotifier:
     
     async def notify_signal(self, signal: Dict):
         """Notify about trading signal"""
-        direction = signal['signal']
+        direction = signal.get('signal', 'UNKNOWN')
         score = signal.get('score', 0)
         details = signal.get('details', {})
         
@@ -89,13 +111,19 @@ class TelegramNotifier:
         
         emoji = "🟢" if direction == "BUY" else "🔴"
         
+        # Safely get values with defaults
+        rsi = details.get('rsi', 0)
+        adx = details.get('adx', 0)
+        atr_1m = details.get('atr_1m', 0)
+        atr_5m = details.get('atr_5m', 0)
+        
         message = (
             f"{emoji} <b>{direction} SIGNAL DETECTED</b>\n\n"
             f"📊 Score: {score}/{config.MINIMUM_SIGNAL_SCORE}\n"
-            f"📈 RSI: {details.get('rsi', 0):.2f}\n"
-            f"💪 ADX: {details.get('adx', 0):.2f}\n"
-            f"📉 ATR 1m: {details.get('atr_1m', 0):.4f}\n"
-            f"📉 ATR 5m: {details.get('atr_5m', 0):.4f}\n\n"
+            f"📈 RSI: {rsi:.2f}\n"
+            f"💪 ADX: {adx:.2f}\n"
+            f"📉 ATR 1m: {atr_1m:.4f}\n"
+            f"📉 ATR 5m: {atr_5m:.4f}\n\n"
             f"⏰ {datetime.now().strftime('%H:%M:%S')}"
         )
         await self.send_message(message)
@@ -105,17 +133,45 @@ class TelegramNotifier:
         direction = trade_info.get('direction', 'UNKNOWN')
         emoji = "🟢" if direction == "BUY" else "🔴"
         
+        # Check if cancellation is enabled
+        cancellation_enabled = trade_info.get('cancellation_enabled', False)
+        
         message = (
             f"{emoji} <b>TRADE OPENED</b>\n\n"
             f"📍 Direction: <b>{direction}</b>\n"
             f"💰 Stake: {format_currency(trade_info.get('stake', 0))}\n"
             f"📈 Entry Price: {trade_info.get('entry_price', 0):.2f}\n"
-            f"🎯 Take Profit: {format_currency(trade_info.get('take_profit', 0))}\n"
-            f"🛑 Stop Loss: {format_currency(trade_info.get('stop_loss', 0))}\n"
             f"📊 Multiplier: {trade_info.get('multiplier', 0)}x\n"
-            f"🔑 Contract ID: <code>{trade_info.get('contract_id', 'N/A')}</code>\n\n"
+        )
+        
+        # Add cancellation info or TP/SL based on mode
+        if cancellation_enabled:
+            cancel_fee = trade_info.get('cancellation_fee', config.CANCELLATION_FEE)
+            cancel_expiry = trade_info.get('cancellation_expiry')
+            
+            message += (
+                f"\n🛡️ <b>Phase 1: Cancellation Active</b>\n"
+                f"⏱️ Duration: {config.CANCELLATION_DURATION}s\n"
+                f"💰 Cancel Fee: {format_currency(cancel_fee)}\n"
+            )
+            
+            if cancel_expiry:
+                message += f"⏰ Expires: {cancel_expiry.strftime('%H:%M:%S')}\n"
+        else:
+            # Legacy mode with immediate TP/SL
+            tp = trade_info.get('take_profit')
+            sl = trade_info.get('stop_loss')
+            
+            if tp is not None:
+                message += f"🎯 Take Profit: {format_currency(tp)}\n"
+            if sl is not None:
+                message += f"🛑 Stop Loss: {format_currency(sl)}\n"
+        
+        message += (
+            f"\n🔑 Contract ID: <code>{trade_info.get('contract_id', 'N/A')}</code>\n"
             f"⏰ {datetime.now().strftime('%H:%M:%S')}"
         )
+        
         await self.send_message(message)
     
     async def notify_trade_closed(self, result: Dict, trade_info: Dict):
@@ -136,8 +192,10 @@ class TelegramNotifier:
         
         direction = trade_info.get('direction', 'UNKNOWN')
         entry_price = trade_info.get('entry_price', 0)
-        current_price = result.get('current_price', 0)
-        price_change = current_price - entry_price
+        current_price = result.get('current_price', entry_price)
+        
+        # Safely calculate price change
+        price_change = current_price - entry_price if current_price and entry_price else 0
         price_change_pct = (price_change / entry_price * 100) if entry_price > 0 else 0
         
         message = (
@@ -172,9 +230,18 @@ class TelegramNotifier:
             f"🎯 Win Rate: {win_rate:.1f}%\n"
             f"💰 Total P&L: <b>{format_currency(total_pnl)}</b>\n"
             f"📊 Today's Trades: {stats.get('trades_today', 0)}/{config.MAX_TRADES_PER_DAY}\n"
-            f"💵 Daily P&L: {format_currency(stats.get('daily_pnl', 0))}\n\n"
-            f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            f"💵 Daily P&L: {format_currency(stats.get('daily_pnl', 0))}\n"
         )
+        
+        # Add cancellation stats if enabled
+        if config.ENABLE_CANCELLATION:
+            message += (
+                f"\n🛡️ Cancelled: {stats.get('trades_cancelled', 0)}\n"
+                f"✅ Committed: {stats.get('trades_committed', 0)}\n"
+            )
+        
+        message += f"\n⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        
         await self.send_message(message)
     
     async def notify_error(self, error_msg: str):
@@ -215,9 +282,18 @@ class TelegramNotifier:
             f"📈 Total Trades: {stats.get('total_trades', 0)}\n"
             f"✅ Wins: {stats.get('winning_trades', 0)}\n"
             f"❌ Losses: {stats.get('losing_trades', 0)}\n"
-            f"🎯 Win Rate: {stats.get('win_rate', 0):.1f}%\n\n"
-            f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            f"🎯 Win Rate: {stats.get('win_rate', 0):.1f}%\n"
         )
+        
+        # Add cancellation stats if enabled
+        if config.ENABLE_CANCELLATION:
+            message += (
+                f"\n🛡️ Cancelled: {stats.get('trades_cancelled', 0)}\n"
+                f"✅ Committed: {stats.get('trades_committed', 0)}\n"
+            )
+        
+        message += f"\n⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        
         await self.send_message(message)
 
 # Create global instance
