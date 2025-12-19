@@ -1,6 +1,7 @@
 # 🤖 Deriv R_25 Trading Bot
 
 **Automated trading bot for Deriv's R_25 synthetic index with FastAPI REST API, real-time WebSocket monitoring, and Telegram notifications.**
+https://r-25v1.onrender.com/docs/
 
 ---
 
