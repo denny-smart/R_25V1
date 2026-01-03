@@ -1,7 +1,7 @@
 """
 Main Controller for Deriv R_25 Multipliers Trading Bot
 Coordinates all components and runs the trading loop
-main.py - COMPLETE FIXED VERSION WITH DYNAMIC CANCELLATION
+main.py - WITH TOP-DOWN MULTI-TIMEFRAME STRATEGY SUPPORT
 """
 
 import asyncio
@@ -101,19 +101,30 @@ class TradingBot:
             
             # Log trading parameters
             logger.info("="*60)
-            logger.info("TRADING PARAMETERS - TWO-PHASE SYSTEM")
+            
+            # Check which strategy is active
+            strategy_mode = "TOP-DOWN MULTI-TIMEFRAME" if config.USE_TOPDOWN_STRATEGY else "TWO-PHASE SCALPING"
+            logger.info(f"TRADING PARAMETERS - {strategy_mode}")
             logger.info("="*60)
             logger.info(f"📊 Symbol: {config.SYMBOL}")
             logger.info(f"📈 Multiplier: {config.MULTIPLIER}x")
             logger.info(f"💵 Stake: {format_currency(config.FIXED_STAKE)}")
             
-            if config.ENABLE_CANCELLATION:
-                logger.info(f"🛡️ Cancellation: ENABLED ({config.CANCELLATION_DURATION}s)")
-                logger.info(f"   Phase 2 TP: {config.POST_CANCEL_TAKE_PROFIT_PERCENT}%")
-                logger.info(f"   Phase 2 SL: {config.POST_CANCEL_STOP_LOSS_PERCENT}%")
+            if config.USE_TOPDOWN_STRATEGY:
+                # Top-Down strategy parameters
+                logger.info(f"🎯 Strategy: Top-Down Multi-Timeframe Analysis")
+                logger.info(f"📊 Timeframes: 1w, 1d, 4h, 1h, 5m, 1m")
+                logger.info(f"📈 Min R:R Ratio: 1:{config.TOPDOWN_MIN_RR_RATIO}")
+                logger.info(f"🎯 Dynamic TP/SL: Based on market structure")
             else:
-                logger.info(f"🎯 Take Profit: {config.TAKE_PROFIT_PERCENT}%")
-                logger.info(f"🛑 Stop Loss: {config.STOP_LOSS_PERCENT}%")
+                # Legacy scalping parameters
+                if config.ENABLE_CANCELLATION:
+                    logger.info(f"🛡️ Cancellation: ENABLED ({config.CANCELLATION_DURATION}s)")
+                    logger.info(f"   Phase 2 TP: {config.POST_CANCEL_TAKE_PROFIT_PERCENT}%")
+                    logger.info(f"   Phase 2 SL: {config.POST_CANCEL_STOP_LOSS_PERCENT}%")
+                else:
+                    logger.info(f"🎯 Take Profit: {config.TAKE_PROFIT_PERCENT}%")
+                    logger.info(f"🛑 Stop Loss: {config.STOP_LOSS_PERCENT}%")
             
             logger.info(f"⏰ Cooldown: {config.COOLDOWN_SECONDS}s")
             logger.info(f"🔢 Max Daily Trades: {config.MAX_TRADES_PER_DAY}")
@@ -170,22 +181,54 @@ class TradingBot:
                 logger.debug(f"⏸️ Cannot trade: {reason}")
                 return
             
-            # Fetch market data
+            # ============================================================================
+            # FETCH MARKET DATA - Multi-timeframe for Top-Down or legacy for scalping
+            # ============================================================================
+            
             logger.info("📊 Fetching market data...")
-            market_data = await self.data_fetcher.fetch_multi_timeframe_data(config.SYMBOL)
             
-            if '1m' not in market_data or '5m' not in market_data:
-                logger.warning("⚠️ Failed to fetch complete market data")
-                return
+            if config.USE_TOPDOWN_STRATEGY:
+                # Fetch all timeframes for Top-Down analysis
+                all_timeframes = await self.data_fetcher.fetch_all_timeframes(config.SYMBOL)
+                
+                if not all_timeframes:
+                    logger.warning("⚠️ Failed to fetch any market data")
+                    return
+                
+                # Log what we got
+                fetched_tfs = list(all_timeframes.keys())
+                logger.info(f"✅ Fetched timeframes: {', '.join(fetched_tfs)}")
+                
+                # Analyze with all available timeframes
+                logger.info("🔍 Analyzing market structure (Top-Down)...")
+                signal = self.strategy.analyze(
+                    data_1m=all_timeframes.get('1m'),
+                    data_5m=all_timeframes.get('5m'),
+                    data_1h=all_timeframes.get('1h'),
+                    data_4h=all_timeframes.get('4h'),
+                    data_1d=all_timeframes.get('1d'),
+                    data_1w=all_timeframes.get('1w')
+                )
+            else:
+                # Legacy: Use old 1m+5m only for scalping strategy
+                market_data = await self.data_fetcher.fetch_multi_timeframe_data(config.SYMBOL)
+                
+                if '1m' not in market_data or '5m' not in market_data:
+                    logger.warning("⚠️ Failed to fetch complete market data")
+                    return
+                
+                data_1m = market_data['1m']
+                data_5m = market_data['5m']
+                
+                logger.info(f"✅ Fetched {len(data_1m)} 1m candles, {len(data_5m)} 5m candles")
+                
+                # Analyze market (old way)
+                logger.info("🔍 Analyzing market conditions...")
+                signal = self.strategy.analyze(data_1m, data_5m)
             
-            data_1m = market_data['1m']
-            data_5m = market_data['5m']
-            
-            logger.info(f"✅ Fetched {len(data_1m)} 1m candles, {len(data_5m)} 5m candles")
-            
-            # Analyze market
-            logger.info("🔍 Analyzing market conditions...")
-            signal = self.strategy.analyze(data_1m, data_5m)
+            # ============================================================================
+            # CHECK SIGNAL
+            # ============================================================================
             
             if not signal['can_trade']:
                 logger.info(f"⚪ HOLD | Reason: {signal['details'].get('reason', 'Unknown')}")
@@ -198,19 +241,53 @@ class TradingBot:
                 except Exception as e:
                     logger.error(f"❌ Telegram notification failed: {e}")
             
-            # ✅ FIXED: Validate only stake (TP/SL are calculated automatically)
-            valid, msg = self.risk_manager.validate_trade_parameters(
-                stake=config.FIXED_STAKE
-                # TP/SL not needed - handled automatically by trade_engine
-            )
+            # ============================================================================
+            # VALIDATE TRADE PARAMETERS
+            # ============================================================================
+            
+            if config.USE_TOPDOWN_STRATEGY:
+                # Top-Down: TP/SL come from strategy (price levels)
+                tp_price = signal.get('take_profit')
+                sl_price = signal.get('stop_loss')
+                
+                if not tp_price or not sl_price:
+                    logger.warning("⚠️ Strategy did not provide TP/SL levels")
+                    return
+                
+                # Validate risk/reward ratio
+                entry_price = signal.get('entry_price', 0)
+                if entry_price > 0:
+                    rr_ratio = signal.get('risk_reward_ratio', 0)
+                    if rr_ratio < config.TOPDOWN_MIN_RR_RATIO:
+                        logger.warning(f"⚠️ R:R ratio {rr_ratio:.2f} below minimum {config.TOPDOWN_MIN_RR_RATIO}")
+                        return
+                
+                valid = True
+                msg = "Top-Down parameters validated"
+            else:
+                # Legacy: Validate only stake (TP/SL calculated by trade_engine)
+                valid, msg = self.risk_manager.validate_trade_parameters(
+                    stake=config.FIXED_STAKE
+                )
             
             if not valid:
                 logger.warning(f"⚠️ Invalid trade parameters: {msg}")
                 return
             
-            # Execute trade using the integrated execute_trade method
+            # ============================================================================
+            # EXECUTE TRADE
+            # ============================================================================
+            
             logger.info(f"🚀 Executing {signal['signal']} trade...")
             
+            # Log trade details if using Top-Down
+            if config.USE_TOPDOWN_STRATEGY:
+                logger.info(f"   📍 Entry: {signal.get('entry_price', 0):.4f}")
+                logger.info(f"   🎯 TP: {signal.get('take_profit', 0):.4f}")
+                logger.info(f"   🛡️ SL: {signal.get('stop_loss', 0):.4f}")
+                logger.info(f"   📊 R:R: 1:{signal.get('risk_reward_ratio', 0):.2f}")
+            
+            # Execute trade with full two-phase monitoring
             # This single method call handles:
             # 1. Opening the trade (with dynamic cancellation fee)
             # 2. Recording it with risk manager
@@ -238,7 +315,7 @@ class TradingBot:
                 logger.info(f"💰 Total P&L: {format_currency(stats['total_pnl'])}")
                 logger.info(f"📊 Trades Today: {stats['trades_today']}/{config.MAX_TRADES_PER_DAY}")
                 
-                if config.ENABLE_CANCELLATION:
+                if config.ENABLE_CANCELLATION and not config.USE_TOPDOWN_STRATEGY:
                     logger.info(f"🛡️ Cancelled: {stats.get('trades_cancelled', 0)}")
                     logger.info(f"✅ Committed: {stats.get('trades_committed', 0)}")
                 
@@ -326,15 +403,22 @@ class TradingBot:
 def main():
     """Entry point"""
     try:
+        # Determine strategy mode
+        strategy_name = "Top-Down Multi-Timeframe" if config.USE_TOPDOWN_STRATEGY else "Two-Phase Scalping"
+        
         # Print welcome banner
         print("\n" + "="*60)
         print("   DERIV R_25 MULTIPLIERS TRADING BOT")
-        print("   WITH DYNAMIC CANCELLATION FEE")
+        print(f"   {strategy_name.upper()}")
         print("="*60)
-        print(f"   Version: 2.0 (Two-Phase Risk)")
+        print(f"   Version: 2.1 (Multi-Strategy)")
         print(f"   Symbol: {config.SYMBOL}")
         print(f"   Multiplier: {config.MULTIPLIER}x")
-        print(f"   Cancellation: {'Enabled' if config.ENABLE_CANCELLATION else 'Disabled'}")
+        print(f"   Strategy: {strategy_name}")
+        if config.USE_TOPDOWN_STRATEGY:
+            print(f"   Min R:R: 1:{config.TOPDOWN_MIN_RR_RATIO}")
+        else:
+            print(f"   Cancellation: {'Enabled' if config.ENABLE_CANCELLATION else 'Disabled'}")
         print("="*60 + "\n")
         
         # Create and run bot

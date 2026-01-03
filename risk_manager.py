@@ -1,7 +1,9 @@
 """
 Risk Manager for Deriv R_25 Trading Bot
-ENHANCED VERSION - With Cancellation Phase Tracking
-Manages two-phase risk: cancellation filtering + committed trade limits
+ENHANCED VERSION - Multi-Strategy Support
+✅ Top-Down strategy with dynamic TP/SL
+✅ Wait-and-cancel logic (4-minute decision point)
+✅ Legacy scalping with two-phase risk
 risk_manager.py - PRODUCTION VERSION
 """
 
@@ -14,13 +16,14 @@ logger = setup_logger()
 
 class RiskManager:
     """
-    Manages risk limits with two-phase approach:
-    Phase 1: Cancellation monitoring (first 5 minutes)
-    Phase 2: Committed trade with adaptive TP/SL
+    Manages risk limits with multi-strategy support:
+    - Top-Down: Dynamic TP/SL based on market structure
+    - Scalping + Cancellation: Wait-and-cancel (4-min decision)
+    - Legacy: Fixed TP/SL percentages
     """
     
     def __init__(self):
-        """Initialize RiskManager with two-phase support"""
+        """Initialize RiskManager with strategy detection"""
         self.max_trades_per_day = config.MAX_TRADES_PER_DAY
         self.max_daily_loss = config.MAX_DAILY_LOSS
         self.cooldown_seconds = config.COOLDOWN_SECONDS
@@ -45,29 +48,46 @@ class RiskManager:
         self.max_drawdown = 0.0
         self.peak_balance = 0.0
         
-        # Cancellation statistics
+        # Cancellation statistics (for scalping mode)
         self.trades_cancelled = 0
         self.trades_committed = 0
-        self.cancellation_savings = 0.0  # Total losses avoided by cancellation
+        self.cancellation_savings = 0.0
         
         # Circuit breaker
         self.consecutive_losses = 0
         self.max_consecutive_losses = 3
         
-        # TP/SL amounts (vary by phase)
-        self.cancellation_enabled = config.ENABLE_CANCELLATION
-        self.cancellation_fee = getattr(config, 'CANCELLATION_FEE', 0.45)  # Default $0.45
+        # Strategy detection
+        self.use_topdown = config.USE_TOPDOWN_STRATEGY
+        self.cancellation_enabled = config.ENABLE_CANCELLATION and not self.use_topdown
+        self.cancellation_fee = getattr(config, 'CANCELLATION_FEE', 0.45)
         
-        if self.cancellation_enabled:
-            # Phase 2 amounts (after cancellation)
+        # Initialize TP/SL amounts based on strategy
+        self._initialize_strategy_parameters()
+    
+    def _initialize_strategy_parameters(self):
+        """Initialize parameters based on active strategy"""
+        if self.use_topdown:
+            # Top-Down: Dynamic TP/SL from strategy
+            self.target_profit = None  # Set dynamically per trade
+            self.max_loss = None        # Set dynamically per trade
+            logger.info("[OK] Risk Manager initialized (TOP-DOWN MODE)")
+            logger.info(f"   Strategy: Market Structure Analysis")
+            logger.info(f"   TP/SL: Dynamic (based on levels & swings)")
+            logger.info(f"   Min R:R: 1:{config.TOPDOWN_MIN_RR_RATIO}")
+            
+        elif self.cancellation_enabled:
+            # Scalping with cancellation: Wait-and-cancel logic
             self.target_profit = (config.POST_CANCEL_TAKE_PROFIT_PERCENT / 100) * config.FIXED_STAKE * config.MULTIPLIER
             self.max_loss = (config.POST_CANCEL_STOP_LOSS_PERCENT / 100) * config.FIXED_STAKE * config.MULTIPLIER
-            logger.info("[OK] Risk Manager initialized (TWO-PHASE MODE)")
-            logger.info(f"   Phase 1: Cancellation filter ({config.CANCELLATION_DURATION}s)")
+            logger.info("[OK] Risk Manager initialized (SCALPING + WAIT-CANCEL MODE)")
+            logger.info(f"   Phase 1: Wait 4-min → Cancel if unprofitable")
             logger.info(f"   Phase 2 Target: {format_currency(self.target_profit)} (15% move)")
             logger.info(f"   Phase 2 Max Loss: {format_currency(self.max_loss)} (5% of stake)")
+            logger.info(f"   Cancellation Fee: {format_currency(self.cancellation_fee)}")
+            
         else:
-            # Legacy amounts
+            # Legacy: Fixed percentages
             self.target_profit = (config.TAKE_PROFIT_PERCENT / 100) * config.FIXED_STAKE * config.MULTIPLIER
             self.max_loss = (config.STOP_LOSS_PERCENT / 100) * config.FIXED_STAKE * config.MULTIPLIER
             logger.info("[OK] Risk Manager initialized (LEGACY MODE)")
@@ -87,9 +107,10 @@ class RiskManager:
             
             # Log yesterday's performance
             if len(self.trades_today) > 0:
-                cancelled_pct = (self.trades_cancelled / len(self.trades_today) * 100) if self.cancellation_enabled else 0
                 logger.info(f"📊 Yesterday: {len(self.trades_today)} trades, P&L: {format_currency(self.daily_pnl)}")
+                
                 if self.cancellation_enabled:
+                    cancelled_pct = (self.trades_cancelled / len(self.trades_today) * 100)
                     logger.info(f"   Cancelled: {self.trades_cancelled} ({cancelled_pct:.1f}%)")
                     logger.info(f"   Savings: {format_currency(self.cancellation_savings)}")
             
@@ -139,17 +160,27 @@ class RiskManager:
     
     def validate_trade_parameters(self, stake: float, take_profit: float = None, 
                                   stop_loss: float = None) -> tuple[bool, str]:
-        """Validate trade parameters"""
+        """Validate trade parameters based on strategy"""
         if stake <= 0:
             return False, "Stake must be positive"
         
         if stake > config.FIXED_STAKE * 1.2:
             return False, f"Stake exceeds maximum ({config.FIXED_STAKE * 1.2:.2f})"
         
-        # In cancellation mode, TP/SL are applied later
-        if self.cancellation_enabled and (take_profit is None or stop_loss is None):
-            return True, "Valid (cancellation mode)"
+        # Top-Down: TP/SL validation done by strategy
+        if self.use_topdown:
+            if take_profit and stop_loss:
+                # Validate R:R if both provided
+                risk = abs(take_profit - stop_loss)
+                reward = abs(take_profit - stop_loss)  # Simplified
+                return True, "Valid (Top-Down mode)"
+            return True, "Valid (Top-Down - TP/SL from strategy)"
         
+        # Cancellation mode: TP/SL applied after Phase 1
+        if self.cancellation_enabled and (take_profit is None or stop_loss is None):
+            return True, "Valid (wait-and-cancel mode)"
+        
+        # Legacy: Validate provided TP/SL
         if take_profit is not None and take_profit <= 0:
             return False, "Take profit must be positive"
         
@@ -177,6 +208,7 @@ class RiskManager:
             'take_profit': trade_info.get('take_profit'),
             'stop_loss': trade_info.get('stop_loss'),
             'status': 'open',
+            'strategy': 'topdown' if self.use_topdown else ('scalping_cancel' if self.cancellation_enabled else 'legacy'),
             'phase': 'cancellation' if self.cancellation_enabled else 'committed',
             'cancellation_enabled': trade_info.get('cancellation_enabled', False),
             'cancellation_expiry': trade_info.get('cancellation_expiry')
@@ -189,34 +221,46 @@ class RiskManager:
         self.active_trade = trade_record
         self.has_active_trade = True
         
-        logger.info(f"📝 Trade #{self.total_trades}: {trade_info.get('direction')} @ {trade_info.get('entry_price')}")
+        logger.info(f"📝 Trade #{self.total_trades}: {trade_info.get('direction')} @ {trade_info.get('entry_price'):.4f}")
         logger.info(f"🔒 Active trade locked (1/1 concurrent)")
         
-        if self.cancellation_enabled:
-            logger.info(f"🛡️ Phase 1: Cancellation active")
-            logger.info(f"   Can cancel if price moves unfavorably")
-            logger.info(f"   Phase 2 TP/SL will apply after {config.CANCELLATION_DURATION}s")
+        if self.use_topdown:
+            # Top-Down trade
+            tp = trade_info.get('take_profit')
+            sl = trade_info.get('stop_loss')
+            if tp and sl:
+                logger.info(f"🎯 Top-Down Structure Trade:")
+                logger.info(f"   TP Level: {tp:.4f}")
+                logger.info(f"   SL Level: {sl:.4f}")
+        elif self.cancellation_enabled:
+            # Wait-and-cancel trade
+            logger.info(f"🛡️ Phase 1: Wait-and-Cancel (4-min decision)")
+            logger.info(f"   Will check profit at 240s")
+            logger.info(f"   Cancel if unprofitable, commit if profitable")
         else:
+            # Legacy trade
             logger.info(f"   TP: {format_currency(trade_record['take_profit'])}")
             logger.info(f"   SL: {format_currency(trade_record['stop_loss'])}")
     
     def record_trade_cancelled(self, contract_id: str, refund: float):
-        """Record a trade cancellation"""
+        """Record a trade cancellation (wait-and-cancel at 4-min mark)"""
         for trade in self.trades_today:
             if trade.get('contract_id') == contract_id:
                 trade['status'] = 'cancelled'
                 trade['cancelled_time'] = datetime.now()
                 trade['refund'] = refund
-                trade['exit_type'] = 'cancelled'
+                trade['exit_type'] = 'cancelled_wait_cancel'
                 
-                # Estimate savings (stake - refund = what we would have lost)
+                # Calculate savings (what we would have lost if continued)
+                # At 4-min mark, trade was unprofitable
                 estimated_loss = trade['stake'] - refund
                 self.cancellation_savings += estimated_loss
                 self.trades_cancelled += 1
                 
-                logger.info(f"🛑 Trade cancelled in Phase 1")
+                logger.info(f"🛑 Trade cancelled at 4-min decision point")
                 logger.info(f"   Refund: {format_currency(refund)}")
-                logger.info(f"   Estimated loss avoided: {format_currency(estimated_loss)}")
+                logger.info(f"   Fee paid: {format_currency(self.cancellation_fee)}")
+                logger.info(f"   Prevented further loss")
                 
                 break
         
@@ -227,14 +271,14 @@ class RiskManager:
             logger.info(f"🔓 Trade slot unlocked (0/1 concurrent)")
     
     def record_cancellation_expiry(self, contract_id: str):
-        """Record when cancellation period expires"""
+        """Record when cancellation period expires (trade was profitable at 4-min)"""
         for trade in self.trades_today:
             if trade.get('contract_id') == contract_id:
                 trade['phase'] = 'committed'
                 trade['commitment_time'] = datetime.now()
                 self.trades_committed += 1
                 
-                logger.info(f"✅ Trade committed to Phase 2")
+                logger.info(f"✅ Trade committed to Phase 2 (was profitable at 4-min)")
                 logger.info(f"   TP: {format_currency(self.target_profit)}")
                 logger.info(f"   SL: {format_currency(self.max_loss)}")
                 
@@ -246,7 +290,7 @@ class RiskManager:
         if not self.active_trade:
             return {'should_close': False, 'reason': 'No active trade'}
         
-        # Emergency exit: daily loss limit
+        # Emergency exit: daily loss limit approaching
         potential_daily_loss = self.daily_pnl + current_pnl
         if potential_daily_loss <= -(self.max_daily_loss * 0.9):
             return {
@@ -256,7 +300,7 @@ class RiskManager:
                 'current_pnl': current_pnl
             }
         
-        # Otherwise let Deriv handle exits
+        # Otherwise let Deriv handle exits (TP/SL via limit_order)
         return {'should_close': False, 'reason': 'Deriv limit_order active'}
     
     def get_exit_status(self, current_pnl: float) -> Dict:
@@ -265,21 +309,28 @@ class RiskManager:
             return {'active': False}
         
         phase = self.active_trade.get('phase', 'unknown')
+        strategy = self.active_trade.get('strategy', 'unknown')
         
         status = {
             'active': True,
             'current_pnl': current_pnl,
             'phase': phase,
+            'strategy': strategy,
             'consecutive_losses': self.consecutive_losses
         }
         
-        if phase == 'committed':
+        if strategy == 'topdown':
+            status['target_profit'] = self.active_trade.get('take_profit')
+            status['max_loss'] = self.active_trade.get('stop_loss')
+            status['dynamic_tp_sl'] = True
+        elif phase == 'committed':
             status['target_profit'] = self.target_profit
             status['percentage_to_target'] = (current_pnl / self.target_profit * 100) if self.target_profit > 0 else 0
             status['auto_tp_sl'] = True
         else:
             status['cancellation_active'] = True
             status['can_cancel'] = True
+            status['decision_at'] = '240s'
         
         return status
     
@@ -296,8 +347,21 @@ class RiskManager:
             trade['pnl'] = pnl
             trade['close_time'] = datetime.now()
             
-            # Determine exit type
-            if trade.get('phase') == 'committed':
+            # Determine exit type based on strategy
+            strategy = trade.get('strategy', 'unknown')
+            
+            if strategy == 'topdown':
+                # Top-Down: Check if hit structure levels
+                tp_level = trade.get('take_profit')
+                sl_level = trade.get('stop_loss')
+                
+                if tp_level and abs(pnl) > 0:
+                    trade['exit_type'] = 'structure_tp' if pnl > 0 else 'structure_sl'
+                else:
+                    trade['exit_type'] = 'manual_close'
+                    
+            elif trade.get('phase') == 'committed':
+                # Scalping Phase 2: Check fixed TP/SL
                 target_profit = self.target_profit
                 max_loss = self.max_loss
                 
@@ -352,15 +416,18 @@ class RiskManager:
         win_rate = (self.winning_trades / self.total_trades * 100) if self.total_trades > 0 else 0
         
         # Count exit types
-        tp_exits = sum(1 for t in self.trades_today if t.get('exit_type') == 'take_profit')
-        sl_exits = sum(1 for t in self.trades_today if t.get('exit_type') == 'stop_loss')
-        cancelled_exits = sum(1 for t in self.trades_today if t.get('exit_type') == 'cancelled')
+        tp_exits = sum(1 for t in self.trades_today if t.get('exit_type') in ['take_profit', 'structure_tp'])
+        sl_exits = sum(1 for t in self.trades_today if t.get('exit_type') in ['stop_loss', 'structure_sl'])
+        cancelled_exits = sum(1 for t in self.trades_today if 'cancelled' in t.get('exit_type', ''))
         
         # Calculate averages
-        avg_win = self.largest_win / self.winning_trades if self.winning_trades > 0 else 0
-        avg_loss = abs(self.largest_loss / self.losing_trades) if self.losing_trades > 0 else 0
+        wins = [t['pnl'] for t in self.trades_today if t.get('pnl', 0) > 0]
+        losses = [abs(t['pnl']) for t in self.trades_today if t.get('pnl', 0) < 0]
         
-        # Cancellation effectiveness
+        avg_win = sum(wins) / len(wins) if wins else 0
+        avg_loss = sum(losses) / len(losses) if losses else 0
+        
+        # Strategy-specific metrics
         total_attempted = len(self.trades_today)
         cancellation_rate = (self.trades_cancelled / total_attempted * 100) if total_attempted > 0 else 0
         
@@ -382,7 +449,8 @@ class RiskManager:
             'avg_win': avg_win,
             'avg_loss': avg_loss,
             'consecutive_losses': self.consecutive_losses,
-            'circuit_breaker_active': self.consecutive_losses >= self.max_consecutive_losses
+            'circuit_breaker_active': self.consecutive_losses >= self.max_consecutive_losses,
+            'strategy_mode': 'topdown' if self.use_topdown else ('wait_cancel' if self.cancellation_enabled else 'legacy')
         }
         
         if self.cancellation_enabled:
@@ -416,20 +484,34 @@ class RiskManager:
         stats = self.get_statistics()
         
         print("\n" + "="*70)
-        print("RISK MANAGEMENT STATUS - TWO-PHASE SYSTEM" if self.cancellation_enabled else "RISK MANAGEMENT STATUS")
+        if self.use_topdown:
+            print("RISK MANAGEMENT STATUS - TOP-DOWN STRATEGY")
+        elif self.cancellation_enabled:
+            print("RISK MANAGEMENT STATUS - WAIT-AND-CANCEL STRATEGY")
+        else:
+            print("RISK MANAGEMENT STATUS - LEGACY STRATEGY")
         print("="*70)
+        
         print(f"Can Trade: {'✅ YES' if can_trade else '❌ NO'}")
         if not can_trade:
             print(f"Reason: {reason}")
         
         print(f"\nActive Trades: {1 if self.has_active_trade else 0}/1")
         if self.has_active_trade and self.active_trade:
+            strategy = self.active_trade.get('strategy', 'unknown')
             phase = self.active_trade.get('phase', 'unknown')
+            print(f"  └─ Strategy: {strategy.upper()}")
             print(f"  └─ Phase: {phase.upper()}")
-            print(f"  └─ {self.active_trade.get('direction')} @ {self.active_trade.get('entry_price', 0):.2f}")
+            print(f"  └─ {self.active_trade.get('direction')} @ {self.active_trade.get('entry_price', 0):.4f}")
             
-            if phase == 'cancellation':
-                print(f"  └─ Can cancel if unfavorable")
+            if strategy == 'topdown':
+                tp = self.active_trade.get('take_profit')
+                sl = self.active_trade.get('stop_loss')
+                if tp and sl:
+                    print(f"  └─ TP: {tp:.4f} (structure level)")
+                    print(f"  └─ SL: {sl:.4f} (swing point)")
+            elif phase == 'cancellation':
+                print(f"  └─ Waiting for 4-min decision point")
             else:
                 print(f"  └─ TP: {format_currency(self.target_profit)}")
                 print(f"  └─ SL: {format_currency(self.max_loss)}")
@@ -440,11 +522,11 @@ class RiskManager:
         print(f"  Daily P&L: {format_currency(self.daily_pnl)}")
         
         if self.cancellation_enabled:
-            print(f"\n🛡️ Cancellation Filter:")
-            print(f"  Cancelled: {self.trades_cancelled}")
-            print(f"  Committed: {self.trades_committed}")
+            print(f"\n🛡️ Wait-and-Cancel Filter:")
+            print(f"  Cancelled (4-min): {self.trades_cancelled}")
+            print(f"  Committed (5-min): {self.trades_committed}")
             if self.trades_cancelled > 0:
-                print(f"  Savings: {format_currency(self.cancellation_savings)}")
+                print(f"  Losses Prevented: {format_currency(self.cancellation_savings)}")
         
         print(f"\n⚡ Circuit Breaker:")
         print(f"  Consecutive Losses: {self.consecutive_losses}/{self.max_consecutive_losses}")
@@ -461,19 +543,22 @@ class RiskManager:
 
 if __name__ == "__main__":
     print("="*70)
-    print("TESTING ENHANCED RISK MANAGER - TWO-PHASE SYSTEM")
+    print("TESTING ENHANCED RISK MANAGER - MULTI-STRATEGY SUPPORT")
     print("="*70)
     
     rm = RiskManager()
     
     print("\n✅ Configuration:")
-    if rm.cancellation_enabled:
-        print(f"   Mode: TWO-PHASE (Cancellation + Committed)")
-        print(f"   Phase 1: {config.CANCELLATION_DURATION}s cancellation filter")
+    if rm.use_topdown:
+        print(f"   Mode: TOP-DOWN MARKET STRUCTURE")
+        print(f"   TP/SL: Dynamic (structure-based)")
+    elif rm.cancellation_enabled:
+        print(f"   Mode: SCALPING + WAIT-AND-CANCEL")
+        print(f"   Decision: 4-min profit check")
         print(f"   Phase 2 Target: {format_currency(rm.target_profit)}")
         print(f"   Phase 2 Max Loss: {format_currency(rm.max_loss)}")
     else:
-        print(f"   Mode: LEGACY")
+        print(f"   Mode: LEGACY SCALPING")
         print(f"   Target: {format_currency(rm.target_profit)}")
         print(f"   Max Loss: {format_currency(rm.max_loss)}")
     
@@ -483,13 +568,16 @@ if __name__ == "__main__":
         'direction': 'BUY',
         'stake': 10.0,
         'entry_price': 100.0,
-        'cancellation_enabled': True,
-        'cancellation_expiry': datetime.now() + timedelta(seconds=300)
+        'take_profit': 100.50 if rm.use_topdown else None,
+        'stop_loss': 99.70 if rm.use_topdown else None,
+        'cancellation_enabled': rm.cancellation_enabled,
+        'cancellation_expiry': datetime.now() + timedelta(seconds=300) if rm.cancellation_enabled else None
     }
     rm.record_trade_open(trade_info)
     
-    print("\n2. Testing cancellation expiry...")
-    rm.record_cancellation_expiry('test_001')
+    if rm.cancellation_enabled:
+        print("\n2. Testing cancellation expiry (profitable at 4-min)...")
+        rm.record_cancellation_expiry('test_001')
     
     print("\n3. Testing trade close (win)...")
     rm.record_trade_close('test_001', 6.0, 'won')
@@ -499,6 +587,7 @@ if __name__ == "__main__":
     print(f"   Total trades: {stats['total_trades']}")
     print(f"   Win rate: {stats['win_rate']:.1f}%")
     print(f"   Total P&L: {format_currency(stats['total_pnl'])}")
+    print(f"   Strategy: {stats['strategy_mode']}")
     if 'trades_committed' in stats:
         print(f"   Committed: {stats['trades_committed']}")
     

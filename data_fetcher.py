@@ -1,7 +1,7 @@
 """
 Data Fetcher for Deriv R_25 Trading Bot
 Asynchronous data fetching from Deriv API with auto-reconnect
-data_fetcher.py - WITH AUTO-RECONNECT
+data_fetcher.py - WITH AUTO-RECONNECT AND MULTI-TIMEFRAME SUPPORT
 """
 
 import asyncio
@@ -351,6 +351,97 @@ class DataFetcher:
         except Exception as e:
             logger.error(f"[ERROR] Error fetching multi-timeframe data: {e}")
             return {}
+    
+    # ============================================================================
+    # NEW METHODS FOR MULTI-TIMEFRAME SUPPORT (Top-Down Strategy)
+    # ============================================================================
+    
+    async def fetch_timeframe(self, symbol: str, timeframe: str, count: int = 200) -> Optional[pd.DataFrame]:
+        """
+        Fetch data for any timeframe (1m, 5m, 15m, 1h, 4h, 1d, 1w)
+        
+        Args:
+            symbol: Trading symbol (e.g., 'R_25')
+            timeframe: Timeframe string ('1m', '5m', '15m', '1h', '4h', '1d', '1w')
+            count: Number of candles to fetch
+        
+        Returns:
+            DataFrame with OHLC data or None if failed
+        """
+        # Convert timeframe to Deriv granularity (seconds)
+        granularity_map = {
+            '1m': 60,
+            '5m': 300,
+            '15m': 900,
+            '1h': 3600,
+            '4h': 14400,
+            '1d': 86400,
+            '1w': 604800
+        }
+        
+        if timeframe not in granularity_map:
+            logger.error(f"[ERROR] Unsupported timeframe: {timeframe}")
+            return None
+        
+        granularity = granularity_map[timeframe]
+        
+        try:
+            logger.debug(f"Fetching {count} {timeframe} candles...")
+            df = await self.fetch_candles(symbol, granularity, count)
+            
+            if df is not None:
+                logger.info(f"[OK] Fetched {len(df)} {timeframe} candles")
+            else:
+                logger.warning(f"[WARNING] Failed to fetch {timeframe} candles")
+            
+            return df
+            
+        except Exception as e:
+            logger.error(f"[ERROR] Error fetching {timeframe} data: {e}")
+            return None
+    
+    async def fetch_all_timeframes(self, symbol: str) -> Dict[str, pd.DataFrame]:
+        """
+        Fetch all timeframes needed for Top-Down strategy
+        Fetches SEQUENTIALLY with rate limiting (not concurrent)
+        
+        Args:
+            symbol: Trading symbol (e.g., 'R_25')
+        
+        Returns:
+            Dictionary with keys: '1m', '5m', '1h', '4h', '1d', '1w'
+        """
+        timeframes = {
+            '1m': 100,   # 100 1-minute candles
+            '5m': 100,   # 100 5-minute candles  
+            '1h': 200,   # 200 hours (~8 days)
+            '4h': 200,   # 200 4-hour candles (~33 days)
+            '1d': 100,   # 100 days (~3 months)
+            '1w': 52     # 52 weeks (1 year)
+        }
+        
+        data = {}
+        
+        logger.info(f"[INFO] Fetching all timeframes for {symbol}...")
+        
+        for tf, count in timeframes.items():
+            try:
+                df = await self.fetch_timeframe(symbol, tf, count)
+                if df is not None and not df.empty:
+                    data[tf] = df
+                else:
+                    logger.warning(f"[WARNING] Empty or failed {tf} data")
+                
+                # Rate limiting: Wait between requests
+                await asyncio.sleep(0.5)
+                
+            except Exception as e:
+                logger.error(f"[ERROR] Failed to fetch {tf}: {e}")
+        
+        logger.info(f"[OK] Fetched {len(data)}/{len(timeframes)} timeframes successfully")
+        
+        return data
+
 
 async def get_market_data(symbol: str = "R_25") -> Dict[str, pd.DataFrame]:
     """
@@ -372,6 +463,34 @@ async def get_market_data(symbol: str = "R_25") -> Dict[str, pd.DataFrame]:
         
         # Fetch data
         data = await fetcher.fetch_multi_timeframe_data(symbol)
+        
+        return data
+        
+    finally:
+        # Always disconnect
+        await fetcher.disconnect()
+
+
+async def get_all_timeframes_data(symbol: str = "R_25") -> Dict[str, pd.DataFrame]:
+    """
+    Main function to fetch ALL timeframes for top-down analysis
+    
+    Args:
+        symbol: Trading symbol
+    
+    Returns:
+        Dictionary with market data for all timeframes (1m, 5m, 1h, 4h, 1d, 1w)
+    """
+    fetcher = DataFetcher(config.DERIV_API_TOKEN, config.DERIV_APP_ID)
+    
+    try:
+        # Connect
+        connected = await fetcher.connect()
+        if not connected:
+            return {}
+        
+        # Fetch all timeframes
+        data = await fetcher.fetch_all_timeframes(symbol)
         
         return data
         

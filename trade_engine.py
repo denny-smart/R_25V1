@@ -1,6 +1,6 @@
 """
 Trade Engine for Deriv R_25 Trading Bot
-FIXED VERSION - With Proposal-then-Buy Flow to Handle Price Changes
+ENHANCED VERSION - With Top-Down Dynamic TP/SL Support
 Handles trade execution, cancellation monitoring, and adaptive risk management
 """
 
@@ -39,7 +39,7 @@ class TradeEngine:
         self.max_reconnect_attempts = 5
         
         # Cancellation tracking
-        self.cancellation_enabled = config.ENABLE_CANCELLATION
+        self.cancellation_enabled = config.ENABLE_CANCELLATION and not config.USE_TOPDOWN_STRATEGY
         self.cancellation_fee_fallback = getattr(config, 'CANCELLATION_FEE', 0.45)
         self.actual_cancellation_fee = None
         self.in_cancellation_phase = False
@@ -55,10 +55,14 @@ class TradeEngine:
             logger.info(f"   Phase 1: 5-min cancellation filter")
             logger.info(f"   Phase 2 TP: {format_currency(self.take_profit_amount)}")
             logger.info(f"   Phase 2 SL: {format_currency(self.stop_loss_amount)}")
+        elif config.USE_TOPDOWN_STRATEGY:
+            self.take_profit_amount = None  # Will be set dynamically from strategy
+            self.stop_loss_amount = None    # Will be set dynamically from strategy
+            logger.info("🎯 Top-Down mode ENABLED - Dynamic TP/SL from strategy")
         else:
             self.take_profit_amount = self._calculate_tp_amount()
             self.stop_loss_amount = self._calculate_sl_amount()
-            logger.info("⚠️ Cancellation mode DISABLED - Using legacy TP/SL")
+            logger.info("⚠️ Legacy mode - Fixed TP/SL")
             logger.info(f"   TP: {format_currency(self.take_profit_amount)}")
             logger.info(f"   SL: {format_currency(self.stop_loss_amount)}")
     
@@ -203,7 +207,7 @@ class TradeEngine:
                 "symbol": config.SYMBOL
             }
             
-            # Add cancellation if enabled
+            # Add cancellation if enabled (not for Top-Down)
             if self.cancellation_enabled:
                 proposal_request["cancellation"] = str(config.CANCELLATION_DURATION)
             
@@ -291,13 +295,18 @@ class TradeEngine:
             logger.error(f"❌ Error buying contract: {e}")
             return None
     
-    async def open_trade(self, direction: str, stake: float, max_retries: int = 3) -> Optional[Dict]:
+    async def open_trade(self, direction: str, stake: float,
+                        tp_price: Optional[float] = None,
+                        sl_price: Optional[float] = None,
+                        max_retries: int = 3) -> Optional[Dict]:
         """
         Open a multiplier trade with retry logic for price changes
         
         Args:
             direction: 'UP' or 'DOWN' or 'BUY' or 'SELL'
             stake: Stake amount
+            tp_price: Optional absolute TP price (from Top-Down strategy)
+            sl_price: Optional absolute SL price (from Top-Down strategy)
             max_retries: Maximum number of retries on price changes
         
         Returns:
@@ -346,7 +355,7 @@ class TradeEngine:
                 self.active_contract_id = contract_id
                 self.reference_entry_price = entry_price
                 
-                # Set cancellation tracking
+                # Set cancellation tracking (only for legacy mode)
                 if self.cancellation_enabled:
                     self.in_cancellation_phase = True
                     self.cancellation_start_time = datetime.now()
@@ -354,13 +363,14 @@ class TradeEngine:
                         seconds=config.CANCELLATION_DURATION
                     )
                 
+                # Build trade info with dynamic or fixed TP/SL
                 trade_info = {
                     'contract_id': contract_id,
                     'direction': direction,
                     'stake': stake,
                     'entry_price': entry_price,
-                    'take_profit': self.take_profit_amount if not self.cancellation_enabled else None,
-                    'stop_loss': self.stop_loss_amount if not self.cancellation_enabled else None,
+                    'take_profit': tp_price if tp_price else (self.take_profit_amount if not self.cancellation_enabled else None),
+                    'stop_loss': sl_price if sl_price else (self.stop_loss_amount if not self.cancellation_enabled else None),
                     'multiplier': config.MULTIPLIER,
                     'contract_type': config.CONTRACT_TYPE if direction.upper() in ['UP', 'BUY'] else config.CONTRACT_TYPE_DOWN,
                     'open_time': datetime.now(),
@@ -382,6 +392,9 @@ class TradeEngine:
                     logger.info(f"   Cancellation Fee: {format_currency(self.actual_cancellation_fee or self.cancellation_fee_fallback)}")
                     logger.info(f"   Cancel Threshold: {format_currency(cancel_threshold)}")
                     logger.info(f"   Expires at: {self.cancellation_expiry_time.strftime('%H:%M:%S')}")
+                elif tp_price and sl_price:
+                    logger.info(f"   🎯 Dynamic TP: {tp_price:.4f}")
+                    logger.info(f"   🛡️ Dynamic SL: {sl_price:.4f}")
                 else:
                     logger.info(f"   TP: {format_currency(self.take_profit_amount)}")
                     logger.info(f"   SL: {format_currency(self.stop_loss_amount)}")
@@ -440,14 +453,27 @@ class TradeEngine:
             logger.error(f"❌ Error canceling trade: {e}")
             return None
     
-    async def apply_post_cancellation_limits(self, contract_id: str) -> bool:
-        """Apply TP/SL after cancellation period expires"""
+    async def apply_post_cancellation_limits(self, contract_id: str,
+                                            tp_price: Optional[float] = None,
+                                            sl_price: Optional[float] = None) -> bool:
+        """
+        Apply TP/SL after cancellation period expires
+        
+        Args:
+            contract_id: Contract ID
+            tp_price: Optional custom TP price (from strategy)
+            sl_price: Optional custom SL price (from strategy)
+        """
         try:
+            # Use provided prices or default amounts
+            tp_to_use = tp_price if tp_price else self.take_profit_amount
+            sl_to_use = sl_price if sl_price else self.stop_loss_amount
+            
             limit_request = {
                 "limit_order": {
                     "add": {
-                        "take_profit": self.take_profit_amount,
-                        "stop_loss": self.stop_loss_amount
+                        "take_profit": tp_to_use,
+                        "stop_loss": sl_to_use
                     }
                 },
                 "contract_id": contract_id
@@ -461,8 +487,8 @@ class TradeEngine:
                 return False
             
             logger.info(f"✅ Phase 2 limits applied!")
-            logger.info(f"   TP: {format_currency(self.take_profit_amount)}")
-            logger.info(f"   SL: {format_currency(self.stop_loss_amount)}")
+            logger.info(f"   TP: {format_currency(tp_to_use)}")
+            logger.info(f"   SL: {format_currency(sl_to_use)}")
             
             return True
         except Exception as e:
@@ -523,77 +549,121 @@ class TradeEngine:
             logger.error(f"❌ Error getting trade status: {e}")
             return None
     
-    def should_cancel_trade(self, status: Dict, direction: str) -> tuple[bool, str]:
-        """Determine if trade should be cancelled based on price movement"""
+    def should_cancel_trade(self, time_elapsed: float, profit: float) -> tuple[bool, str]:
+        """
+        Determine if trade should be cancelled using wait-and-cancel strategy
+        
+        New Logic:
+        - Wait at least 240 seconds (4 minutes) before considering cancellation
+        - If time >= 240s AND profit <= 0: CANCEL (trade failed to show profit)
+        - If time >= 240s AND profit > 0: DON'T CANCEL (let it become committed)
+        - If time < 240s: DON'T CANCEL (still in waiting period)
+        
+        Args:
+            time_elapsed: Seconds since trade opened
+            profit: Current profit/loss amount
+        
+        Returns:
+            Tuple of (should_cancel, reason_message)
+        """
         if not self.in_cancellation_phase:
             return False, "Not in cancellation phase"
         
-        cancellation_fee = self.actual_cancellation_fee or self.cancellation_fee_fallback
+        # Minimum wait time: 240 seconds (4 minutes)
+        MIN_WAIT_TIME = 240
         
-        current_price = status['current_price']
-        entry_price = status['entry_price']
-        current_pnl = status['profit']
+        # Still in waiting period - don't cancel regardless of P&L
+        if time_elapsed < MIN_WAIT_TIME:
+            time_remaining_wait = MIN_WAIT_TIME - time_elapsed
+            return False, f"Waiting period: {time_remaining_wait:.0f}s remaining (P&L: {format_currency(profit)})"
         
-        if direction.upper() in ['UP', 'BUY']:
-            price_change = current_price - entry_price
-            moving_against_us = price_change < 0
+        # After 4 minutes: Decision time
+        if profit <= 0:
+            # Trade is not profitable after waiting - cancel to save the fee
+            return True, f"4-min wait complete: Not profitable ({format_currency(profit)}) - cancelling"
         else:
-            price_change = entry_price - current_price
-            moving_against_us = price_change < 0
-        
-        if not moving_against_us:
-            return False, "Price moving favorably"
-        
-        current_loss = abs(current_pnl)
-        cancel_threshold = cancellation_fee * config.CANCELLATION_THRESHOLD
-        
-        if current_loss >= cancel_threshold:
-            return True, f"Loss {format_currency(current_loss)} >= threshold {format_currency(cancel_threshold)}"
-        
-        return False, f"Loss {format_currency(current_loss)} < threshold {format_currency(cancel_threshold)}"
+            # Trade is profitable - let cancellation expire to commit with structure TP/SL
+            return False, f"4-min wait complete: In profit ({format_currency(profit)}) - will commit"
     
     async def monitor_cancellation_phase(self, contract_id: str, trade_info: Dict) -> Optional[str]:
-        """Monitor trade during cancellation phase"""
+        """
+        Monitor trade during cancellation phase using wait-and-cancel strategy
+        
+        Wait-and-Cancel Logic:
+        1. Wait 4 minutes (240 seconds) before making any cancellation decision
+        2. At 4-minute mark, check profitability:
+           - If profit <= 0: Cancel trade (failed to show profit, save cancellation fee)
+           - If profit > 0: Let cancellation expire (commit with structure-based TP/SL)
+        3. If cancellation expires (5 minutes), trade becomes committed with Phase 2 TP/SL
+        """
         direction = trade_info['direction']
         check_interval = config.CANCELLATION_CHECK_INTERVAL
         
         cancellation_fee = self.actual_cancellation_fee or self.cancellation_fee_fallback
-        cancel_threshold = cancellation_fee * config.CANCELLATION_THRESHOLD
         
         logger.info(f"🛡️ Monitoring PHASE 1: Cancellation period ({config.CANCELLATION_DURATION}s)")
-        logger.info(f"   Fee: {format_currency(cancellation_fee)} | Threshold: {format_currency(cancel_threshold)}")
+        logger.info(f"   Strategy: Wait-and-Cancel (4-min profit check)")
+        logger.info(f"   Cancellation Fee: {format_currency(cancellation_fee)}")
+        logger.info(f"   Decision Point: 240s (4 minutes)")
         
         while self.in_cancellation_phase:
+            # Calculate time elapsed since trade opened
+            time_elapsed = (datetime.now() - self.cancellation_start_time).total_seconds()
             time_remaining = (self.cancellation_expiry_time - datetime.now()).total_seconds()
             
+            # Check if cancellation period has expired (5 minutes)
             if time_remaining <= 0:
                 logger.info(f"⏰ Cancellation period expired - trade now COMMITTED")
                 self.in_cancellation_phase = False
-                await self.apply_post_cancellation_limits(contract_id)
+                
+                # Apply limits with custom TP/SL if provided
+                tp = trade_info.get('take_profit')
+                sl = trade_info.get('stop_loss')
+                await self.apply_post_cancellation_limits(contract_id, tp, sl)
                 return 'expired'
             
+            # Get current trade status
             status = await self.get_trade_status(contract_id)
             if not status:
                 await asyncio.sleep(check_interval)
                 continue
             
+            # Check if trade closed automatically (hit TP/SL/etc)
             if status['is_sold']:
                 self.in_cancellation_phase = False
                 return 'closed'
             
-            should_cancel, reason = self.should_cancel_trade(status, direction)
+            # Get current profit
+            current_profit = status['profit']
+            
+            # Apply wait-and-cancel logic (240 second check)
+            should_cancel, reason = self.should_cancel_trade(time_elapsed, current_profit)
             
             if should_cancel:
                 logger.warning(f"🛑 CANCELLING TRADE: {reason}")
+                logger.info(f"   Time Elapsed: {time_elapsed:.0f}s")
+                logger.info(f"   Final P&L: {format_currency(current_profit)}")
+                logger.info(f"   Fee Paid: {format_currency(cancellation_fee)}")
+                
                 cancel_result = await self.cancel_trade(contract_id)
                 if cancel_result:
                     return 'cancelled'
                 else:
                     logger.error("❌ Cancellation failed, continuing monitoring")
             else:
-                current_pnl = status['profit']
-                pnl_emoji = "📈" if current_pnl >= 0 else "📉"
-                logger.info(f"{pnl_emoji} Phase 1: {format_currency(current_pnl)} | {time_remaining:.0f}s | {reason}")
+                # Log status updates
+                pnl_emoji = "📈" if current_profit >= 0 else "📉"
+                
+                # Show different messages based on phase
+                if time_elapsed < 240:
+                    # Still in waiting period
+                    wait_remaining = 240 - time_elapsed
+                    logger.info(f"{pnl_emoji} Phase 1 (Waiting): {format_currency(current_profit)} | "
+                              f"Decision in {wait_remaining:.0f}s | Total: {time_remaining:.0f}s left")
+                else:
+                    # Past 4-minute mark, in profit, waiting for expiry
+                    logger.info(f"{pnl_emoji} Phase 1 (Profitable): {format_currency(current_profit)} | "
+                              f"Will commit in {time_remaining:.0f}s")
             
             await asyncio.sleep(check_interval)
         
@@ -605,7 +675,7 @@ class TradeEngine:
         try:
             start_time = datetime.now()
             
-            # PHASE 1: Cancellation monitoring
+            # PHASE 1: Cancellation monitoring (only for legacy scalping)
             if self.in_cancellation_phase:
                 phase1_result = await self.monitor_cancellation_phase(contract_id, trade_info)
                 
@@ -622,7 +692,10 @@ class TradeEngine:
                     return final_status
             
             # PHASE 2: Normal monitoring with TP/SL
-            logger.info(f"🎯 Monitoring PHASE 2: Committed trade with TP/SL")
+            if config.USE_TOPDOWN_STRATEGY:
+                logger.info(f"🎯 Monitoring Top-Down trade with dynamic TP/SL")
+            else:
+                logger.info(f"🎯 Monitoring PHASE 2: Committed trade with TP/SL")
             
             monitor_interval = config.MONITOR_INTERVAL
             last_status_log = datetime.now()
@@ -695,7 +768,8 @@ class TradeEngine:
                 time_since_last_log = (datetime.now() - last_status_log).total_seconds()
                 if time_since_last_log >= status_log_interval:
                     pnl_emoji = "📈" if status['profit'] >= 0 else "📉"
-                    logger.info(f"{pnl_emoji} Phase 2: {format_currency(status['profit'])} | {int(elapsed)}s")
+                    phase_label = "Top-Down" if config.USE_TOPDOWN_STRATEGY else "Phase 2"
+                    logger.info(f"{pnl_emoji} {phase_label}: {format_currency(status['profit'])} | {int(elapsed)}s")
                     last_status_log = datetime.now()
                 
                 await asyncio.sleep(monitor_interval)
@@ -735,8 +809,8 @@ class TradeEngine:
             return close_info
         except Exception as e:
             logger.error(f"❌ Error closing trade: {e}")
-            return None  # ← ADD THIS
-        
+            return None
+    
     async def execute_trade(self, signal: Dict, risk_manager) -> Optional[Dict]:
         """
         Execute complete trade cycle with dynamic cancellation management
@@ -751,10 +825,12 @@ class TradeEngine:
         try:
             direction = signal['signal']
             
-            # Open trade with proposal + buy flow
+            # Open trade with proposal + buy flow (pass TP/SL if provided by strategy)
             trade_info = await self.open_trade(
                 direction=direction,
-                stake=config.FIXED_STAKE
+                stake=config.FIXED_STAKE,
+                tp_price=signal.get('take_profit'),  # From Top-Down strategy
+                sl_price=signal.get('stop_loss')     # From Top-Down strategy
             )
             
             if not trade_info:
@@ -792,4 +868,3 @@ class TradeEngine:
                 pass
             
             return None
-            
