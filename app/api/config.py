@@ -3,16 +3,17 @@ Configuration API Endpoints
 Get and update bot configuration
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from typing import Dict, Any
 
 import config
 from app.schemas.common import ConfigResponse
+from app.core.auth import get_current_active_user
 
 router = APIRouter()
 
 @router.get("/current", response_model=ConfigResponse)
-async def get_current_config():
+async def get_current_config(current_user: dict = Depends(get_current_active_user)):
     """Get current bot configuration"""
     return {
         "trading": {
@@ -36,7 +37,10 @@ async def get_current_config():
     }
 
 @router.put("/update")
-async def update_config(updates: Dict[str, Any]):
+async def update_config(
+    updates: Dict[str, Any],
+    current_user: dict = Depends(get_current_active_user)
+):
     """
     Update bot configuration at runtime
     

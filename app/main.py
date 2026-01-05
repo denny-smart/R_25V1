@@ -10,16 +10,12 @@ import logging
 
 from app.core.settings import settings
 from app.core.logging import setup_api_logger
-from app.core.auth import create_initial_admin
 from app.bot.runner import bot_runner
 from app.api import bot, trades, monitor, config as config_api, auth
 from app.ws import live
 
 # Setup logging
 logger = setup_api_logger()
-
-# Create initial admin user if none exists
-create_initial_admin()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):

@@ -55,6 +55,8 @@ services:
         sync: false
       - key: ADMIN_EMAIL
         value: admin@tradingbot.com
+      - key: INITIAL_ADMIN_EMAIL
+        sync: false
       
       # Password Requirements
       - key: MIN_PASSWORD_LENGTH

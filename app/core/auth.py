@@ -104,3 +104,34 @@ async def optional_auth(
 
 # Alias for compatibility
 get_current_active_user = require_auth
+
+
+async def create_initial_admin():
+    """
+    Promote initial admin based on environment variable
+    """
+    import os
+    email = os.getenv("INITIAL_ADMIN_EMAIL")
+    if not email:
+        return
+        
+    try:
+        # Check if user exists
+        response = supabase.table('profiles').select('*').eq('email', email).execute()
+        if not response.data:
+            logger.warning(f"Initial admin email {email} not found in profiles")
+            return
+            
+        user = response.data[0]
+        if user.get('role') == 'admin' and user.get('is_approved'):
+            return
+            
+        # Promote
+        supabase.table('profiles').update({
+            'role': 'admin',
+            'is_approved': True
+        }).eq('id', user['id']).execute()
+        logger.info(f"Promoted {email} to admin")
+        
+    except Exception as e:
+        logger.error(f"Failed to create initial admin: {e}")
