@@ -57,8 +57,7 @@ class Settings(BaseSettings):
             "http://127.0.0.1:3000",
             "http://127.0.0.1:8000",
             # Add your Vercel deployment URLs
-            # "https://your-app.vercel.app",
-            # "https://your-app-git-main.vercel.app",
+            "https://r25bot.vercel.app",
         ]
     )
     CORS_ALLOW_CREDENTIALS: bool = True
