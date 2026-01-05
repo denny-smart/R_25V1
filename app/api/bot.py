@@ -28,7 +28,7 @@ async def start_bot(current_user: dict = Depends(get_current_active_user)):
         raise HTTPException(status_code=400, detail=result["message"])
     
     # Add user info to response
-    result["started_by"] = current_user["username"]
+    result["started_by"] = current_user["email"]
     result["timestamp"] = datetime.now().isoformat()
     
     return result
@@ -48,7 +48,7 @@ async def stop_bot(current_user: dict = Depends(get_current_active_user)):
         raise HTTPException(status_code=400, detail=result["message"])
     
     # Add user info to response
-    result["stopped_by"] = current_user["username"]
+    result["stopped_by"] = current_user["email"]
     result["timestamp"] = datetime.now().isoformat()
     
     return result
@@ -68,7 +68,7 @@ async def restart_bot(current_user: dict = Depends(get_current_active_user)):
         raise HTTPException(status_code=400, detail=result["message"])
     
     # Add user info to response
-    result["restarted_by"] = current_user["username"]
+    result["restarted_by"] = current_user["email"]
     result["timestamp"] = datetime.now().isoformat()
     
     return result
@@ -86,7 +86,7 @@ async def get_bot_status(current_user: dict = Depends(get_current_active_user)):
     status = bot_runner.get_status()
     
     # Add user info to response
-    status["viewed_by"] = current_user["username"]
+    status["viewed_by"] = current_user["email"]
     status["timestamp"] = datetime.now().isoformat()
     
     return status
