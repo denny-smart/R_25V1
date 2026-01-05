@@ -1,10 +1,11 @@
 """
-Configuration Settings for Deriv R_25 Multipliers Trading Bot
+Configuration Settings for Deriv Multi-Asset Multipliers Trading Bot
 ENHANCED VERSION - With Multi-Timeframe Top-Down Strategy
+✅ Multi-asset support for R_25, R_50, R_1S50, R_75, R_1S75
 ✅ Top-Down market structure analysis
 ✅ Dynamic TP/SL based on levels
-✅ Two-phase cancellation risk management
-config.py - PRODUCTION READY WITH TOP-DOWN STRATEGY
+✅ Exclusive TP/SL exit management (no time-based cancellation)
+config.py - PRODUCTION READY WITH MULTI-ASSET SUPPORT
 """
 
 import os
@@ -28,43 +29,74 @@ if not DERIV_API_TOKEN or DERIV_API_TOKEN == "your_api_token_here":
         "API_TOKEN=your_actual_token_here"
     )
 
-# ==================== TRADING PARAMETERS ====================
-SYMBOL = "R_25"                    # Volatility 25 Index
+# ==================== MULTI-ASSET CONFIGURATION ====================
+# List of symbols to monitor and trade
+SYMBOLS = ["R_25", "R_50", "1HZ50V", "R_75", "1HZ75V"]
+
+# Asset-specific configuration
+ASSET_CONFIG = {
+    "R_25": {
+        "multiplier": 160,
+        "description": "Volatility 25 Index",
+        "tick_size": 0.01
+    },
+    "R_50": {
+        "multiplier": 80,
+        "description": "Volatility 50 Index",
+        "tick_size": 0.01
+    },
+    "1HZ50V": {
+        "multiplier": 80,
+        "description": "Volatility 50 (1s) Index",
+        "tick_size": 0.01
+    },
+    "R_75": {
+        "multiplier": 50,
+        "description": "Volatility 75 Index",
+        "tick_size": 0.01
+    },
+    "1HZ75V": {
+        "multiplier": 50,
+        "description": "Volatility 75 (1s) Index",
+        "tick_size": 0.01
+    }
+}
+
+# Backward compatibility: Default to R_25 if single symbol access is needed
+SYMBOL = SYMBOLS[0]  # Default symbol for legacy code
+MULTIPLIER = ASSET_CONFIG[SYMBOL]["multiplier"]  # Default multiplier
+
 MARKET = "synthetic_index"         # Market type
 CONTRACT_TYPE = "MULTUP"           # Multiplier Up
 CONTRACT_TYPE_DOWN = "MULTDOWN"    # Multiplier Down
 
 # ==================== RISK MANAGEMENT ====================
-FIXED_STAKE = 10.0                 # $10 stake
-MULTIPLIER = 160                   # 160x multiplier (changed from 400x for safety)
+# Risk mode configuration
+RISK_MODE = "TOP_DOWN"             # "TOP_DOWN" = Dynamic TP/SL based on structure, "FIXED" = Fixed percentages
 
-# ⭐ TWO-PHASE CANCELLATION PARAMETERS ⭐
-ENABLE_CANCELLATION = True         # Enable 5-minute cancellation feature
-CANCELLATION_DURATION = 300        # 5 minutes (300 seconds)
-CANCELLATION_FEE = 0.45            # Actual Deriv cancellation cost: $0.45
-CANCELLATION_THRESHOLD = 0.70      # Cancel if 70% of cancellation cost reached
-CANCELLATION_CHECK_INTERVAL = 5    # Check every 5 seconds during cancellation
+FIXED_STAKE = 10.0                 # $10 stake per trade
+# Note: MULTIPLIER is now asset-specific in ASSET_CONFIG
 
-# ⭐ TWO-PHASE RISK MANAGEMENT ⭐
-# Phase 1: During Cancellation (First 5 minutes)
-# - Risk: Limited to cancellation fee (typically small % of stake)
-# - Action: Cancel if price moves 70% toward cancellation threshold
+# Standard TP/SL Parameters (used when RISK_MODE = "FIXED")
+TAKE_PROFIT_PERCENT = 0.05         # 0.05% TP
+STOP_LOSS_PERCENT = 0.025          # 0.025% SL
 
-# Phase 2: After Cancellation Expires (Full Commitment)
-POST_CANCEL_STOP_LOSS_PERCENT = 0.0125   # 5% of stake loss = 0.0125% price move with 400x
-POST_CANCEL_TAKE_PROFIT_PERCENT = 0.0375  # 15% price move target = 0.0375% with 400x
+# Maximum loss per trade (acts as emergency stop)
+MAX_LOSS_PER_TRADE = 1.0           # Maximum loss per trade (USD) - hard limit
 
-# Legacy parameters (for backward compatibility if cancellation disabled)
-TAKE_PROFIT_PERCENT = 0.05         # 0.05% TP (used if cancellation disabled)
-STOP_LOSS_PERCENT = 0.025          # 0.025% SL (used if cancellation disabled)
-
-MAX_LOSS_PER_TRADE = 1.0           # Maximum loss per trade (USD)
+# Minimum Risk-to-Reward Ratio
+MIN_RR_RATIO = 2.0                 # Minimum 1:2.0 risk/reward to take trade
 COOLDOWN_SECONDS = 180             # 3 minutes between trades
 MAX_TRADES_PER_DAY = 30            # Maximum trades per day
 MAX_DAILY_LOSS = 10.0              # Stop if lose $10 in a day
 
-# Valid multipliers for R_25
-VALID_MULTIPLIERS = [160, 400, 800, 1200, 1600]
+# Valid multipliers for all assets
+VALID_MULTIPLIERS = [50, 80, 160, 400, 800, 1200, 1600]
+
+# ==================== MULTI-ASSET MONITORING ====================
+MONITOR_ALL_ASSETS = True          # Monitor all assets simultaneously
+MAX_CONCURRENT_TRADES = 1          # Maximum number of concurrent trades across all assets
+PRIORITIZE_BY_SIGNAL_STRENGTH = True  # Trade strongest signals first
 
 # ==================== DATA FETCHING ====================
 CANDLES_1M = 150                   # 1-minute candles
@@ -73,7 +105,7 @@ MAX_RETRIES = 3
 RETRY_DELAY = 2
 
 # ==================== STRATEGY PARAMETERS ====================
-# ATR Validation Ranges
+# ATR Validation Ranges (can be asset-specific if needed)
 ATR_MIN_1M = 0.05                 # Minimum 1m ATR
 ATR_MAX_1M = 2.0                  # Maximum 1m ATR
 ATR_MIN_5M = 0.10                 # Minimum 5m ATR
@@ -98,8 +130,9 @@ VOLATILITY_SPIKE_MULTIPLIER = 2.0
 WEAK_CANDLE_MULTIPLIER = 0.35
 
 # ==================== TRADE MONITORING ====================
-MAX_TRADE_DURATION = 900           # 15 minutes max after cancellation
-MONITOR_INTERVAL = 2               # Check every 2 seconds
+# No time-based cancellation - trades exit only via TP/SL
+MAX_TRADE_DURATION = None          # No maximum duration - let TP/SL handle exits
+MONITOR_INTERVAL = 2               # Check every 2 seconds for TP/SL hits
 
 # ==================== LOGGING ====================
 LOG_FILE = "trading_bot.log"
@@ -116,6 +149,7 @@ WS_TIMEOUT = 30
 
 # ==================== STRATEGY SELECTION ====================
 USE_TOPDOWN_STRATEGY = True        # True = Top-Down, False = Legacy Scalping
+ENABLE_CANCELLATION = False  # Set to False to rely only on TP/SL exits
 
 # ==================== MULTI-TIMEFRAME DATA FETCHING ====================
 FETCH_WEEKLY = True                # Fetch weekly data for major trend structure
@@ -151,8 +185,11 @@ STRUCTURE_CONFIRMATION_CANDLES = 3 # Wait N candles to confirm structure break
 # ==================== RISK MANAGEMENT FOR TOP-DOWN ====================
 TOPDOWN_USE_DYNAMIC_TP = True      # TP based on untested levels (not fixed %)
 TOPDOWN_USE_STRUCTURE_SL = True    # SL based on swing points (not fixed %)
-TOPDOWN_MIN_RR_RATIO = 2.0         # Minimum 1:2.0 risk/reward to take trade
+TOPDOWN_MIN_RR_RATIO = 2.0         # Minimum 1:2.0 risk/reward to take trade (aligned with MIN_RR_RATIO)
 TOPDOWN_MAX_SL_DISTANCE_PCT = 0.5  # Maximum SL distance: 0.5% from entry
+
+# Exit strategy - TP/SL only (no time-based exits)
+EXIT_STRATEGY = "TP_SL_ONLY"       # Only exit on Take Profit or Stop Loss hits
 
 # ==================== TP/SL BUFFER SETTINGS ====================
 TP_BUFFER_PCT = 0.1                # 0.1% before actual level (early exit buffer)
@@ -163,6 +200,26 @@ MIN_TP_DISTANCE_PCT = 0.2          # Minimum TP distance from entry
 CONFLUENCE_WEIGHT_HIGHER_TF = 2.0  # Higher timeframe levels weighted 2x
 CONFLUENCE_WEIGHT_UNTESTED = 1.5   # Untested levels weighted 1.5x
 MIN_CONFLUENCE_SCORE = 3.0         # Minimum score to consider level valid
+
+
+# ==================== UTILITY FUNCTIONS ====================
+def get_multiplier(symbol):
+    """Get multiplier for a specific symbol"""
+    if symbol not in ASSET_CONFIG:
+        raise ValueError(f"Unknown symbol: {symbol}. Valid symbols: {list(ASSET_CONFIG.keys())}")
+    return ASSET_CONFIG[symbol]["multiplier"]
+
+
+def get_asset_info(symbol):
+    """Get complete configuration for a specific symbol"""
+    if symbol not in ASSET_CONFIG:
+        raise ValueError(f"Unknown symbol: {symbol}. Valid symbols: {list(ASSET_CONFIG.keys())}")
+    return ASSET_CONFIG[symbol]
+
+
+def get_all_symbols():
+    """Get list of all configured symbols"""
+    return SYMBOLS.copy()
 
 
 # ==================== VALIDATION ====================
@@ -177,24 +234,56 @@ def validate_config():
     if CONTRACT_TYPE not in ["MULTUP", "MULTDOWN"]:
         errors.append(f"CONTRACT_TYPE must be MULTUP or MULTDOWN, not {CONTRACT_TYPE}")
     
+    # Validate risk mode
+    if RISK_MODE not in ["TOP_DOWN", "FIXED"]:
+        errors.append(f"RISK_MODE must be 'TOP_DOWN' or 'FIXED', not {RISK_MODE}")
+    
     # Validate risk parameters
     if FIXED_STAKE <= 0:
         errors.append("FIXED_STAKE must be positive")
-    if MULTIPLIER not in VALID_MULTIPLIERS:
-        errors.append(f"MULTIPLIER must be one of {VALID_MULTIPLIERS}")
     
-    # Validate cancellation parameters
-    if ENABLE_CANCELLATION and not USE_TOPDOWN_STRATEGY:
-        if CANCELLATION_DURATION < 60 or CANCELLATION_DURATION > 600:
-            errors.append("CANCELLATION_DURATION should be between 60-600 seconds")
-        if CANCELLATION_FEE <= 0:
-            errors.append("CANCELLATION_FEE must be positive")
-        if not (0.5 <= CANCELLATION_THRESHOLD <= 0.9):
-            errors.append("CANCELLATION_THRESHOLD should be between 0.5 and 0.9")
-        if POST_CANCEL_STOP_LOSS_PERCENT <= 0:
-            errors.append("POST_CANCEL_STOP_LOSS_PERCENT must be positive")
-        if POST_CANCEL_TAKE_PROFIT_PERCENT <= 0:
-            errors.append("POST_CANCEL_TAKE_PROFIT_PERCENT must be positive")
+    if TAKE_PROFIT_PERCENT <= 0:
+        errors.append("TAKE_PROFIT_PERCENT must be positive")
+    
+    if STOP_LOSS_PERCENT <= 0:
+        errors.append("STOP_LOSS_PERCENT must be positive")
+    
+    if MAX_LOSS_PER_TRADE <= 0:
+        errors.append("MAX_LOSS_PER_TRADE must be positive")
+    
+    if MIN_RR_RATIO < 1.0:
+        errors.append("MIN_RR_RATIO must be at least 1.0")
+    
+    # Validate that MIN_RR_RATIO matches TOPDOWN_MIN_RR_RATIO
+    if MIN_RR_RATIO != TOPDOWN_MIN_RR_RATIO:
+        errors.append(f"MIN_RR_RATIO ({MIN_RR_RATIO}) must match TOPDOWN_MIN_RR_RATIO ({TOPDOWN_MIN_RR_RATIO})")
+    
+    # Validate exit strategy
+    if EXIT_STRATEGY != "TP_SL_ONLY":
+        errors.append(f"EXIT_STRATEGY must be 'TP_SL_ONLY', not {EXIT_STRATEGY}")
+    
+    if MAX_TRADE_DURATION is not None:
+        errors.append("MAX_TRADE_DURATION must be None (no time-based exits allowed)")
+    
+    # Validate multi-asset configuration
+    if not SYMBOLS:
+        errors.append("SYMBOLS list cannot be empty")
+    
+    for symbol in SYMBOLS:
+        if symbol not in ASSET_CONFIG:
+            errors.append(f"Symbol '{symbol}' in SYMBOLS list has no configuration in ASSET_CONFIG")
+        else:
+            asset_mult = ASSET_CONFIG[symbol]["multiplier"]
+            if asset_mult not in VALID_MULTIPLIERS:
+                errors.append(f"Multiplier {asset_mult} for {symbol} must be one of {VALID_MULTIPLIERS}")
+    
+    # Check for duplicate symbols
+    if len(SYMBOLS) != len(set(SYMBOLS)):
+        errors.append("SYMBOLS list contains duplicates")
+    
+    # Validate concurrent trades
+    if MONITOR_ALL_ASSETS and MAX_CONCURRENT_TRADES <= 0:
+        errors.append("MAX_CONCURRENT_TRADES must be positive when MONITOR_ALL_ASSETS is enabled")
     
     # Validate thresholds
     if not (0 < RSI_BUY_THRESHOLD < 100):
@@ -263,13 +352,25 @@ if __name__ == "__main__":
         validate_config()
         
         print("=" * 75)
-        print("✅ MULTI-STRATEGY CONFIGURATION VALIDATED")
+        print("✅ MULTI-ASSET MULTI-STRATEGY CONFIGURATION VALIDATED")
         print("=" * 75)
         
-        print("\n📊 TRADING PARAMETERS:")
-        print(f"   Symbol: {SYMBOL}")
-        print(f"   Multiplier: {MULTIPLIER}x")
-        print(f"   Stake: ${FIXED_STAKE}")
+        print("\n🎯 RISK MODE: {}".format(RISK_MODE))
+        print(f"   Exit Strategy: {EXIT_STRATEGY}")
+        print(f"   Min Risk:Reward Ratio: 1:{MIN_RR_RATIO}")
+        print(f"   Max Loss Per Trade: ${MAX_LOSS_PER_TRADE}")
+        print(f"   Time-Based Exits: {'Disabled' if MAX_TRADE_DURATION is None else 'Enabled'}")
+        
+        print("\n📊 MULTI-ASSET CONFIGURATION:")
+        print(f"   Assets Monitored: {len(SYMBOLS)}")
+        print(f"   Monitor All Assets: {'Yes' if MONITOR_ALL_ASSETS else 'No'}")
+        print(f"   Max Concurrent Trades: {MAX_CONCURRENT_TRADES}")
+        print(f"   Fixed Stake: ${FIXED_STAKE}")
+        
+        print("\n💎 CONFIGURED ASSETS:")
+        for symbol in SYMBOLS:
+            config_data = ASSET_CONFIG[symbol]
+            print(f"   {symbol:8s} → {config_data['multiplier']:4d}x  ({config_data['description']})")
         
         # Display strategy-specific configuration
         if USE_TOPDOWN_STRATEGY:
@@ -304,8 +405,10 @@ if __name__ == "__main__":
             print(f"   Dynamic TP: {'Enabled' if TOPDOWN_USE_DYNAMIC_TP else 'Disabled'}")
             print(f"   Dynamic SL: {'Enabled' if TOPDOWN_USE_STRUCTURE_SL else 'Disabled'}")
             print(f"   Max SL Distance: {TOPDOWN_MAX_SL_DISTANCE_PCT}%")
+            print(f"   Max Loss Per Trade: ${MAX_LOSS_PER_TRADE}")
             print(f"   TP Buffer: {TP_BUFFER_PCT}%")
             print(f"   SL Buffer: {SL_BUFFER_PCT}%")
+            print(f"   Exit Method: TP/SL Only (No Time-Based Exits)")
             
             print("\n🔍 LEVEL DETECTION:")
             print(f"   Level Proximity: {LEVEL_PROXIMITY_PCT}%")
@@ -318,26 +421,12 @@ if __name__ == "__main__":
             print("⚡ LEGACY SCALPING STRATEGY")
             print("=" * 75)
             
-            if ENABLE_CANCELLATION:
-                print("\n🛡️ PHASE 1: CANCELLATION PHASE (First 5 minutes)")
-                print(f"   Duration: {CANCELLATION_DURATION}s ({CANCELLATION_DURATION//60} min)")
-                print(f"   Cancellation Fee: ${CANCELLATION_FEE:.2f}")
-                print(f"   Auto-Cancel Threshold: {CANCELLATION_THRESHOLD*100:.0f}%")
-                print(f"   Check Interval: {CANCELLATION_CHECK_INTERVAL}s")
-                
-                post_sl_amount = POST_CANCEL_STOP_LOSS_PERCENT / 100 * FIXED_STAKE * MULTIPLIER
-                post_tp_amount = POST_CANCEL_TAKE_PROFIT_PERCENT / 100 * FIXED_STAKE * MULTIPLIER
-                
-                print("\n🎯 PHASE 2: COMMITTED PHASE (After 5 minutes)")
-                print(f"   Stop Loss: {POST_CANCEL_STOP_LOSS_PERCENT}% → ${post_sl_amount:.2f}")
-                print(f"   Take Profit: {POST_CANCEL_TAKE_PROFIT_PERCENT}% → ${post_tp_amount:.2f}")
-                print(f"   Risk-to-Reward: 1:{post_tp_amount/post_sl_amount:.1f}")
-            else:
-                legacy_tp = TAKE_PROFIT_PERCENT / 100 * FIXED_STAKE * MULTIPLIER
-                legacy_sl = STOP_LOSS_PERCENT / 100 * FIXED_STAKE * MULTIPLIER
-                print("\n⚠️ CANCELLATION DISABLED - Using legacy TP/SL")
-                print(f"   Take Profit: ${legacy_tp:.2f}")
-                print(f"   Stop Loss: ${legacy_sl:.2f}")
+            tp_amount = TAKE_PROFIT_PERCENT / 100 * FIXED_STAKE * MULTIPLIER
+            sl_amount = STOP_LOSS_PERCENT / 100 * FIXED_STAKE * MULTIPLIER
+            print("\n💰 RISK MANAGEMENT:")
+            print(f"   Take Profit: {TAKE_PROFIT_PERCENT}% → ${tp_amount:.2f}")
+            print(f"   Stop Loss: {STOP_LOSS_PERCENT}% → ${sl_amount:.2f}")
+            print(f"   Risk-to-Reward: 1:{tp_amount/sl_amount:.1f}")
         
         print("\n⏰ TRADING LIMITS:")
         print(f"   Cooldown: {COOLDOWN_SECONDS}s ({COOLDOWN_SECONDS//60} min)")
@@ -350,7 +439,7 @@ if __name__ == "__main__":
             print(f"   API Token: {'*' * 20}{DERIV_API_TOKEN[-4:]}")
         
         print("\n" + "=" * 75)
-        print("🚀 CONFIGURATION READY")
+        print("🚀 MULTI-ASSET CONFIGURATION READY")
         print("=" * 75)
         
     except ValueError as e:

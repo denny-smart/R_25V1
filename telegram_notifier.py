@@ -46,7 +46,15 @@ class TelegramNotifier:
             return str(value)
         except Exception:
             return default
-    
+            
+    def _create_strength_bar(self, score: float, max_score: int = 10) -> str:
+        """Create a visual strength bar"""
+        # score is typically 0-10 or similar
+        normalized_score = max(0, min(score, max_score))
+        filled = int((normalized_score / max_score) * 5) # 5 bars total
+        empty = 5 - filled
+        return "▮" * filled + "▯" * empty
+
     async def send_message(self, message: str, parse_mode: str = "HTML") -> bool:
         """
         Send a message via Telegram
@@ -77,25 +85,31 @@ class TelegramNotifier:
     
     async def notify_bot_started(self, balance: float):
         """Notify that bot has started"""
-        if config.ENABLE_CANCELLATION:
-            tp_text = f"Phase 2 TP: {config.POST_CANCEL_TAKE_PROFIT_PERCENT}%"
-            sl_text = f"Phase 2 SL: {config.POST_CANCEL_STOP_LOSS_PERCENT}%"
-            cancel_text = f"🛡️ Cancellation: {config.CANCELLATION_DURATION}s\n"
-        else:
-            tp_text = f"🎯 Take Profit: {config.TAKE_PROFIT_PERCENT}%"
-            sl_text = f"🛑 Stop Loss: {config.STOP_LOSS_PERCENT}%"
-            cancel_text = ""
+        strategy_mode = "🛡️ Top-Down Structure" if config.USE_TOPDOWN_STRATEGY else "⚡ Classic Scalping"
         
+        if config.ENABLE_CANCELLATION:
+            risk_text = (
+                f"🛡️ <b>Cancellation Protection</b>\n"
+                f"   • Duration: {config.CANCELLATION_DURATION}s\n"
+                f"   • Fee: {format_currency(config.CANCELLATION_FEE)}"
+            )
+        else:
+            risk_text = (
+                f"🛡️ <b>Risk Management</b>\n"
+                f"   • TP: {config.TAKE_PROFIT_PERCENT}%\n"
+                f"   • SL: {config.STOP_LOSS_PERCENT}%"
+            )
+
         message = (
-            "🤖 <b>Trading Bot Started</b>\n\n"
-            f"💰 Balance: {format_currency(balance)}\n"
-            f"📊 Symbol: {config.SYMBOL}\n"
-            f"📈 Multiplier: {config.MULTIPLIER}x\n"
-            f"💵 Stake: {format_currency(config.FIXED_STAKE)}\n"
-            f"{cancel_text}"
-            f"{tp_text}\n"
-            f"{sl_text}\n"
-            f"🔢 Max Daily Trades: {config.MAX_TRADES_PER_DAY}\n\n"
+            "🚀 <b>BOT STARTED</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"👤 Account: <b>{config.DERIV_APP_ID}</b>\n"
+            f"💰 Balance: <b>{format_currency(balance)}</b>\n\n"
+            f"⚙️ <b>Configuration</b>\n"
+            f"   • Strategy: {strategy_mode}\n"
+            f"   • Symbols: {len(config.SYMBOLS)} Active\n"
+            f"   • Stake: {format_currency(config.FIXED_STAKE)}\n\n"
+            f"{risk_text}\n\n"
             f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         )
         await self.send_message(message)
@@ -105,70 +119,81 @@ class TelegramNotifier:
         direction = signal.get('signal', 'UNKNOWN')
         score = signal.get('score', 0)
         details = signal.get('details', {})
+        symbol = signal.get('symbol', config.SYMBOL)
         
         if direction == 'HOLD':
             return  # Don't notify for HOLD signals
-        
+            
         emoji = "🟢" if direction == "BUY" else "🔴"
+        strength_bar = self._create_strength_bar(score, config.MINIMUM_SIGNAL_SCORE + 4) # Adjust scale
         
         # Safely get values with defaults
         rsi = details.get('rsi', 0)
         adx = details.get('adx', 0)
-        atr_1m = details.get('atr_1m', 0)
-        atr_5m = details.get('atr_5m', 0)
         
         message = (
-            f"{emoji} <b>{direction} SIGNAL DETECTED</b>\n\n"
-            f"📊 Score: {score}/{config.MINIMUM_SIGNAL_SCORE}\n"
-            f"📈 RSI: {rsi:.2f}\n"
-            f"💪 ADX: {adx:.2f}\n"
-            f"📉 ATR 1m: {atr_1m:.4f}\n"
-            f"📉 ATR 5m: {atr_5m:.4f}\n\n"
-            f"⏰ {datetime.now().strftime('%H:%M:%S')}"
+            f"{emoji} <b>SIGNAL DETECTED: {symbol}</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"📍 Direction: <b>{direction}</b>\n"
+            f"📊 Strength: {strength_bar} ({score:.1f})\n\n"
+            f"📉 <b>Technical Indicators</b>\n"
+            f"   • RSI: {rsi:.1f}\n"
+            f"   • ADX: {adx:.1f}\n"
         )
+        
+        # Add pivot/level info if available
+        if 'proximity' in details:
+            message += f"   • Level Dist: {details['proximity']:.3f}%\n"
+            
+        message += f"\n⏰ {datetime.now().strftime('%H:%M:%S')}"
+        
         await self.send_message(message)
     
     async def notify_trade_opened(self, trade_info: Dict):
         """Notify that a trade has been opened"""
         direction = trade_info.get('direction', 'UNKNOWN')
         emoji = "🟢" if direction == "BUY" else "🔴"
+        symbol = trade_info.get('symbol', config.SYMBOL)
+        stake = trade_info.get('stake', 0)
         
-        # Check if cancellation is enabled
-        cancellation_enabled = trade_info.get('cancellation_enabled', False)
+        # Calculate projected targets
+        tp_amount = 0
+        sl_risk = 0
+        
+        # Estimate based on legacy percentages if not explicit
+        if 'take_profit_amount' in trade_info:
+             tp_amount = trade_info['take_profit_amount']
+        else:
+             # Fallback estimation
+             if trade_info.get('take_profit'):
+                 tp_amount = stake * config.MULTIPLIER * (config.TAKE_PROFIT_PERCENT / 100)
+        
+        if 'stop_loss_amount' in trade_info:
+            sl_risk = trade_info['stop_loss_amount']
+        else:
+            if trade_info.get('stop_loss'):
+                sl_risk = stake * config.MULTIPLIER * (config.STOP_LOSS_PERCENT / 100)
+                
+        rr_ratio = f"1:{tp_amount/sl_risk:.1f}" if sl_risk > 0 else "N/A"
         
         message = (
-            f"{emoji} <b>TRADE OPENED</b>\n\n"
+            f"{emoji} <b>TRADE OPENED: {symbol}</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
             f"📍 Direction: <b>{direction}</b>\n"
-            f"💰 Stake: {format_currency(trade_info.get('stake', 0))}\n"
-            f"📈 Entry Price: {trade_info.get('entry_price', 0):.2f}\n"
-            f"📊 Multiplier: {trade_info.get('multiplier', 0)}x\n"
+            f"💵 Stake: {format_currency(stake)} (x{trade_info.get('multiplier', 0)})\n"
+            f"📉 Entry: {trade_info.get('entry_price', 0):.2f}\n\n"
+            f"🎯 <b>Targets & Risk</b>\n"
+            f"   • Target: +{format_currency(tp_amount)}\n"
+            f"   • Risk: -{format_currency(sl_risk)}\n"
+            f"   • Ratio: {rr_ratio}\n"
         )
         
-        # Add cancellation info or TP/SL based on mode
-        if cancellation_enabled:
-            cancel_fee = trade_info.get('cancellation_fee', config.CANCELLATION_FEE)
-            cancel_expiry = trade_info.get('cancellation_expiry')
-            
-            message += (
-                f"\n🛡️ <b>Phase 1: Cancellation Active</b>\n"
-                f"⏱️ Duration: {config.CANCELLATION_DURATION}s\n"
-                f"💰 Cancel Fee: {format_currency(cancel_fee)}\n"
-            )
-            
-            if cancel_expiry:
-                message += f"⏰ Expires: {cancel_expiry.strftime('%H:%M:%S')}\n"
-        else:
-            # Legacy mode with immediate TP/SL
-            tp = trade_info.get('take_profit')
-            sl = trade_info.get('stop_loss')
-            
-            if tp is not None:
-                message += f"🎯 Take Profit: {format_currency(tp)}\n"
-            if sl is not None:
-                message += f"🛑 Stop Loss: {format_currency(sl)}\n"
+        # Add cancellation info if active
+        if trade_info.get('cancellation_enabled', False):
+             message += f"\n🛡️ <b>Cancellation Active</b> ({config.CANCELLATION_DURATION}s)\n"
         
         message += (
-            f"\n🔑 Contract ID: <code>{trade_info.get('contract_id', 'N/A')}</code>\n"
+            f"\n🔑 ID: <code>{trade_info.get('contract_id', 'N/A')}</code>\n"
             f"⏰ {datetime.now().strftime('%H:%M:%S')}"
         )
         
@@ -178,35 +203,35 @@ class TelegramNotifier:
         """Notify that a trade has been closed"""
         status = result.get('status', 'unknown')
         profit = result.get('profit', 0)
+        symbol = trade_info.get('symbol', config.SYMBOL)
+        stake = trade_info.get('stake', 1)
         
-        # Determine emoji based on outcome
+        # Determine emoji and outcome
         if profit > 0:
             emoji = "✅"
-            outcome = "WON"
+            header = "TRADE WON"
         elif profit < 0:
             emoji = "❌"
-            outcome = "LOST"
+            header = "TRADE LOST"
         else:
             emoji = "⚪"
-            outcome = "CLOSED"
+            header = "TRADE CLOSED"
+            
+        roi = (profit / stake) * 100 if stake > 0 else 0
         
-        direction = trade_info.get('direction', 'UNKNOWN')
-        entry_price = trade_info.get('entry_price', 0)
-        current_price = result.get('current_price', entry_price)
-        
-        # Safely calculate price change
-        price_change = current_price - entry_price if current_price and entry_price else 0
-        price_change_pct = (price_change / entry_price * 100) if entry_price > 0 else 0
+        # Duration calculation
+        # assuming we don't have exact duration easily, we can skip or add if timestamp available
+        # For now, just show result
         
         message = (
-            f"{emoji} <b>TRADE {outcome}</b>\n\n"
-            f"📍 Direction: <b>{direction}</b>\n"
-            f"💰 P&L: <b>{format_currency(profit)}</b>\n"
-            f"📈 Entry: {entry_price:.2f}\n"
-            f"📉 Exit: {current_price:.2f}\n"
-            f"📊 Change: {price_change:+.2f} ({price_change_pct:+.2f}%)\n"
-            f"⏱️ Status: {status.upper()}\n"
-            f"🔑 Contract: <code>{result.get('contract_id', 'N/A')}</code>\n\n"
+            f"{emoji} <b>{header}: {symbol}</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"💰 <b>Net Result: {format_currency(profit)}</b>\n"
+            f"📈 ROI: {roi:+.1f}%\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"📍 Direction: {trade_info.get('direction', 'UNKNOWN')}\n"
+            f"📉 Exit Price: {result.get('current_price', 0):.2f}\n" 
+            f"⏱️ Reason: {status.upper()}\n\n"
             f"⏰ {datetime.now().strftime('%H:%M:%S')}"
         )
         await self.send_message(message)
@@ -216,39 +241,35 @@ class TelegramNotifier:
         win_rate = stats.get('win_rate', 0)
         total_pnl = stats.get('total_pnl', 0)
         
-        emoji = "📊"
-        if total_pnl > 0:
-            emoji = "💰"
-        elif total_pnl < 0:
-            emoji = "📉"
+        # Performance Badge
+        if win_rate >= 80 and stats.get('total_trades', 0) > 3:
+            badge = "🔥 CRUSHING IT"
+        elif total_pnl > 0:
+             badge = "✅ PROFITABLE"
+        else:
+             badge = "📉 RECOVERY NEEDED"
         
         message = (
-            f"{emoji} <b>DAILY SUMMARY</b>\n\n"
-            f"📈 Total Trades: {stats.get('total_trades', 0)}\n"
-            f"✅ Wins: {stats.get('winning_trades', 0)}\n"
-            f"❌ Losses: {stats.get('losing_trades', 0)}\n"
-            f"🎯 Win Rate: {win_rate:.1f}%\n"
-            f"💰 Total P&L: <b>{format_currency(total_pnl)}</b>\n"
-            f"📊 Today's Trades: {stats.get('trades_today', 0)}/{config.MAX_TRADES_PER_DAY}\n"
-            f"💵 Daily P&L: {format_currency(stats.get('daily_pnl', 0))}\n"
+            f"📅 <b>DAILY REPORT: {datetime.now().strftime('%Y-%m-%d')}</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"💵 <b>Total P&L: {format_currency(total_pnl)}</b>\n"
+            f"📊 Status: {badge}\n\n"
+            f"📈 <b>Statistics</b>\n"
+            f"   • Trades: {stats.get('total_trades', 0)}\n"
+            f"   • Win Rate: {win_rate:.1f}%\n"
+            f"   • Wins: {stats.get('winning_trades', 0)}\n"
+            f"   • Losses: {stats.get('losing_trades', 0)}\n\n"
+            f"⏰ {datetime.now().strftime('%H:%M:%S')}"
         )
-        
-        # Add cancellation stats if enabled
-        if config.ENABLE_CANCELLATION:
-            message += (
-                f"\n🛡️ Cancelled: {stats.get('trades_cancelled', 0)}\n"
-                f"✅ Committed: {stats.get('trades_committed', 0)}\n"
-            )
-        
-        message += f"\n⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         
         await self.send_message(message)
     
     async def notify_error(self, error_msg: str):
         """Notify about errors"""
         message = (
-            f"⚠️ <b>ERROR ALERT</b>\n\n"
-            f"❌ {error_msg}\n\n"
+            f"⚠️ <b>SYSTEM ALERT</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"❌ <b>Error Detected</b>\n{error_msg}\n\n"
             f"⏰ {datetime.now().strftime('%H:%M:%S')}"
         )
         await self.send_message(message)
@@ -256,8 +277,10 @@ class TelegramNotifier:
     async def notify_connection_lost(self):
         """Notify that connection was lost"""
         message = (
-            "⚠️ <b>CONNECTION LOST</b>\n\n"
-            "Attempting to reconnect...\n\n"
+            "🔌 <b>CONNECTION LOST</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "⚠️ The bot has lost connection to the server.\n"
+            "🔄 Reconnecting...\n\n"
             f"⏰ {datetime.now().strftime('%H:%M:%S')}"
         )
         await self.send_message(message)
@@ -265,8 +288,10 @@ class TelegramNotifier:
     async def notify_connection_restored(self):
         """Notify that connection was restored"""
         message = (
-            "✅ <b>CONNECTION RESTORED</b>\n\n"
-            "Bot is back online!\n\n"
+            "⚡ <b>ONLINE</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "✅ Connection has been restored.\n"
+            "🤖 Resuming trading operations.\n\n"
             f"⏰ {datetime.now().strftime('%H:%M:%S')}"
         )
         await self.send_message(message)
@@ -274,25 +299,15 @@ class TelegramNotifier:
     async def notify_bot_stopped(self, stats: Dict):
         """Notify that bot has stopped"""
         total_pnl = stats.get('total_pnl', 0)
-        emoji = "💰" if total_pnl > 0 else "📉" if total_pnl < 0 else "📊"
         
         message = (
-            f"🛑 <b>Trading Bot Stopped</b>\n\n"
-            f"{emoji} Final P&L: <b>{format_currency(total_pnl)}</b>\n"
-            f"📈 Total Trades: {stats.get('total_trades', 0)}\n"
-            f"✅ Wins: {stats.get('winning_trades', 0)}\n"
-            f"❌ Losses: {stats.get('losing_trades', 0)}\n"
-            f"🎯 Win Rate: {stats.get('win_rate', 0):.1f}%\n"
+            f"🛑 <b>BOT STOPPED</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"💵 Final P&L: <b>{format_currency(total_pnl)}</b>\n"
+            f"📊 Total Trades: {stats.get('total_trades', 0)}\n"
+            f"🎯 Win Rate: {stats.get('win_rate', 0):.1f}%\n\n"
+            f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         )
-        
-        # Add cancellation stats if enabled
-        if config.ENABLE_CANCELLATION:
-            message += (
-                f"\n🛡️ Cancelled: {stats.get('trades_cancelled', 0)}\n"
-                f"✅ Committed: {stats.get('trades_committed', 0)}\n"
-            )
-        
-        message += f"\n⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         
         await self.send_message(message)
 

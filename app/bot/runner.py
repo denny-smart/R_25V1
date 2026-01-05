@@ -1,16 +1,20 @@
 ﻿"""
-Bot Runner - Manages the lifecycle of the trading bot
-Wraps existing bot logic without modifying it
-FIXED VERSION - Matches TradeEngine interface
+Bot Runner - Multi-Asset Sequential Scanner
+Manages the lifecycle of the trading bot with multi-asset support
+✅ Scans: R_25, R_50, R_501s, R_75, R_751s
+✅ Sequential Top-Down analysis per symbol
+✅ Global 1-trade limit enforcement
+✅ First-Come-First-Served execution
+✅ Continuous monitoring of active trades
 """
 
 import asyncio
 import logging
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Dict, List
 from enum import Enum
 
-# Import existing bot modules (DO NOT MODIFY THESE)
+# Import existing bot modules
 from data_fetcher import DataFetcher
 from strategy import TradingStrategy
 from trade_engine import TradeEngine
@@ -33,11 +37,11 @@ class BotStatus(str, Enum):
 
 class BotRunner:
     """
-    Manages the trading bot lifecycle
-    - Start/Stop/Restart
-    - Status tracking
-    - Event broadcasting
-    - Telegram notifications
+    Multi-Asset Trading Bot Runner
+    - Scans multiple symbols sequentially
+    - Enforces global 1-trade position limit
+    - First qualifying signal locks the system
+    - Monitors active trades across all assets
     """
     
     def __init__(self):
@@ -52,6 +56,18 @@ class BotRunner:
         self.trade_engine: Optional[TradeEngine] = None
         self.strategy: Optional[TradingStrategy] = None
         self.risk_manager: Optional[RiskManager] = None
+        
+        # Multi-asset configuration
+        self.symbols: List[str] = config.SYMBOLS
+        self.asset_config: Dict = config.ASSET_CONFIG
+        
+        # Scanning statistics
+        self.scan_count = 0
+        self.signals_by_symbol: Dict[str, int] = {symbol: 0 for symbol in self.symbols}
+        self.errors_by_symbol: Dict[str, int] = {symbol: 0 for symbol in self.symbols}
+        
+        # Logging control
+        self.last_status_log: Dict[str, Dict] = {} # {symbol: {'msg': str, 'time': datetime}}
         
         # Telegram bridge
         self.telegram_bridge = telegram_bridge
@@ -69,41 +85,41 @@ class BotRunner:
             }
         
         try:
-            logger.info("🚀 Starting trading bot...")
+            logger.info("🚀 Starting multi-asset trading bot...")
+            logger.info(f"📊 Scanning symbols: {', '.join(self.symbols)}")
             self.status = BotStatus.STARTING
-            self.error_message = None  # Clear previous errors
+            self.error_message = None
             bot_state.update_status("starting")
             
             # Create bot task
             self.task = asyncio.create_task(self._run_bot())
             
-            # Wait longer for bot to fully initialize (up to 10 seconds)
+            # Wait for bot to fully initialize
             max_wait = 10
             for i in range(max_wait):
                 await asyncio.sleep(1)
                 
-                # Check if bot started successfully
                 if self.is_running:
-                    logger.info("✅ Bot started successfully")
+                    logger.info("✅ Multi-asset bot started successfully")
                     await event_manager.broadcast({
                         "type": "bot_status",
                         "status": "running",
-                        "message": "Bot started successfully"
+                        "message": f"Multi-asset bot started - scanning {len(self.symbols)} symbols",
+                        "symbols": self.symbols
                     })
                     
                     return {
                         "success": True,
-                        "message": "Bot started successfully",
-                        "status": self.status.value
+                        "message": f"Bot started - scanning {len(self.symbols)} symbols",
+                        "status": self.status.value,
+                        "symbols": self.symbols
                     }
                 
-                # Check if bot failed during startup
                 if self.status == BotStatus.ERROR:
                     error_msg = self.error_message or "Bot initialization failed"
                     raise Exception(error_msg)
             
-            # Timeout - bot didn't start in time
-            raise Exception("Bot startup timeout - took longer than expected")
+            raise Exception("Bot startup timeout")
                 
         except Exception as e:
             logger.error(f"❌ Failed to start bot: {e}")
@@ -111,11 +127,9 @@ class BotRunner:
             self.error_message = str(e)
             bot_state.update_status("error", error=str(e))
             
-            # Cancel the task if it's still running
             if self.task and not self.task.done():
                 self.task.cancel()
             
-            # Notify Telegram about startup failure
             try:
                 await self.telegram_bridge.notify_error(f"Failed to start bot: {e}")
             except:
@@ -140,7 +154,7 @@ class BotRunner:
             }
         
         try:
-            logger.info("🛑 Stopping trading bot...")
+            logger.info("🛑 Stopping multi-asset trading bot...")
             self.status = BotStatus.STOPPING
             bot_state.update_status("stopping")
             
@@ -166,9 +180,13 @@ class BotRunner:
             bot_state.update_status("stopped")
             logger.info("✅ Bot stopped successfully")
             
-            # Notify Telegram
+            # Notify Telegram with stats
             try:
                 stats = bot_state.get_statistics()
+                stats['scan_summary'] = {
+                    'total_scans': self.scan_count,
+                    'signals_by_symbol': self.signals_by_symbol
+                }
                 await self.telegram_bridge.notify_bot_stopped(stats)
             except:
                 pass
@@ -176,7 +194,7 @@ class BotRunner:
             await event_manager.broadcast({
                 "type": "bot_status",
                 "status": "stopped",
-                "message": "Bot stopped successfully"
+                "message": "Multi-asset bot stopped successfully"
             })
             
             return {
@@ -198,25 +216,27 @@ class BotRunner:
         Restart the trading bot
         Returns status dict
         """
-        logger.info("🔄 Restarting trading bot...")
+        logger.info("🔄 Restarting multi-asset trading bot...")
         
-        # Stop if running
         if self.is_running:
             stop_result = await self.stop_bot()
             if not stop_result["success"]:
                 return stop_result
             
-            # Wait for clean shutdown
             await asyncio.sleep(3)
         
-        # Start bot
         return await self.start_bot()
     
     def get_status(self) -> dict:
-        """Get current bot status"""
+        """Get current bot status with multi-asset info"""
         uptime = None
         if self.start_time:
             uptime = int((datetime.now() - self.start_time).total_seconds())
+        
+        # Get active trade info from risk manager
+        active_trade_info = None
+        if self.risk_manager and self.risk_manager.has_active_trade:
+            active_trade_info = self.risk_manager.get_active_trade_info()
         
         return {
             "status": self.status.value,
@@ -227,18 +247,25 @@ class BotRunner:
             "balance": bot_state.balance,
             "active_trades": bot_state.active_trades,
             "active_trades_count": len(bot_state.active_trades),
-            "statistics": bot_state.get_statistics()
+            "statistics": bot_state.get_statistics(),
+            "multi_asset": {
+                "symbols": self.symbols,
+                "scan_count": self.scan_count,
+                "active_symbol": active_trade_info['symbol'] if active_trade_info else None,
+                "signals_by_symbol": self.signals_by_symbol,
+                "errors_by_symbol": self.errors_by_symbol
+            }
         }
     
     async def _run_bot(self):
         """
-        Main bot loop - Wraps existing bot logic
-        This runs continuously in the background
+        Main bot loop - Multi-asset sequential scanner
+        Continuously scans all symbols looking for first qualifying signal
         """
         try:
-            logger.info("🤖 Bot main loop starting...")
+            logger.info("🤖 Multi-asset bot main loop starting...")
             
-            # Initialize bot components (existing modules)
+            # Initialize bot components
             try:
                 self.data_fetcher = DataFetcher(
                     config.DERIV_API_TOKEN,
@@ -252,6 +279,8 @@ class BotRunner:
                 
                 self.strategy = TradingStrategy()
                 self.risk_manager = RiskManager()
+                
+                logger.info("✅ Components initialized for multi-asset mode")
             except Exception as e:
                 self.status = BotStatus.ERROR
                 self.error_message = f"Component initialization failed: {e}"
@@ -265,31 +294,43 @@ class BotRunner:
                 
                 if not data_connected or not trade_connected:
                     raise Exception("Failed to connect to Deriv API")
+                
+                logger.info("✅ Connected to Deriv API")
             except Exception as e:
                 self.status = BotStatus.ERROR
                 self.error_message = f"Deriv API connection failed: {e}"
                 logger.error(f"❌ {self.error_message}")
                 return
             
+            # Check for existing positions on startup
+            try:
+                has_existing = await self.risk_manager.check_for_existing_positions(self.trade_engine)
+                if has_existing:
+                    logger.warning("⚠️ Existing position detected - system locked on startup")
+            except Exception as e:
+                logger.warning(f"⚠️ Could not check existing positions: {e}")
+            
             # Get initial balance
             try:
                 balance = await self.data_fetcher.get_balance()
                 if balance:
                     bot_state.update_balance(balance)
+                    logger.info(f"💰 Initial balance: ${balance:.2f}")
             except Exception as e:
                 logger.warning(f"⚠️ Could not fetch balance: {e}")
                 balance = 0.0
             
-            # Mark as running - THIS IS CRITICAL
+            # Mark as running
             self.is_running = True
             self.status = BotStatus.RUNNING
             self.start_time = datetime.now()
-            self.error_message = None  # Clear any previous errors
+            self.error_message = None
             bot_state.update_status("running")
             
-            logger.info("✅ Bot is now running")
+            logger.info("✅ Multi-asset bot is now running")
+            logger.info(f"🔍 Scanning {len(self.symbols)} symbols per cycle")
             
-            # NOTIFY TELEGRAM: Bot started
+            # Notify Telegram
             try:
                 await self.telegram_bridge.notify_bot_started(balance or 0.0)
             except Exception as e:
@@ -299,24 +340,30 @@ class BotRunner:
             await event_manager.broadcast({
                 "type": "bot_status",
                 "status": "running",
-                "message": "Bot started successfully",
-                "balance": balance
+                "message": f"Multi-asset bot started - scanning {len(self.symbols)} symbols",
+                "balance": balance,
+                "symbols": self.symbols
             })
             
-            cycle_count = 0
-            
-            # Main trading loop (continuous)
+            # Main trading loop - MULTI-ASSET SEQUENTIAL SCANNER
             while self.is_running:
                 try:
-                    cycle_count += 1
-                    logger.debug(f"Trading cycle #{cycle_count}")
+                    self.scan_count += 1
+                    logger.info(f"🔄 Scan cycle #{self.scan_count} - Checking {len(self.symbols)} symbols")
                     
-                    # Execute one trading cycle (existing logic)
-                    await self._trading_cycle()
+                    # Execute multi-asset scan cycle
+                    await self._multi_asset_scan_cycle()
                     
-                    # Check cooldown
+                    # Determine wait time based on risk manager state
                     cooldown = self.risk_manager.get_cooldown_remaining()
-                    wait_time = max(cooldown, 30)  # Minimum 30s between cycles
+                    
+                    # If actively monitoring a trade, check more frequently
+                    if self.risk_manager.has_active_trade:
+                        wait_time = max(cooldown, 10)  # Check every 10s when trade active
+                        logger.debug(f"⏱️ Active trade - next check in {wait_time}s")
+                    else:
+                        wait_time = max(cooldown, 30)  # Standard 30s cycle when scanning
+                        logger.debug(f"⏱️ No active trade - next scan in {wait_time}s")
                     
                     # Sleep with cancellation check
                     for _ in range(int(wait_time)):
@@ -328,15 +375,13 @@ class BotRunner:
                     logger.info("Bot loop cancelled")
                     break
                 except Exception as e:
-                    logger.error(f"Error in trading cycle: {e}")
+                    logger.error(f"Error in scan cycle: {e}")
                     
-                    # NOTIFY TELEGRAM: Error
                     try:
                         await self.telegram_bridge.notify_error(str(e))
                     except:
                         pass
                     
-                    # Broadcast to WebSockets
                     await event_manager.broadcast({
                         "type": "error",
                         "message": str(e),
@@ -352,13 +397,11 @@ class BotRunner:
             self.error_message = str(e)
             bot_state.update_status("error", error=str(e))
             
-            # NOTIFY TELEGRAM: Fatal error
             try:
                 await self.telegram_bridge.notify_error(f"Fatal error: {e}")
             except:
                 pass
             
-            # Broadcast to WebSockets
             await event_manager.broadcast({
                 "type": "error",
                 "message": f"Fatal error: {e}",
@@ -366,106 +409,296 @@ class BotRunner:
             })
         finally:
             self.is_running = False
-            logger.info("Bot main loop exited")
+            logger.info("Multi-asset bot main loop exited")
     
-    async def _trading_cycle(self):
+    async def _multi_asset_scan_cycle(self):
         """
-        Execute one trading cycle
-        This is the existing bot logic wrapped with Telegram notifications
+        CRITICAL: Multi-Asset Sequential Scanner
+        
+        Process:
+        1. Check global trade permission (1-trade limit)
+        2. If position active → Monitor only (skip scanning)
+        3. If no position → Scan all symbols sequentially
+        4. First qualifying signal → Execute and lock system
+        5. All other symbols blocked until trade closes
         """
-        # Check if can trade
-        can_trade, reason = self.risk_manager.can_trade()
-        if not can_trade:
-            logger.debug(f"Cannot trade: {reason}")
+        
+        # Step 1: Check global permission
+        can_trade_global, reason = self.risk_manager.can_trade()
+        
+        # If we have an active trade, monitor it instead of scanning
+        if self.risk_manager.has_active_trade:
+            logger.debug(f"🔒 Monitoring active {self.risk_manager.active_symbol} trade")
+            await self._monitor_active_trade()
             return
         
-        # Fetch market data
-        market_data = await self.data_fetcher.fetch_multi_timeframe_data(config.SYMBOL)
-        
-        if '1m' not in market_data or '5m' not in market_data:
-            logger.warning("Failed to fetch market data")
+        if not can_trade_global:
+            logger.debug(f"⏸️ Global trading paused: {reason}")
             return
         
-        data_1m = market_data['1m']
-        data_5m = market_data['5m']
+        # Step 2: Sequential symbol scanning (First-Come-First-Served)
+        logger.info(f"🔍 Scanning all {len(self.symbols)} symbols for entry signals...")
         
-        # Analyze market
-        signal = self.strategy.analyze(data_1m, data_5m)
+        for symbol in self.symbols:
+            # Check if we can still trade (might have changed during loop)
+            can_trade_now, _ = self.risk_manager.can_trade(symbol)
+            if not can_trade_now:
+                logger.debug(f"⏸️ {symbol} - Global state changed, stopping scan")
+                break
+            
+            try:
+                # Execute Top-Down analysis for this symbol
+                signal_found = await self._analyze_symbol(symbol)
+                
+                if signal_found:
+                    # CRITICAL: First qualifying signal locks the system
+                    logger.info(f"🎯 {symbol} won the race - executing trade")
+                    logger.info(f"🔒 All other symbols now BLOCKED")
+                    break  # Exit loop - system is now locked
+                
+            except Exception as e:
+                # Log error but continue to next symbol
+                logger.error(f"❌ Error analyzing {symbol}: {e}")
+                self.errors_by_symbol[symbol] = self.errors_by_symbol.get(symbol, 0) + 1
+                
+                # If too many errors for this symbol, notify
+                if self.errors_by_symbol[symbol] >= 5:
+                    try:
+                        await self.telegram_bridge.notify_error(
+                            f"Multiple errors for {symbol}: {e}"
+                        )
+                    except:
+                        pass
+                
+                continue  # Move to next symbol
         
-        if not signal['can_trade']:
-            logger.debug(f"No trade signal: {signal['details'].get('reason', 'Unknown')}")
-            return
+        logger.debug(f"✅ Scan cycle complete - checked {len(self.symbols)} symbols")
+    
+    async def _analyze_symbol(self, symbol: str) -> bool:
+        """
+        Analyze single symbol for entry signal
         
-        # NOTIFY TELEGRAM: Signal detected
+        Phase 1: Directional Bias (1w, 1d, 4h)
+        Phase 2: Level Classification (1h, 5m)
+        Phase 3: Entry Execution (1m Momentum + Retest)
+        
+        Returns:
+            True if trade executed, False if no signal
+        """
+        logger.debug(f"🔎 Analyzing {symbol}...")
+        
+        # Fetch multi-timeframe data for this symbol
+        # Fetch multi-timeframe data for this symbol
         try:
-            await self.telegram_bridge.notify_signal(signal)
+            market_data = await self.data_fetcher.fetch_all_timeframes(symbol)
+            
+            # Validate we have all required timeframes
+            required_timeframes = ['1m', '5m', '1h', '4h', '1d', '1w']  # Full Top-Down requirement
+            if not all(tf in market_data for tf in required_timeframes):
+                logger.warning(f"⚠️ {symbol} - Missing required timeframes")
+                return False
+            
+        except Exception as e:
+            logger.error(f"❌ {symbol} - Data fetch failed: {e}")
+            raise  # Re-raise to be caught by caller
+        
+        # Extract timeframe data
+        data_1m = market_data.get('1m')
+        data_5m = market_data.get('5m')
+        data_1h = market_data.get('1h')
+        data_4h = market_data.get('4h')
+        data_1d = market_data.get('1d')
+        data_1w = market_data.get('1w')
+        
+        # Execute strategy analysis
+        try:
+            signal = self.strategy.analyze(data_1m, data_5m, data_1h, data_4h, data_1d, data_1w)
+        except Exception as e:
+            logger.error(f"❌ {symbol} - Strategy analysis failed: {e}")
+            raise
+        
+        # Check if we have a tradeable signal
+        if not signal.get('can_trade'):
+            reason = signal.get('details', {}).get('reason', 'Unknown')
+            
+            # Smart Logging: Only log if reason changed or > 60s passed to avoid spam
+            now = datetime.now()
+            last_log = self.last_status_log.get(symbol, {'msg': '', 'time': datetime.min})
+            
+            should_log = False
+            if reason != last_log['msg']:
+                should_log = True
+            elif (now - last_log['time']).total_seconds() > 60:
+                should_log = True
+                
+            if should_log:
+                logger.info(f"⏳ {symbol} - Skipped: {reason}")
+                self.last_status_log[symbol] = {'msg': reason, 'time': now}
+            else:
+                # Debug only for spammy updates
+                logger.debug(f"⏭️ {symbol} - No signal: {reason}")
+                
+            return False
+        
+        # We have a signal! Log it
+        logger.info(f"🎯 {symbol} - SIGNAL DETECTED!")
+        logger.info(f"   Direction: {signal['signal']}")
+        logger.info(f"   Score: {signal.get('score', 0):.2f}")
+        logger.info(f"   Confidence: {signal.get('confidence', 0):.1f}%")
+        
+        # Track signal
+        self.signals_by_symbol[symbol] = self.signals_by_symbol.get(symbol, 0) + 1
+        
+        # Notify Telegram about signal
+        try:
+            signal_with_symbol = signal.copy()
+            signal_with_symbol['symbol'] = symbol
+            await self.telegram_bridge.notify_signal(signal_with_symbol)
         except:
             pass
         
-        # Broadcast signal event to WebSockets
+        # Broadcast signal to WebSockets
         await event_manager.broadcast({
             "type": "signal",
+            "symbol": symbol,
             "signal": signal['signal'],
-            "score": signal['score'],
+            "score": signal.get('score', 0),
             "confidence": signal.get('confidence', 0),
             "timestamp": datetime.now().isoformat()
         })
         
-        # Record signal
+        # Record signal in state
         bot_state.add_signal(signal)
         
-        # ✅ FIXED: Validate only stake (TP/SL handled by TradeEngine)
-        valid, msg = self.risk_manager.validate_trade_parameters(
-            stake=config.FIXED_STAKE
+        # Get symbol-specific configuration
+        multiplier = self.asset_config.get(symbol, {}).get('multiplier', config.MULTIPLIER)
+        stake = config.FIXED_STAKE * multiplier
+        
+        # Validate with risk manager (including global checks)
+        can_open, validation_msg = self.risk_manager.can_open_trade(
+            symbol=symbol,
+            stake=stake,
+            take_profit=signal.get('take_profit'),
+            stop_loss=signal.get('stop_loss')
         )
         
-        if not valid:
-            logger.warning(f"Invalid trade parameters: {msg}")
-            return
+        if not can_open:
+            logger.warning(f"❌ {symbol} - Trade blocked: {validation_msg}")
+            return False
         
-        # Execute trade using the integrated execute_trade method
-        logger.info(f"Executing {signal['signal']} trade...")
+        # Execute trade!
+        logger.info(f"🚀 {symbol} - Executing {signal['signal']} trade...")
+        logger.info(f"   Stake: ${stake:.2f} (multiplier: {multiplier}x)")
         
-        # ✅ FIXED: Use execute_trade which handles the complete lifecycle
-        result = await self.trade_engine.execute_trade(signal, self.risk_manager)
-        
-        if result:
-            # Trade completed successfully
-            pnl = result.get('profit', 0.0)
-            status = result.get('status', 'unknown')
-            contract_id = result.get('contract_id')
+        try:
+            # Add symbol to signal data
+            signal_with_symbol = signal.copy()
+            signal_with_symbol['symbol'] = symbol
+            signal_with_symbol['stake'] = stake
             
-            # Record trade closure (opening was already recorded in execute_trade)
-            self.risk_manager.record_trade_close(contract_id, pnl, status)
-            bot_state.update_trade(contract_id, result)
+            # Execute trade using TradeEngine
+            result = await self.trade_engine.execute_trade(
+                signal_with_symbol, 
+                self.risk_manager
+            )
             
-            # NOTIFY TELEGRAM: Trade closed
+            if result:
+                # Trade executed and completed
+                pnl = result.get('profit', 0.0)
+                status = result.get('status', 'unknown')
+                contract_id = result.get('contract_id')
+                
+                logger.info(f"✅ {symbol} - Trade completed: {status}")
+                logger.info(f"💰 P&L: ${pnl:.2f}")
+                
+                # Record trade closure
+                self.risk_manager.record_trade_close(contract_id, pnl, status)
+                bot_state.update_trade(contract_id, result)
+                
+                # Notify Telegram
+                try:
+                    result_with_symbol = result.copy()
+                    result_with_symbol['symbol'] = symbol
+                    await self.telegram_bridge.notify_trade_closed(result_with_symbol, pnl, status)
+                except:
+                    pass
+                
+                # Broadcast to WebSockets
+                await event_manager.broadcast({
+                    "type": "trade_closed",
+                    "symbol": symbol,
+                    "trade": result,
+                    "pnl": pnl,
+                    "status": status,
+                    "timestamp": datetime.now().isoformat()
+                })
+                
+                # Update statistics
+                stats = self.risk_manager.get_statistics()
+                bot_state.update_statistics(stats)
+                
+                await event_manager.broadcast({
+                    "type": "statistics",
+                    "stats": stats,
+                    "timestamp": datetime.now().isoformat()
+                })
+                
+                return True  # Trade executed
+            else:
+                logger.error(f"❌ {symbol} - Trade execution failed")
+                return False
+                
+        except Exception as e:
+            logger.error(f"❌ {symbol} - Trade execution error: {e}")
+            
             try:
-                await self.telegram_bridge.notify_trade_closed(result, pnl, status)
+                await self.telegram_bridge.notify_error(f"{symbol} trade failed: {e}")
             except:
                 pass
             
-            # Broadcast trade closed event to WebSockets
-            await event_manager.broadcast({
-                "type": "trade_closed",
-                "trade": result,
-                "pnl": pnl,
-                "status": status,
-                "timestamp": datetime.now().isoformat()
-            })
+            return False
+    
+    async def _monitor_active_trade(self):
+        """
+        Monitor the currently active trade
+        This runs when a trade is locked, checking its status
+        """
+        if not self.risk_manager.has_active_trade:
+            return
+        
+        active_info = self.risk_manager.get_active_trade_info()
+        if not active_info:
+            return
+        
+        symbol = active_info['symbol']
+        contract_id = active_info['contract_id']
+        
+        try:
+            # Fetch current trade status from Deriv
+            # This allows us to detect early closures or updates
+            trade_status = await self.trade_engine.get_trade_status(contract_id)
             
-            # Update statistics
-            stats = self.risk_manager.get_statistics()
-            bot_state.update_statistics(stats)
+            if trade_status and trade_status.get('is_sold'):
+                # Trade closed externally or by TP/SL
+                logger.info(f"🔔 {symbol} trade detected as closed")
+                
+                pnl = trade_status.get('profit', 0.0)
+                status = trade_status.get('status', 'sold')
+                
+                # Record closure
+                self.risk_manager.record_trade_close(contract_id, pnl, status)
+                
+                logger.info(f"🔓 {symbol} trade closed - system unlocked")
+                logger.info(f"💰 P&L: ${pnl:.2f}")
+                
+                # Notify Telegram
+                try:
+                    await self.telegram_bridge.notify_trade_closed(trade_status, pnl, status)
+                except:
+                    pass
             
-            # Broadcast stats update to WebSockets
-            await event_manager.broadcast({
-                "type": "statistics",
-                "stats": stats,
-                "timestamp": datetime.now().isoformat()
-            })
-        else:
-            logger.error("Trade execution failed")
+        except Exception as e:
+            logger.warning(f"⚠️ Could not monitor {symbol} trade: {e}")
 
 # Global bot runner instance
 bot_runner = BotRunner()

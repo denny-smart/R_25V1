@@ -1,13 +1,14 @@
 """
-Main Controller for Deriv R_25 Multipliers Trading Bot
-Coordinates all components and runs the trading loop
-main.py - WITH TOP-DOWN MULTI-TIMEFRAME STRATEGY SUPPORT
+Main Controller for Deriv Multi-Asset Multipliers Trading Bot
+Coordinates all components and runs the trading loop across multiple assets
+main.py - MULTI-ASSET WITH TOP-DOWN STRATEGY SUPPORT
 """
 
 import asyncio
 import signal
 import sys
 from datetime import datetime
+from typing import Dict, List, Optional
 import config
 from utils import setup_logger, print_statistics, format_currency
 from data_fetcher import DataFetcher
@@ -27,7 +28,7 @@ except ImportError:
     logger.warning("⚠️ Telegram notifier not available")
 
 class TradingBot:
-    """Main trading bot controller"""
+    """Main trading bot controller with multi-asset support"""
     
     def __init__(self):
         """Initialize trading bot components"""
@@ -36,6 +37,10 @@ class TradingBot:
         self.trade_engine = None
         self.strategy = None
         self.risk_manager = None
+        
+        # Multi-asset tracking
+        self.symbols = config.get_all_symbols()
+        self.asset_signals: Dict[str, Optional[Dict]] = {symbol: None for symbol in self.symbols}
         
         # Setup signal handlers for graceful shutdown
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -55,7 +60,7 @@ class TradingBot:
         """
         try:
             logger.info("="*60)
-            logger.info("🚀 Initializing Deriv R_25 Multipliers Trading Bot")
+            logger.info("🚀 Initializing Deriv Multi-Asset Multipliers Trading Bot")
             logger.info("="*60)
             
             # Validate configuration
@@ -102,29 +107,25 @@ class TradingBot:
             # Log trading parameters
             logger.info("="*60)
             
-            # Check which strategy is active
             strategy_mode = "TOP-DOWN MULTI-TIMEFRAME" if config.USE_TOPDOWN_STRATEGY else "TWO-PHASE SCALPING"
             logger.info(f"TRADING PARAMETERS - {strategy_mode}")
             logger.info("="*60)
-            logger.info(f"📊 Symbol: {config.SYMBOL}")
-            logger.info(f"📈 Multiplier: {config.MULTIPLIER}x")
+            logger.info(f"📊 Assets Monitored: {len(self.symbols)}")
+            for symbol in self.symbols:
+                asset_info = config.get_asset_info(symbol)
+                logger.info(f"   • {symbol}: {asset_info['multiplier']}x ({asset_info['description']})")
+            
             logger.info(f"💵 Stake: {format_currency(config.FIXED_STAKE)}")
+            logger.info(f"🎯 Max Concurrent Trades: {config.MAX_CONCURRENT_TRADES}")
             
             if config.USE_TOPDOWN_STRATEGY:
-                # Top-Down strategy parameters
-                logger.info(f"🎯 Strategy: Top-Down Multi-Timeframe Analysis")
+                logger.info(f"📈 Strategy: Top-Down Multi-Timeframe Analysis")
                 logger.info(f"📊 Timeframes: 1w, 1d, 4h, 1h, 5m, 1m")
-                logger.info(f"📈 Min R:R Ratio: 1:{config.TOPDOWN_MIN_RR_RATIO}")
-                logger.info(f"🎯 Dynamic TP/SL: Based on market structure")
+                logger.info(f"🎯 Min R:R Ratio: 1:{config.TOPDOWN_MIN_RR_RATIO}")
+                logger.info(f"💰 Dynamic TP/SL: Based on market structure")
             else:
-                # Legacy scalping parameters
-                if config.ENABLE_CANCELLATION:
-                    logger.info(f"🛡️ Cancellation: ENABLED ({config.CANCELLATION_DURATION}s)")
-                    logger.info(f"   Phase 2 TP: {config.POST_CANCEL_TAKE_PROFIT_PERCENT}%")
-                    logger.info(f"   Phase 2 SL: {config.POST_CANCEL_STOP_LOSS_PERCENT}%")
-                else:
-                    logger.info(f"🎯 Take Profit: {config.TAKE_PROFIT_PERCENT}%")
-                    logger.info(f"🛑 Stop Loss: {config.STOP_LOSS_PERCENT}%")
+                logger.info(f"🎯 Take Profit: {config.TAKE_PROFIT_PERCENT}%")
+                logger.info(f"🛑 Stop Loss: {config.STOP_LOSS_PERCENT}%")
             
             logger.info(f"⏰ Cooldown: {config.COOLDOWN_SECONDS}s")
             logger.info(f"🔢 Max Daily Trades: {config.MAX_TRADES_PER_DAY}")
@@ -171,36 +172,31 @@ class TradingBot:
         except Exception as e:
             logger.error(f"❌ Error during shutdown: {e}")
     
-    async def trading_cycle(self):
-        """Execute one trading cycle"""
+    async def analyze_asset(self, symbol: str) -> Optional[Dict]:
+        """
+        Analyze a single asset and generate trading signal
+        
+        Args:
+            symbol: Trading symbol (e.g., 'R_25')
+        
+        Returns:
+            Signal dictionary or None if analysis failed
+        """
         try:
-            # Check if we can trade
-            can_trade, reason = self.risk_manager.can_trade()
-            
-            if not can_trade:
-                logger.debug(f"⏸️ Cannot trade: {reason}")
-                return
-            
-            # ============================================================================
-            # FETCH MARKET DATA - Multi-timeframe for Top-Down or legacy for scalping
-            # ============================================================================
-            
-            logger.info("📊 Fetching market data...")
+            logger.info(f"📊 Analyzing {symbol}...")
             
             if config.USE_TOPDOWN_STRATEGY:
                 # Fetch all timeframes for Top-Down analysis
-                all_timeframes = await self.data_fetcher.fetch_all_timeframes(config.SYMBOL)
+                all_timeframes = await self.data_fetcher.fetch_all_timeframes(symbol)
                 
                 if not all_timeframes:
-                    logger.warning("⚠️ Failed to fetch any market data")
-                    return
+                    logger.warning(f"⚠️ Failed to fetch data for {symbol}")
+                    return None
                 
-                # Log what we got
                 fetched_tfs = list(all_timeframes.keys())
-                logger.info(f"✅ Fetched timeframes: {', '.join(fetched_tfs)}")
+                logger.debug(f"   Fetched timeframes: {', '.join(fetched_tfs)}")
                 
                 # Analyze with all available timeframes
-                logger.info("🔍 Analyzing market structure (Top-Down)...")
                 signal = self.strategy.analyze(
                     data_1m=all_timeframes.get('1m'),
                     data_5m=all_timeframes.get('5m'),
@@ -210,29 +206,86 @@ class TradingBot:
                     data_1w=all_timeframes.get('1w')
                 )
             else:
-                # Legacy: Use old 1m+5m only for scalping strategy
-                market_data = await self.data_fetcher.fetch_multi_timeframe_data(config.SYMBOL)
+                # Legacy: Use 1m+5m only
+                market_data = await self.data_fetcher.fetch_multi_timeframe_data(symbol)
                 
                 if '1m' not in market_data or '5m' not in market_data:
-                    logger.warning("⚠️ Failed to fetch complete market data")
-                    return
+                    logger.warning(f"⚠️ Failed to fetch complete data for {symbol}")
+                    return None
                 
-                data_1m = market_data['1m']
-                data_5m = market_data['5m']
-                
-                logger.info(f"✅ Fetched {len(data_1m)} 1m candles, {len(data_5m)} 5m candles")
-                
-                # Analyze market (old way)
-                logger.info("🔍 Analyzing market conditions...")
-                signal = self.strategy.analyze(data_1m, data_5m)
+                signal = self.strategy.analyze(market_data['1m'], market_data['5m'])
             
-            # ============================================================================
-            # CHECK SIGNAL
-            # ============================================================================
+            # Add symbol to signal
+            if signal:
+                signal['symbol'] = symbol
+                signal['asset_info'] = config.get_asset_info(symbol)
             
-            if not signal['can_trade']:
-                logger.info(f"⚪ HOLD | Reason: {signal['details'].get('reason', 'Unknown')}")
+            return signal
+            
+        except Exception as e:
+            logger.error(f"❌ Error analyzing {symbol}: {e}")
+            return None
+    
+    async def scan_all_assets(self) -> List[Dict]:
+        """
+        Scan all configured assets and return valid trading signals
+        
+        Returns:
+            List of valid signals sorted by strength (if prioritization enabled)
+        """
+        logger.info(f"🔍 Scanning {len(self.symbols)} assets for trading opportunities...")
+        
+        valid_signals = []
+        
+        # Analyze each asset sequentially to avoid rate limiting
+        for symbol in self.symbols:
+            signal = await self.analyze_asset(symbol)
+            
+            if signal and signal.get('can_trade'):
+                valid_signals.append(signal)
+                logger.info(f"✅ {symbol}: Valid {signal['signal']} signal (score: {signal.get('score', 0)})")
+            else:
+                reason = signal['details'].get('reason', 'Unknown') if signal else 'Analysis failed'
+                logger.debug(f"⚪ {symbol}: {reason}")
+            
+            # Store signal for tracking
+            self.asset_signals[symbol] = signal
+            
+            # Brief pause between assets to respect rate limits
+            await asyncio.sleep(0.5)
+        
+        if not valid_signals:
+            logger.info("📭 No valid signals found across all assets")
+            return []
+        
+        # Prioritize by signal strength if enabled
+        if config.PRIORITIZE_BY_SIGNAL_STRENGTH:
+            valid_signals.sort(key=lambda s: s.get('score', 0), reverse=True)
+            logger.info(f"📊 Prioritized {len(valid_signals)} signals by strength")
+        
+        return valid_signals
+    
+    async def trading_cycle(self):
+        """Execute one trading cycle across all assets"""
+        try:
+            # Check if we can trade
+            can_trade, reason = self.risk_manager.can_trade()
+            
+            if not can_trade:
+                logger.debug(f"⏸️ Cannot trade: {reason}")
                 return
+            
+            # Scan all assets for trading opportunities
+            valid_signals = await self.scan_all_assets()
+            
+            if not valid_signals:
+                return
+            
+            # Trade the first valid signal (respecting MAX_CONCURRENT_TRADES limit)
+            signal = valid_signals[0]
+            symbol = signal['symbol']
+            
+            logger.info(f"🎯 Selected {symbol} for trading (strongest signal)")
             
             # Notify signal detected
             if TELEGRAM_ENABLED:
@@ -241,17 +294,14 @@ class TradingBot:
                 except Exception as e:
                     logger.error(f"❌ Telegram notification failed: {e}")
             
-            # ============================================================================
-            # VALIDATE TRADE PARAMETERS
-            # ============================================================================
-            
+            # Validate trade parameters
             if config.USE_TOPDOWN_STRATEGY:
-                # Top-Down: TP/SL come from strategy (price levels)
+                # Top-Down: TP/SL come from strategy
                 tp_price = signal.get('take_profit')
                 sl_price = signal.get('stop_loss')
                 
                 if not tp_price or not sl_price:
-                    logger.warning("⚠️ Strategy did not provide TP/SL levels")
+                    logger.warning(f"⚠️ {symbol}: Strategy did not provide TP/SL levels")
                     return
                 
                 # Validate risk/reward ratio
@@ -259,26 +309,23 @@ class TradingBot:
                 if entry_price > 0:
                     rr_ratio = signal.get('risk_reward_ratio', 0)
                     if rr_ratio < config.TOPDOWN_MIN_RR_RATIO:
-                        logger.warning(f"⚠️ R:R ratio {rr_ratio:.2f} below minimum {config.TOPDOWN_MIN_RR_RATIO}")
+                        logger.warning(f"⚠️ {symbol}: R:R ratio {rr_ratio:.2f} below minimum {config.TOPDOWN_MIN_RR_RATIO}")
                         return
                 
                 valid = True
                 msg = "Top-Down parameters validated"
             else:
-                # Legacy: Validate only stake (TP/SL calculated by trade_engine)
+                # Legacy: Validate only stake
                 valid, msg = self.risk_manager.validate_trade_parameters(
                     stake=config.FIXED_STAKE
                 )
             
             if not valid:
-                logger.warning(f"⚠️ Invalid trade parameters: {msg}")
+                logger.warning(f"⚠️ {symbol}: Invalid trade parameters: {msg}")
                 return
             
-            # ============================================================================
-            # EXECUTE TRADE
-            # ============================================================================
-            
-            logger.info(f"🚀 Executing {signal['signal']} trade...")
+            # Execute trade
+            logger.info(f"🚀 Executing {signal['signal']} trade on {symbol}...")
             
             # Log trade details if using Top-Down
             if config.USE_TOPDOWN_STRATEGY:
@@ -287,13 +334,7 @@ class TradingBot:
                 logger.info(f"   🛡️ SL: {signal.get('stop_loss', 0):.4f}")
                 logger.info(f"   📊 R:R: 1:{signal.get('risk_reward_ratio', 0):.2f}")
             
-            # Execute trade with full two-phase monitoring
-            # This single method call handles:
-            # 1. Opening the trade (with dynamic cancellation fee)
-            # 2. Recording it with risk manager
-            # 3. Phase 1: Monitoring cancellation period
-            # 4. Phase 2: Monitoring committed trade with TP/SL
-            # 5. Returning final status
+            # Execute trade with monitoring
             result = await self.trade_engine.execute_trade(signal, self.risk_manager)
             
             if result:
@@ -302,7 +343,7 @@ class TradingBot:
                 status = result.get('status', 'unknown')
                 contract_id = result.get('contract_id')
                 
-                # Record trade closure (opening was already recorded in execute_trade)
+                # Record trade closure
                 self.risk_manager.record_trade_close(
                     contract_id,
                     pnl,
@@ -315,13 +356,8 @@ class TradingBot:
                 logger.info(f"💰 Total P&L: {format_currency(stats['total_pnl'])}")
                 logger.info(f"📊 Trades Today: {stats['trades_today']}/{config.MAX_TRADES_PER_DAY}")
                 
-                if config.ENABLE_CANCELLATION and not config.USE_TOPDOWN_STRATEGY:
-                    logger.info(f"🛡️ Cancelled: {stats.get('trades_cancelled', 0)}")
-                    logger.info(f"✅ Committed: {stats.get('trades_committed', 0)}")
-                
-                # Send Telegram notification for trade result
+                # Send Telegram notification
                 if TELEGRAM_ENABLED:
-                    # Get the trade info from risk manager for notification
                     trade_info = None
                     for t in self.risk_manager.trades_today:
                         if t.get('contract_id') == contract_id:
@@ -334,7 +370,7 @@ class TradingBot:
                         except Exception as e:
                             logger.error(f"❌ Telegram notification failed: {e}")
             else:
-                logger.error("❌ Trade execution failed")
+                logger.error(f"❌ {symbol}: Trade execution failed")
             
         except Exception as e:
             logger.error(f"❌ Error in trading cycle: {e}")
@@ -351,6 +387,7 @@ class TradingBot:
             
             self.running = True
             logger.info("\n🚀 Starting main trading loop")
+            logger.info(f"📊 Monitoring {len(self.symbols)} assets: {', '.join(self.symbols)}")
             logger.info("Press Ctrl+C to stop\n")
             
             cycle_count = 0
@@ -363,7 +400,7 @@ class TradingBot:
                     logger.info(f"CYCLE #{cycle_count} | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
                     logger.info(f"{'='*60}")
                     
-                    # Execute trading cycle
+                    # Execute trading cycle (scans all assets)
                     await self.trading_cycle()
                     
                     # Check cooldown
@@ -408,17 +445,15 @@ def main():
         
         # Print welcome banner
         print("\n" + "="*60)
-        print("   DERIV R_25 MULTIPLIERS TRADING BOT")
+        print("   DERIV MULTI-ASSET MULTIPLIERS TRADING BOT")
         print(f"   {strategy_name.upper()}")
         print("="*60)
-        print(f"   Version: 2.1 (Multi-Strategy)")
-        print(f"   Symbol: {config.SYMBOL}")
-        print(f"   Multiplier: {config.MULTIPLIER}x")
+        print(f"   Version: 3.0 (Multi-Asset)")
+        print(f"   Assets: {', '.join(config.get_all_symbols())}")
         print(f"   Strategy: {strategy_name}")
+        print(f"   Max Concurrent: {config.MAX_CONCURRENT_TRADES}")
         if config.USE_TOPDOWN_STRATEGY:
             print(f"   Min R:R: 1:{config.TOPDOWN_MIN_RR_RATIO}")
-        else:
-            print(f"   Cancellation: {'Enabled' if config.ENABLE_CANCELLATION else 'Disabled'}")
         print("="*60 + "\n")
         
         # Create and run bot

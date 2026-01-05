@@ -1,7 +1,7 @@
 """
-Data Fetcher for Deriv R_25 Trading Bot
-Asynchronous data fetching from Deriv API with auto-reconnect
-data_fetcher.py - WITH AUTO-RECONNECT AND MULTI-TIMEFRAME SUPPORT
+Data Fetcher for Deriv Multi-Asset Trading Bot
+Enhanced with multi-asset sequential fetching and rate limiting
+data_fetcher.py - MULTI-ASSET VERSION
 """
 
 import asyncio
@@ -17,7 +17,7 @@ from utils import setup_logger, parse_candle_data
 logger = setup_logger()
 
 class DataFetcher:
-    """Handles all data fetching operations from Deriv API"""
+    """Handles all data fetching operations from Deriv API with multi-asset support"""
     
     def __init__(self, api_token: str, app_id: str = "1089"):
         """
@@ -35,14 +35,13 @@ class DataFetcher:
         self.request_lock = asyncio.Lock()
         self.reconnect_attempts = 0
         self.max_reconnect_attempts = 5
+        
+        # Rate limiting
+        self.last_request_time = 0
+        self.min_request_interval = 0.1  # Minimum 100ms between requests
     
     async def connect(self) -> bool:
-        """
-        Connect to Deriv WebSocket API
-        
-        Returns:
-            True if connected successfully
-        """
+        """Connect to Deriv WebSocket API"""
         try:
             self.ws = await websockets.connect(
                 self.ws_url,
@@ -50,7 +49,7 @@ class DataFetcher:
                 ping_timeout=10
             )
             self.is_connected = True
-            self.reconnect_attempts = 0  # Reset on successful connection
+            self.reconnect_attempts = 0
             logger.info("[OK] Connected to Deriv API")
             
             # Authorize
@@ -63,12 +62,7 @@ class DataFetcher:
             return False
     
     async def reconnect(self) -> bool:
-        """
-        Attempt to reconnect to the API
-        
-        Returns:
-            True if reconnected successfully
-        """
+        """Attempt to reconnect to the API"""
         self.reconnect_attempts += 1
         
         if self.reconnect_attempts > self.max_reconnect_attempts:
@@ -95,12 +89,7 @@ class DataFetcher:
         return await self.connect()
     
     async def ensure_connected(self) -> bool:
-        """
-        Ensure WebSocket is connected, reconnect if needed
-        
-        Returns:
-            True if connected
-        """
+        """Ensure WebSocket is connected, reconnect if needed"""
         if not self.is_connected or not self.ws or self.ws.closed:
             logger.warning("[WARNING] Connection lost, attempting to reconnect...")
             return await self.reconnect()
@@ -114,12 +103,7 @@ class DataFetcher:
             logger.info("[DISCONNECTED] From Deriv API")
     
     async def authorize(self) -> bool:
-        """
-        Authorize connection with API token
-        
-        Returns:
-            True if authorized successfully
-        """
+        """Authorize connection with API token"""
         try:
             auth_request = {
                 "authorize": self.api_token
@@ -144,20 +128,25 @@ class DataFetcher:
             logger.error(f"[ERROR] Authorization error: {e}")
             return False
     
+    async def _rate_limit(self):
+        """Enforce rate limiting between requests"""
+        now = asyncio.get_event_loop().time()
+        time_since_last = now - self.last_request_time
+        
+        if time_since_last < self.min_request_interval:
+            await asyncio.sleep(self.min_request_interval - time_since_last)
+        
+        self.last_request_time = asyncio.get_event_loop().time()
+    
     async def send_request(self, request: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Send request to API and get response (with reconnection handling)
-        
-        Args:
-            request: Request dictionary
-        
-        Returns:
-            Response dictionary
-        """
+        """Send request to API with rate limiting"""
         try:
             # Ensure connection is alive
             if not await self.ensure_connected():
                 return {"error": {"message": "Failed to establish connection"}}
+            
+            # Apply rate limiting
+            await self._rate_limit()
             
             async with self.request_lock:
                 await self.ws.send(json.dumps(request))
@@ -169,7 +158,7 @@ class DataFetcher:
                 websockets.exceptions.ConnectionClosedOK) as e:
             logger.warning(f"[WARNING] Connection closed during request: {e}")
             
-            # Try to reconnect and retry the request once
+            # Try to reconnect and retry once
             if await self.reconnect():
                 try:
                     async with self.request_lock:
@@ -188,17 +177,7 @@ class DataFetcher:
     
     async def fetch_candles(self, symbol: str, granularity: int, 
                            count: int) -> Optional[pd.DataFrame]:
-        """
-        Fetch historical candle data
-        
-        Args:
-            symbol: Trading symbol (e.g., 'R_25')
-            granularity: Candle granularity in seconds (60, 300, etc.)
-            count: Number of candles to fetch
-        
-        Returns:
-            DataFrame with OHLC data or None if failed
-        """
+        """Fetch historical candle data for any symbol"""
         try:
             request = {
                 "ticks_history": symbol,
@@ -213,11 +192,11 @@ class DataFetcher:
             response = await self.send_request(request)
             
             if "error" in response:
-                logger.error(f"[ERROR] Failed to fetch candles: {response['error']['message']}")
+                logger.error(f"[ERROR] Failed to fetch {symbol} candles: {response['error']['message']}")
                 return None
             
             if "candles" not in response:
-                logger.error("[ERROR] No candle data in response")
+                logger.error(f"[ERROR] No candle data for {symbol}")
                 return None
             
             # Parse candles
@@ -234,23 +213,15 @@ class DataFetcher:
             # Convert timestamp to datetime
             df['datetime'] = pd.to_datetime(df['timestamp'], unit='s')
             
-            logger.info(f"[OK] Fetched {len(df)} candles ({granularity}s)")
+            logger.debug(f"[OK] Fetched {len(df)} {symbol} candles ({granularity}s)")
             return df
             
         except Exception as e:
-            logger.error(f"[ERROR] Error fetching candles: {e}")
+            logger.error(f"[ERROR] Error fetching {symbol} candles: {e}")
             return None
     
     async def fetch_tick(self, symbol: str) -> Optional[float]:
-        """
-        Fetch current tick (price)
-        
-        Args:
-            symbol: Trading symbol
-        
-        Returns:
-            Current price or None if failed
-        """
+        """Fetch current tick price for any symbol"""
         try:
             request = {
                 "ticks": symbol
@@ -259,7 +230,7 @@ class DataFetcher:
             response = await self.send_request(request)
             
             if "error" in response:
-                logger.error(f"[ERROR] Failed to fetch tick: {response['error']['message']}")
+                logger.error(f"[ERROR] Failed to fetch {symbol} tick: {response['error']['message']}")
                 return None
             
             if "tick" in response:
@@ -268,16 +239,11 @@ class DataFetcher:
             return None
             
         except Exception as e:
-            logger.error(f"[ERROR] Error fetching tick: {e}")
+            logger.error(f"[ERROR] Error fetching {symbol} tick: {e}")
             return None
     
     async def get_balance(self) -> Optional[float]:
-        """
-        Get account balance
-        
-        Returns:
-            Account balance or None if failed
-        """
+        """Get account balance"""
         try:
             request = {"balance": 1, "subscribe": 0}
             response = await self.send_request(request)
@@ -295,73 +261,12 @@ class DataFetcher:
             logger.error(f"[ERROR] Error getting balance: {e}")
             return None
     
-    async def get_active_symbols(self) -> Optional[List[Dict]]:
-        """
-        Get list of active trading symbols
-        
-        Returns:
-            List of symbol dictionaries or None if failed
-        """
-        try:
-            request = {
-                "active_symbols": "brief",
-                "product_type": "basic"
-            }
-            
-            response = await self.send_request(request)
-            
-            if "error" in response:
-                logger.error(f"[ERROR] Failed to get symbols: {response['error']['message']}")
-                return None
-            
-            if "active_symbols" in response:
-                return response["active_symbols"]
-            
-            return None
-            
-        except Exception as e:
-            logger.error(f"[ERROR] Error getting symbols: {e}")
-            return None
-    
-    async def fetch_multi_timeframe_data(self, symbol: str) -> Dict[str, pd.DataFrame]:
-        """
-        Fetch data for multiple timeframes SEQUENTIALLY (not concurrently)
-        
-        Args:
-            symbol: Trading symbol
-        
-        Returns:
-            Dictionary with timeframe data {granularity: DataFrame}
-        """
-        try:
-            result = {}
-            
-            # Fetch 1m candles first
-            candles_1m = await self.fetch_candles(symbol, 60, config.CANDLES_1M)
-            if candles_1m is not None:
-                result['1m'] = candles_1m
-            
-            # Then fetch 5m candles
-            candles_5m = await self.fetch_candles(symbol, 300, config.CANDLES_5M)
-            if candles_5m is not None:
-                result['5m'] = candles_5m
-            
-            return result
-            
-        except Exception as e:
-            logger.error(f"[ERROR] Error fetching multi-timeframe data: {e}")
-            return {}
-    
-    # ============================================================================
-    # NEW METHODS FOR MULTI-TIMEFRAME SUPPORT (Top-Down Strategy)
-    # ============================================================================
-    
     async def fetch_timeframe(self, symbol: str, timeframe: str, count: int = 200) -> Optional[pd.DataFrame]:
         """
-        Fetch data for any timeframe (1m, 5m, 15m, 1h, 4h, 1d, 1w)
+        Fetch data for any timeframe for any symbol
         
         Args:
-            symbol: Trading symbol (e.g., 'R_25')
+            symbol: Trading symbol (e.g., 'R_25', 'R_50')
             timeframe: Timeframe string ('1m', '5m', '15m', '1h', '4h', '1d', '1w')
             count: Number of candles to fetch
         
@@ -376,48 +281,91 @@ class DataFetcher:
             '1h': 3600,
             '4h': 14400,
             '1d': 86400,
-            '1w': 604800
+            '1d': 86400,
+            '1w': 86400  # Hack: Fetch 1d and resample to 1w
         }
         
-        if timeframe not in granularity_map:
-            logger.error(f"[ERROR] Unsupported timeframe: {timeframe}")
-            return None
-        
-        granularity = granularity_map[timeframe]
+        # Handle 1w specially (Deriv doesn't support 1w granularity directly)
+        is_weekly = (timeframe == '1w')
+        if is_weekly:
+            # For 1w, we fetch 1d data (7x the count to get enough days) and resample
+            granularity = 86400
+            fetch_count = count * 7
+        else:
+            if timeframe not in granularity_map:
+                logger.error(f"[ERROR] Unsupported timeframe: {timeframe}")
+                return None
+            granularity = granularity_map[timeframe]
+            fetch_count = count
         
         try:
-            logger.debug(f"Fetching {count} {timeframe} candles...")
-            df = await self.fetch_candles(symbol, granularity, count)
+            logger.debug(f"Fetching {fetch_count} candles ({granularity}s) for {symbol} to build {timeframe}...")
+            df = await self.fetch_candles(symbol, granularity, fetch_count)
             
             if df is not None:
-                logger.info(f"[OK] Fetched {len(df)} {timeframe} candles")
+                if is_weekly:
+                    # Resample 1d -> 1w
+                    df = self._resample_to_weekly(df)
+                    # Limit to requested count
+                    if df is not None:
+                        df = df.tail(count)
+                
+                logger.debug(f"[OK] Fetched {len(df)} {symbol} {timeframe} candles")
             else:
-                logger.warning(f"[WARNING] Failed to fetch {timeframe} candles")
+                logger.warning(f"[WARNING] Failed to fetch {symbol} {timeframe} candles")
             
             return df
             
         except Exception as e:
-            logger.error(f"[ERROR] Error fetching {timeframe} data: {e}")
+            logger.error(f"[ERROR] Error fetching {symbol} {timeframe} data: {e}")
             return None
+    
+    async def fetch_multi_timeframe_data(self, symbol: str) -> Dict[str, pd.DataFrame]:
+        """
+        Fetch 1m and 5m data for a symbol (legacy scalping mode)
+        
+        Args:
+            symbol: Trading symbol
+        
+        Returns:
+            Dictionary with '1m' and '5m' DataFrames
+        """
+        try:
+            result = {}
+            
+            # Fetch 1m candles
+            candles_1m = await self.fetch_candles(symbol, 60, config.CANDLES_1M)
+            if candles_1m is not None:
+                result['1m'] = candles_1m
+            
+            # Then fetch 5m candles
+            candles_5m = await self.fetch_candles(symbol, 300, config.CANDLES_5M)
+            if candles_5m is not None:
+                result['5m'] = candles_5m
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"[ERROR] Error fetching multi-timeframe data for {symbol}: {e}")
+            return {}
     
     async def fetch_all_timeframes(self, symbol: str) -> Dict[str, pd.DataFrame]:
         """
         Fetch all timeframes needed for Top-Down strategy
-        Fetches SEQUENTIALLY with rate limiting (not concurrent)
         
         Args:
-            symbol: Trading symbol (e.g., 'R_25')
+            symbol: Trading symbol (e.g., 'R_25', 'R_50')
         
         Returns:
             Dictionary with keys: '1m', '5m', '1h', '4h', '1d', '1w'
         """
         timeframes = {
-            '1m': 100,   # 100 1-minute candles
-            '5m': 100,   # 100 5-minute candles  
-            '1h': 200,   # 200 hours (~8 days)
-            '4h': 200,   # 200 4-hour candles (~33 days)
-            '1d': 100,   # 100 days (~3 months)
-            '1w': 52     # 52 weeks (1 year)
+            '1m': config.CANDLES_1M,
+            '5m': config.CANDLES_5M,
+            '1h': config.CANDLES_1H,
+            '4h': config.CANDLES_4H,
+            '1d': config.CANDLES_1D,
+            '1w': config.CANDLES_1W
         }
         
         data = {}
@@ -430,70 +378,171 @@ class DataFetcher:
                 if df is not None and not df.empty:
                     data[tf] = df
                 else:
-                    logger.warning(f"[WARNING] Empty or failed {tf} data")
+                    logger.warning(f"[WARNING] Empty or failed {symbol} {tf} data")
                 
-                # Rate limiting: Wait between requests
-                await asyncio.sleep(0.5)
+                # Rate limiting between requests
+                await asyncio.sleep(0.3)
                 
             except Exception as e:
-                logger.error(f"[ERROR] Failed to fetch {tf}: {e}")
+                logger.error(f"[ERROR] Failed to fetch {symbol} {tf}: {e}")
         
-        logger.info(f"[OK] Fetched {len(data)}/{len(timeframes)} timeframes successfully")
+        logger.info(f"[OK] Fetched {len(data)}/{len(timeframes)} timeframes for {symbol}")
         
         return data
 
+    def _resample_to_weekly(self, df_daily: pd.DataFrame) -> Optional[pd.DataFrame]:
+        """
+        Resample daily data to weekly data
+        Deriv weeks start on Monday (usually)
+        """
+        if df_daily is None or df_daily.empty:
+            return None
+            
+        try:
+            # Ensure datetime index
+            df = df_daily.copy()
+            df.set_index('datetime', inplace=True)
+            
+            # Resample to weekly (W-SUN or W-MON depending on pref, Default W-SUN is standard for many)
+            # 'W' defaults to Week ending Sunday
+            df_weekly = df.resample('W').agg({
+                'open': 'first',
+                'high': 'max',
+                'low': 'min',
+                'close': 'last',
+                'timestamp': 'last'  # Use last timestamp of week
+            })
+            
+            # Drop incomplete weeks if any (optional, but safer to keep all)
+            df_weekly.dropna(inplace=True)
+            
+            # Reset index to make datetime a column again
+            df_weekly.reset_index(inplace=True)
+            
+            return df_weekly
+            
+        except Exception as e:
+            logger.error(f"[ERROR] Resampling failed: {e}")
+            return None
+
+
+# ============================================================================
+# CONVENIENCE FUNCTIONS
+# ============================================================================
 
 async def get_market_data(symbol: str = "R_25") -> Dict[str, pd.DataFrame]:
     """
-    Main function to fetch market data
+    Fetch market data for a single symbol (1m + 5m)
     
     Args:
         symbol: Trading symbol
     
     Returns:
-        Dictionary with market data for different timeframes
+        Dictionary with '1m' and '5m' data
     """
     fetcher = DataFetcher(config.DERIV_API_TOKEN, config.DERIV_APP_ID)
     
     try:
-        # Connect
         connected = await fetcher.connect()
         if not connected:
             return {}
         
-        # Fetch data
         data = await fetcher.fetch_multi_timeframe_data(symbol)
-        
         return data
         
     finally:
-        # Always disconnect
         await fetcher.disconnect()
 
 
 async def get_all_timeframes_data(symbol: str = "R_25") -> Dict[str, pd.DataFrame]:
     """
-    Main function to fetch ALL timeframes for top-down analysis
+    Fetch all timeframes for Top-Down analysis
     
     Args:
         symbol: Trading symbol
     
     Returns:
-        Dictionary with market data for all timeframes (1m, 5m, 1h, 4h, 1d, 1w)
+        Dictionary with all timeframes (1m, 5m, 1h, 4h, 1d, 1w)
     """
     fetcher = DataFetcher(config.DERIV_API_TOKEN, config.DERIV_APP_ID)
     
     try:
-        # Connect
         connected = await fetcher.connect()
         if not connected:
             return {}
         
-        # Fetch all timeframes
         data = await fetcher.fetch_all_timeframes(symbol)
-        
         return data
         
     finally:
-        # Always disconnect
         await fetcher.disconnect()
+
+
+async def get_multi_asset_data(symbols: List[str]) -> Dict[str, Dict[str, pd.DataFrame]]:
+    """
+    Fetch data for multiple assets sequentially (with rate limiting)
+    
+    Args:
+        symbols: List of trading symbols
+    
+    Returns:
+        Dictionary mapping symbol to timeframe data
+        e.g., {'R_25': {'1m': df, '5m': df, ...}, 'R_50': {...}}
+    """
+    fetcher = DataFetcher(config.DERIV_API_TOKEN, config.DERIV_APP_ID)
+    
+    try:
+        # Connect once
+        connected = await fetcher.connect()
+        if not connected:
+            return {}
+        
+        result = {}
+        
+        # Fetch each asset sequentially to respect rate limits
+        for symbol in symbols:
+            logger.info(f"Fetching data for {symbol}...")
+            
+            if config.USE_TOPDOWN_STRATEGY:
+                data = await fetcher.fetch_all_timeframes(symbol)
+            else:
+                data = await fetcher.fetch_multi_timeframe_data(symbol)
+            
+            if data:
+                result[symbol] = data
+            
+            # Rate limiting between assets
+            await asyncio.sleep(0.5)
+        
+        logger.info(f"Fetched data for {len(result)}/{len(symbols)} assets")
+        return result
+        
+    finally:
+        await fetcher.disconnect()
+
+
+# Test function
+async def test_multi_asset_fetch():
+    """Test fetching data for multiple assets"""
+    print("="*70)
+    print("TESTING MULTI-ASSET DATA FETCHING")
+    print("="*70)
+    
+    symbols = config.get_all_symbols()
+    print(f"\nFetching data for {len(symbols)} assets: {', '.join(symbols)}\n")
+    
+    data = await get_multi_asset_data(symbols)
+    
+    print(f"\nResults:")
+    for symbol, timeframes in data.items():
+        print(f"\n{symbol}:")
+        for tf, df in timeframes.items():
+            print(f"  {tf}: {len(df)} candles")
+    
+    print("\n" + "="*70)
+    print("TEST COMPLETE")
+    print("="*70)
+
+
+if __name__ == "__main__":
+    asyncio.run(test_multi_asset_fetch())

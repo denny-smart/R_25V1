@@ -1,807 +1,515 @@
 """
-Trading Strategy for Deriv R_25 Trading Bot
-TOP-DOWN MARKET STRUCTURE: Multi-timeframe level-based trading
-Implements Weekly/Daily trend analysis with H4/H1 execution
+Strategy Module for Deriv Multi-Asset Trading Bot
 
-strategy.py - TOP-DOWN VERSION (FIXED)
+Implements the Top-Down Market Structure Analysis strategy:
+1. Phase 1: Directional Bias (Weekly + Daily)
+2. Phase 2: Level Classification & Price Magnets (All TFs)
+3. Phase 3: Entry Execution (Momentum Close + Weak Retest)
+
+strategy.py - REFACTORED FOR MULTI-ASSET TOP-DOWN ANALYSIS
 """
 
 import pandas as pd
 import numpy as np
-from typing import Dict, Optional, Tuple, List
-from dataclasses import dataclass
-from enum import Enum
+import logging
+from typing import Dict, List, Optional, Tuple, Any
+
 import config
-from utils import setup_logger, get_signal_emoji
+from utils import setup_logger
 
 logger = setup_logger()
 
-
-class TrendBias(Enum):
-    """Market trend bias based on structure"""
-    BULLISH = "BULLISH"
-    BEARISH = "BEARISH"
-    NEUTRAL = "NEUTRAL"
-
-
-class LevelType(Enum):
-    """Types of price levels"""
-    TESTED = "TESTED"           # Historical support/resistance (tested multiple times)
-    UNTESTED = "UNTESTED"       # Broken but never retested (primary TP targets)
-    MINOR = "MINOR"             # Intraday H4/H1 levels
-
-
-@dataclass
-class PriceLevel:
-    """Represents a price level"""
-    price: float
-    level_type: LevelType
-    timeframe: str
-    strength: int  # Number of touches (for tested levels)
-    broken: bool = False
-    retested: bool = False
-
-
-@dataclass
-class MarketStructure:
-    """Market structure analysis result"""
-    trend_bias: TrendBias
-    higher_highs: bool
-    higher_lows: bool
-    lower_highs: bool
-    lower_lows: bool
-    structure_shift: bool  # Indicates potential reversal
-    last_swing_high: float
-    last_swing_low: float
-
-
 class TradingStrategy:
     """
-    Implements Top-Down Market Structure strategy
-    
-    Trading Rules:
-    1. Weekly/Daily analysis determines directional bias
-    2. Only trade in direction of higher timeframe trend
-    3. Enter on weak retests after momentum breaks
-    4. Target untested levels (price magnets)
-    5. Never trade in the middle between levels
+    Implements Top-Down Market Structure Analysis.
+    Decides 'UP', 'DOWN', or None based on confluence of 6 timeframes.
     """
-    
+
     def __init__(self):
-        """Initialize Top-Down strategy"""
+        # Configuration parameters
+        self.min_rr_ratio = config.TOPDOWN_MIN_RR_RATIO
+        self.momentum_threshold = config.MOMENTUM_CLOSE_THRESHOLD
+        self.weak_retest_pct = config.WEAK_RETEST_MAX_PCT
+        self.middle_zone_pct = config.MIDDLE_ZONE_PCT
         
-        # Multi-timeframe settings
-        self.structure_timeframes = ['1w', '1d']  # Trend determination
-        self.entry_timeframes = ['4h', '1h']      # Execution timeframes
-        self.refinement_timeframe = '15m'         # Optional fine-tuning
-        
-        # Level detection parameters
-        self.min_level_touches = 2                # Minimum touches to qualify as "tested"
-        self.level_proximity_pct = 0.15           # 0.15% proximity to merge levels
-        self.untested_lookback = 100              # Candles to look back for untested levels
-        
-        # Entry execution parameters
-        self.momentum_close_threshold = 1.5       # ATR multiplier for momentum
-        self.weak_retest_max_pct = 30             # Max 30% retracement for "weak" retest
-        self.middle_zone_pct = 40                 # Avoid middle 40% between levels
-        
-        # Structure shift detection
-        self.require_structure_shift = True       # Must see shift to reverse bias
-        self.swing_lookback = 20                  # Candles for swing detection
-        
-        # Trade execution
-        self.multiplier = 160                     # Fixed multiplier value
-        
-        # Storage
-        self.weekly_structure: Optional[MarketStructure] = None
-        self.daily_structure: Optional[MarketStructure] = None
-        self.current_bias: TrendBias = TrendBias.NEUTRAL
-        self.price_levels: List[PriceLevel] = []
-        
-        logger.info("[OK] Top-Down Strategy initialized")
-        logger.info(f"   Multiplier: {self.multiplier}x")
-        logger.info(f"   Structure timeframes: {', '.join(self.structure_timeframes)}")
-        logger.info(f"   Entry timeframes: {', '.join(self.entry_timeframes)}")
-        logger.info(f"   Momentum threshold: {self.momentum_close_threshold}x ATR")
-    
+        # Lookback settings
+        self.swing_lookback = config.SWING_LOOKBACK
+        self.min_level_touches = config.MIN_LEVEL_TOUCHES
+
     def analyze(self, data_1m: pd.DataFrame, data_5m: pd.DataFrame, 
-                data_1h: Optional[pd.DataFrame] = None,
-                data_4h: Optional[pd.DataFrame] = None,
-                data_1d: Optional[pd.DataFrame] = None,
-                data_1w: Optional[pd.DataFrame] = None) -> Dict:
+                data_1h: pd.DataFrame, data_4h: pd.DataFrame, 
+                data_1d: pd.DataFrame, data_1w: pd.DataFrame) -> Dict[str, Any]:
         """
-        Main analysis function - Top-Down approach
-        
-        Args:
-            data_1m: 1-minute data (for refinement)
-            data_5m: 5-minute data (for execution)
-            data_1h: 1-hour data (entry timeframe)
-            data_4h: 4-hour data (entry timeframe)
-            data_1d: Daily data (structure analysis)
-            data_1w: Weekly data (structure analysis)
+        Main analysis method accepting all 6 timeframes.
         
         Returns:
-            Trading signal dictionary
+            Dict containing signal, levels, and trade parameters.
         """
-        try:
-            # Step 1: Validate we have minimum data
-            if len(data_1m) < 50 or len(data_5m) < 50:
-                return self._create_hold_signal("Insufficient data for analysis")
+        response = {
+            "can_trade": False,
+            "signal": None,
+            "score": 0,
+            "confidence": 0,
+            "take_profit": None,
+            "stop_loss": None,
+            "risk_reward_ratio": 0.0,
+            "details": {}
+        }
+
+        # 0. Data Validation
+        if any(df is None or df.empty for df in [data_1m, data_5m, data_1h, data_4h, data_1d, data_1w]):
+            response["details"]["reason"] = "Insufficient data across timeframes"
+            return response
+
+        current_price = data_1m['close'].iloc[-1]
+
+        # ---------------------------------------------------------
+        # Phase 1: Directional Bias (Weekly + Daily)
+        # ---------------------------------------------------------
+        weekly_trend = self._determine_trend(data_1w, "Weekly")
+        daily_trend = self._determine_trend(data_1d, "Daily")
+
+        # Bias Confirmation
+        if weekly_trend == "BULLISH" and daily_trend == "BULLISH":
+            bias = "BULLISH"
+            signal_direction = "UP"
+        elif weekly_trend == "BEARISH" and daily_trend == "BEARISH":
+            bias = "BEARISH"
+            signal_direction = "DOWN"
+        else:
+            response["details"]["reason"] = f"Trend Conflict - Weekly: {weekly_trend}, Daily: {daily_trend}"
+            return response
+        
+        # ---------------------------------------------------------
+        # Phase 2: Level Classification & Price Magnets
+        # ---------------------------------------------------------
+        # Gather levels from higher timeframes to find Structure and Targets
+        structure_levels = []
+        structure_levels.extend(self._find_levels(data_1w, "1w"))
+        structure_levels.extend(self._find_levels(data_1d, "1d"))
+        structure_levels.extend(self._find_levels(data_4h, "4h"))
+        
+        # Identify Targets (TP) and Structure Points (SL)
+        target_level, sl_level = self._identify_tp_sl_levels(
+            structure_levels, current_price, signal_direction, data_1d
+        )
+
+        if not target_level:
+            response["details"]["reason"] = "No clear Untested Level (Price Magnet) found for Target"
+            return response
             
-            logger.info("=" * 70)
-            logger.info("🔍 TOP-DOWN MARKET ANALYSIS")
-            logger.info("=" * 70)
-            
-            # Step 2: Check for higher timeframe data availability
-            if data_1w is None or data_1d is None:
-                return self._create_hold_signal("Missing Higher Timeframe Data (Weekly/Daily required)")
-            
-            if len(data_1w) < self.swing_lookback or len(data_1d) < self.swing_lookback:
-                return self._create_hold_signal("Insufficient Weekly/Daily data for structure analysis")
-            
-            # Step 3: Analyze WEEKLY structure (Master Trend)
-            logger.info("📊 Analyzing Weekly Structure (Master Trend)...")
-            self.weekly_structure = self._analyze_market_structure(data_1w, timeframe='1w')
-            
-            logger.info(f"   Weekly Bias: {self.weekly_structure.trend_bias.value}")
-            logger.info(f"   Higher Highs: {self.weekly_structure.higher_highs}")
-            logger.info(f"   Higher Lows: {self.weekly_structure.higher_lows}")
-            logger.info(f"   Lower Highs: {self.weekly_structure.lower_highs}")
-            logger.info(f"   Lower Lows: {self.weekly_structure.lower_lows}")
-            logger.info(f"   Structure Shift: {self.weekly_structure.structure_shift}")
-            
-            # Step 4: Analyze DAILY structure (Intermediate Trend)
-            logger.info("📊 Analyzing Daily Structure (Intermediate Trend)...")
-            self.daily_structure = self._analyze_market_structure(data_1d, timeframe='1d')
-            
-            logger.info(f"   Daily Bias: {self.daily_structure.trend_bias.value}")
-            logger.info(f"   Higher Highs: {self.daily_structure.higher_highs}")
-            logger.info(f"   Higher Lows: {self.daily_structure.higher_lows}")
-            logger.info(f"   Lower Highs: {self.daily_structure.lower_highs}")
-            logger.info(f"   Lower Lows: {self.daily_structure.lower_lows}")
-            logger.info(f"   Structure Shift: {self.daily_structure.structure_shift}")
-            
-            # Step 5: Establish DIRECTIONAL BIAS (alignment required)
-            self.current_bias = self._establish_directional_bias(
-                self.weekly_structure, 
-                self.daily_structure
-            )
-            
-            logger.info("=" * 70)
-            logger.info(f"🎯 DIRECTIONAL BIAS ESTABLISHED: {self.current_bias.value}")
-            logger.info("=" * 70)
-            
-            # Log alignment details
-            if self.current_bias == TrendBias.BULLISH:
-                logger.info("   ✅ Weekly + Daily BOTH BULLISH → Looking for BUY setups only")
-            elif self.current_bias == TrendBias.BEARISH:
-                logger.info("   ✅ Weekly + Daily BOTH BEARISH → Looking for SELL setups only")
+        if not sl_level:
+            response["details"]["reason"] = "No clear Structure Swing Point found for Stop Loss"
+            return response
+
+        # ---------------------------------------------------------
+        # Phase 3: Entry Execution Criteria (1m/5m)
+        # ---------------------------------------------------------
+        
+        # 1. Check Middle Zone (Dead Zone)
+        # Identify the trading range we are currently in
+        range_support, range_resistance = self._find_trading_range(structure_levels, current_price)
+        
+        if self._is_in_middle_zone(current_price, range_support, range_resistance):
+            # Only skip if we are NOT in a breakout scenario
+            # Breakout logic below might override this if we are crossing a level
+            is_mid_zone = True
+        else:
+            is_mid_zone = False
+
+        # 2. Find nearest active execution level (could be a 1h or 4h level we are breaking)
+        # We add 1h and 5m levels for precise execution
+        execution_levels = self._find_levels(data_1h, "1h") + self._find_levels(data_5m, "5m")
+        nearest_exec_level = self._find_nearest_level(current_price, execution_levels)
+        
+        if not nearest_exec_level:
+             # Fallback to structure levels if no local levels found
+            nearest_exec_level = self._find_nearest_level(current_price, structure_levels)
+
+        # 3. Check Momentum Breakout & Weak Retest
+        # We look at recent history in 1m data to see if we just broke this level
+        entry_valid, entry_reason = self._check_entry_trigger(
+            data_1m, nearest_exec_level, signal_direction
+        )
+
+        # Logic: If we have a valid breakout/retest, we ignore Middle Zone warning
+        if not entry_valid:
+            if is_mid_zone:
+                response["details"]["reason"] = "Price in Middle Zone & No Momentum Breakout"
             else:
-                logger.info("   ⚠️ Weekly/Daily CONFLICT or NEUTRAL → NO TRADING")
-                logger.info(f"      Weekly: {self.weekly_structure.trend_bias.value}")
-                logger.info(f"      Daily: {self.daily_structure.trend_bias.value}")
-            
-            # Step 6: Check directional filter
-            if self.current_bias == TrendBias.NEUTRAL:
-                return self._create_hold_signal(
-                    f"No clear trend bias - Weekly: {self.weekly_structure.trend_bias.value}, "
-                    f"Daily: {self.daily_structure.trend_bias.value}"
-                )
-            
-            # Step 7: Detect price levels (on execution timeframes)
-            self.price_levels = self._detect_price_levels(data_5m, data_1m)
-            
-            tested_levels = [l for l in self.price_levels if l.level_type == LevelType.TESTED]
-            untested_levels = [l for l in self.price_levels if l.level_type == LevelType.UNTESTED]
-            
-            logger.info(f"📍 Price Levels Detected:")
-            logger.info(f"   Tested levels: {len(tested_levels)}")
-            logger.info(f"   Untested levels: {len(untested_levels)} (TP targets)")
-            
-            # Step 8: Check if price is in no-trade zone (middle between levels)
-            current_price = data_1m.iloc[-1]['close']
-            in_middle = self._is_in_middle_zone(current_price)
-            
-            if in_middle:
-                return self._create_hold_signal("Price in middle zone (no nearby levels)")
-            
-            # Step 9: Find nearest levels
-            nearest_support, nearest_resistance = self._find_nearest_levels(current_price)
-            
-            if nearest_support:
-                logger.info(f"   Nearest Support: {nearest_support.price:.4f} ({nearest_support.level_type.value})")
-            if nearest_resistance:
-                logger.info(f"   Nearest Resistance: {nearest_resistance.price:.4f} ({nearest_resistance.level_type.value})")
-            
-            # Step 10: Check for momentum close
-            momentum_break = self._detect_momentum_close(data_1m, data_5m)
-            
-            if not momentum_break['detected']:
-                return self._create_hold_signal(f"No momentum break: {momentum_break['reason']}")
-            
-            logger.info(f"⚡ Momentum Break Detected:")
-            logger.info(f"   Direction: {momentum_break['direction']}")
-            logger.info(f"   Strength: {momentum_break['strength']:.2f}x ATR")
-            
-            # Step 11: Check for weak retest
-            retest_status = self._check_weak_retest(data_1m, momentum_break['direction'])
-            
-            if not retest_status['is_weak_retest']:
-                return self._create_hold_signal(f"Retest condition not met: {retest_status['reason']}")
-            
-            logger.info(f"✅ Weak Retest Confirmed:")
-            logger.info(f"   Pullback: {retest_status['pullback_pct']:.1f}%")
-            
-            # Step 12: Validate trade direction against bias (CRITICAL FILTER)
-            signal_direction = momentum_break['direction']
-            
-            if not self._validate_direction(signal_direction):
-                return self._create_hold_signal(
-                    f"{signal_direction} signal rejected: Conflicts with {self.current_bias.value} bias "
-                    f"(Weekly: {self.weekly_structure.trend_bias.value}, Daily: {self.daily_structure.trend_bias.value})"
-                )
-            
-            logger.info(f"✅ Direction Validated: {signal_direction} aligns with {self.current_bias.value} bias")
-            
-            # Step 13: Calculate take profit (nearest untested level)
-            tp_level = self._find_tp_target(current_price, signal_direction)
-            
-            if not tp_level:
-                return self._create_hold_signal("No untested level target available")
-            
-            logger.info(f"🎯 Take Profit Target: {tp_level.price:.4f}")
-            
-            # Step 14: Calculate stop loss (previous swing from DAILY structure)
-            sl_level = self._calculate_stop_loss(self.daily_structure, signal_direction)
-            
-            logger.info(f"🛡️ Stop Loss: {sl_level:.4f}")
-            
-            # Step 15: Generate final signal
-            signal = self._create_signal(
-                direction=signal_direction,
-                entry_price=current_price,
-                tp_price=tp_level.price,
-                sl_price=sl_level,
-                weekly_structure=self.weekly_structure,
-                daily_structure=self.daily_structure,
-                momentum=momentum_break,
-                retest=retest_status
-            )
-            
-            return signal
-            
-        except Exception as e:
-            logger.error(f"[ERROR] Error in Top-Down analysis: {e}")
-            import traceback
-            logger.debug(traceback.format_exc())
-            return self._create_hold_signal(f"Analysis error: {e}")
-    
-    def _establish_directional_bias(self, weekly: MarketStructure, 
-                                    daily: MarketStructure) -> TrendBias:
+                response["details"]["reason"] = entry_reason
+            return response
+
+        # ---------------------------------------------------------
+        # Final Calculations & Confluence Score
+        # ---------------------------------------------------------
+        
+        # Calculate R:R
+        distance_to_tp = abs(target_level - current_price)
+        distance_to_sl = abs(current_price - sl_level)
+        
+        if distance_to_sl == 0:
+            rr_ratio = 0.0
+        else:
+            rr_ratio = distance_to_tp / distance_to_sl
+
+        if rr_ratio < self.min_rr_ratio:
+            response["details"]["reason"] = f"Poor R:R Ratio ({rr_ratio:.2f} < {self.min_rr_ratio})"
+            response["take_profit"] = target_level
+            response["stop_loss"] = sl_level
+            response["risk_reward_ratio"] = round(rr_ratio, 2)
+            return response
+
+        # Confluence Score calculation
+        score = 0
+        score += 2 if weekly_trend == bias else 0
+        score += 2 if daily_trend == bias else 0
+        score += 1 if self._determine_trend(data_4h, "4h") == bias else 0
+        score += 1 if self._determine_trend(data_1h, "1h") == bias else 0
+        score += 2 # Entry trigger valid
+        
+        # Untested levels bonus
+        is_magnet = any(l['price'] == target_level and not l['tested'] for l in structure_levels)
+        if is_magnet:
+            score += 2
+
+        # Construct Final Response
+        response["can_trade"] = True
+        response["signal"] = signal_direction
+        response["take_profit"] = target_level
+        response["stop_loss"] = sl_level
+        response["risk_reward_ratio"] = round(rr_ratio, 2)
+        response["score"] = score
+        response["confidence"] = min((score / 10.0) * 100, 100)
+        response["details"] = {
+            "reason": "Confluence Confirmed",
+            "bias": bias,
+            "entry_type": "Breakout + Weak Retest",
+            "magnet_target": is_magnet
+        }
+
+        return response
+
+    # --------------------------------------------------------------------------
+    # Helper Methods - Trend & Structure
+    # --------------------------------------------------------------------------
+
+    def _determine_trend(self, df: pd.DataFrame, timeframe_name: str) -> str:
         """
-        Establish directional bias based on Weekly and Daily alignment
-        
-        Rules:
-        - Both BULLISH → BULLISH bias (look for BUY only)
-        - Both BEARISH → BEARISH bias (look for SELL only)
-        - Conflict or NEUTRAL → NEUTRAL bias (NO TRADING)
-        
-        This is the "telescope calibration" - we look at the sky (Weekly/Daily)
-        to see the storm front before deciding which direction to walk.
-        """
-        # If either timeframe is NEUTRAL, bias is NEUTRAL
-        if weekly.trend_bias == TrendBias.NEUTRAL or daily.trend_bias == TrendBias.NEUTRAL:
-            return TrendBias.NEUTRAL
-        
-        # If both agree on BULLISH
-        if weekly.trend_bias == TrendBias.BULLISH and daily.trend_bias == TrendBias.BULLISH:
-            return TrendBias.BULLISH
-        
-        # If both agree on BEARISH
-        if weekly.trend_bias == TrendBias.BEARISH and daily.trend_bias == TrendBias.BEARISH:
-            return TrendBias.BEARISH
-        
-        # Conflict between Weekly and Daily (one BULLISH, one BEARISH)
-        # This indicates transitional/noisy market → DO NOT TRADE
-        return TrendBias.NEUTRAL
-    
-    def _analyze_market_structure(self, df: pd.DataFrame, timeframe: str) -> MarketStructure:
-        """
-        Analyze market structure to determine trend bias
-        
-        Looks for:
-        - Higher Highs + Higher Lows = Bullish
-        - Lower Highs + Lower Lows = Bearish
-        - Mixed = Neutral or Structure Shift
+        Determines trend based on Swing Highs/Lows.
+        Bullish: Higher Highs + Higher Lows
+        Bearish: Lower Highs + Lower Lows
         """
         if len(df) < self.swing_lookback:
-            return MarketStructure(
-                trend_bias=TrendBias.NEUTRAL,
-                higher_highs=False, higher_lows=False,
-                lower_highs=False, lower_lows=False,
-                structure_shift=False,
-                last_swing_high=df['high'].max(),
-                last_swing_low=df['low'].min()
-            )
+            return "NEUTRAL"
+
+        highs, lows = self._get_swing_points(df)
         
-        # Find swing highs and lows
-        swing_highs = self._find_swing_highs(df)
-        swing_lows = self._find_swing_lows(df)
+        if len(highs) < 2 or len(lows) < 2:
+            return "NEUTRAL"
+
+        last_high = highs[-1]
+        prev_high = highs[-2]
+        last_low = lows[-1]
+        prev_low = lows[-2]
+
+        if last_high > prev_high and last_low > prev_low:
+            return "BULLISH"
+        elif last_high < prev_high and last_low < prev_low:
+            return "BEARISH"
         
-        # Need at least 2 swings to determine structure
-        if len(swing_highs) < 2 or len(swing_lows) < 2:
-            return MarketStructure(
-                trend_bias=TrendBias.NEUTRAL,
-                higher_highs=False, higher_lows=False,
-                lower_highs=False, lower_lows=False,
-                structure_shift=False,
-                last_swing_high=df['high'].max(),
-                last_swing_low=df['low'].min()
-            )
-        
-        # Check for higher highs
-        recent_highs = swing_highs[-2:]
-        higher_highs = recent_highs[-1] > recent_highs[-2]
-        
-        # Check for higher lows
-        recent_lows = swing_lows[-2:]
-        higher_lows = recent_lows[-1] > recent_lows[-2]
-        
-        # Check for lower highs
-        lower_highs = recent_highs[-1] < recent_highs[-2]
-        
-        # Check for lower lows
-        lower_lows = recent_lows[-1] < recent_lows[-2]
-        
-        # Determine trend bias
-        if higher_highs and higher_lows:
-            trend_bias = TrendBias.BULLISH
-        elif lower_highs and lower_lows:
-            trend_bias = TrendBias.BEARISH
-        else:
-            trend_bias = TrendBias.NEUTRAL
-        
-        # Detect structure shift (reversal signals)
-        structure_shift = self._detect_structure_shift(swing_highs, swing_lows, trend_bias)
-        
-        return MarketStructure(
-            trend_bias=trend_bias,
-            higher_highs=higher_highs,
-            higher_lows=higher_lows,
-            lower_highs=lower_highs,
-            lower_lows=lower_lows,
-            structure_shift=structure_shift,
-            last_swing_high=swing_highs[-1] if swing_highs else df['high'].max(),
-            last_swing_low=swing_lows[-1] if swing_lows else df['low'].min()
-        )
-    
-    def _find_swing_highs(self, df: pd.DataFrame, window: int = 5) -> List[float]:
-        """Find swing high points (local maxima)"""
-        highs = df['high'].values
-        swing_highs = []
-        
-        for i in range(window, len(highs) - window):
-            if all(highs[i] >= highs[i-window:i]) and all(highs[i] >= highs[i+1:i+window+1]):
-                swing_highs.append(highs[i])
-        
-        return swing_highs
-    
-    def _find_swing_lows(self, df: pd.DataFrame, window: int = 5) -> List[float]:
-        """Find swing low points (local minima)"""
-        lows = df['low'].values
-        swing_lows = []
-        
-        for i in range(window, len(lows) - window):
-            if all(lows[i] <= lows[i-window:i]) and all(lows[i] <= lows[i+1:i+window+1]):
-                swing_lows.append(lows[i])
-        
-        return swing_lows
-    
-    def _detect_structure_shift(self, swing_highs: List[float], 
-                                swing_lows: List[float], 
-                                current_bias: TrendBias) -> bool:
+        return "NEUTRAL"
+
+    def _get_swing_points(self, df: pd.DataFrame) -> Tuple[List[float], List[float]]:
         """
-        Detect if structure is shifting (potential reversal)
-        
-        Bullish shift: Failed to make new low, then breaks previous high
-        Bearish shift: Failed to make new high, then breaks previous low
+        Identifies swing highs and lows using a window method.
         """
-        if len(swing_highs) < 3 or len(swing_lows) < 3:
-            return False
+        highs = []
+        lows = []
+        window = config.MIN_SWING_WINDOW
+
+        # Use numpy for faster rolling window check
+        high_col = df['high'].values
+        low_col = df['low'].values
         
-        if current_bias == TrendBias.BULLISH:
-            # Look for failure to make new low
-            failed_low = swing_lows[-1] > swing_lows[-2]
-            # Then break of previous high
-            broke_high = swing_highs[-1] < swing_highs[-2]
-            return failed_low and broke_high
-        
-        elif current_bias == TrendBias.BEARISH:
-            # Look for failure to make new high
-            failed_high = swing_highs[-1] < swing_highs[-2]
-            # Then break of previous low
-            broke_low = swing_lows[-1] > swing_lows[-2]
-            return failed_high and broke_low
-        
-        return False
-    
-    def _detect_price_levels(self, df_5m: pd.DataFrame, df_1m: pd.DataFrame) -> List[PriceLevel]:
-        """
-        Detect all price levels: Tested, Untested, and Minor
-        
-        - Tested: Historical support/resistance (multiple touches)
-        - Untested: Significant highs/lows that were broken but never retested
-        - Minor: Recent H1/H4 structure levels
-        """
-        levels = []
-        
-        # Use 5m data for level detection
-        highs = df_5m['high'].values
-        lows = df_5m['low'].values
-        
-        # Find significant highs and lows
-        swing_highs = self._find_swing_highs(df_5m, window=3)
-        swing_lows = self._find_swing_lows(df_5m, window=3)
-        
-        # Cluster nearby levels
-        all_levels = swing_highs + swing_lows
-        clustered = self._cluster_levels(all_levels)
-        
-        # Classify each level
-        for price in clustered:
-            # Count touches
-            touches = self._count_level_touches(df_5m, price)
+        for i in range(window, len(df) - window):
+            current_high = high_col[i]
+            current_low = low_col[i]
             
-            # Check if broken and retested
-            broken = self._is_level_broken(df_5m, price)
-            retested = self._is_level_retested(df_5m, price) if broken else False
-            
-            # Classify level type
-            if touches >= self.min_level_touches:
-                level_type = LevelType.TESTED
-            elif broken and not retested:
-                level_type = LevelType.UNTESTED  # PRIME TP TARGET
-            else:
-                level_type = LevelType.MINOR
-            
-            levels.append(PriceLevel(
-                price=price,
-                level_type=level_type,
-                timeframe='5m',
-                strength=touches,
-                broken=broken,
-                retested=retested
-            ))
-        
-        # Sort by price
-        levels.sort(key=lambda x: x.price)
-        
-        return levels
-    
-    def _cluster_levels(self, levels: List[float]) -> List[float]:
-        """Merge nearby levels within proximity threshold"""
-        if not levels:
+            # Check for local high
+            if all(current_high > high_col[i-x] for x in range(1, window+1)) and \
+               all(current_high > high_col[i+x] for x in range(1, window+1)):
+                highs.append(current_high)
+
+            # Check for local low
+            if all(current_low < low_col[i-x] for x in range(1, window+1)) and \
+               all(current_low < low_col[i+x] for x in range(1, window+1)):
+                lows.append(current_low)
+                
+        return highs, lows
+
+    def _find_levels(self, df: pd.DataFrame, timeframe: str) -> List[Dict]:
+        """
+        Identifies support/resistance levels and checks if they are tested.
+        """
+        if df.empty:
             return []
-        
-        sorted_levels = sorted(levels)
-        clustered = [sorted_levels[0]]
-        
-        for level in sorted_levels[1:]:
-            last_cluster = clustered[-1]
-            proximity_pct = abs(level - last_cluster) / last_cluster * 100
             
-            if proximity_pct <= self.level_proximity_pct:
-                # Merge into existing cluster (average)
-                clustered[-1] = (last_cluster + level) / 2
+        levels = []
+        highs, lows = self._get_swing_points(df)
+        raw_levels = sorted(highs + lows)
+        
+        if not raw_levels:
+            return []
+
+        merged_levels = []
+        current_cluster = [raw_levels[0]]
+        
+        # Merge levels within 0.15% proximity (LEVEL_PROXIMITY_PCT)
+        proximity = config.LEVEL_PROXIMITY_PCT / 100.0
+
+        for i in range(1, len(raw_levels)):
+            if raw_levels[i] <= current_cluster[-1] * (1 + proximity):
+                current_cluster.append(raw_levels[i])
             else:
-                clustered.append(level)
+                avg_price = sum(current_cluster) / len(current_cluster)
+                merged_levels.append(avg_price)
+                current_cluster = [raw_levels[i]]
         
-        return clustered
-    
-    def _count_level_touches(self, df: pd.DataFrame, level: float, 
-                            tolerance_pct: float = 0.1) -> int:
-        """Count how many times price touched a level"""
-        touches = 0
-        tolerance = level * (tolerance_pct / 100)
+        if current_cluster:
+            merged_levels.append(sum(current_cluster) / len(current_cluster))
+
+        # Classify Tested vs Untested
+        # A level is "Tested" if price touched it multiple times
+        # A level is "Untested" (Magnet) if it was broken and never retested
         
-        for _, row in df.iterrows():
-            if abs(row['low'] - level) <= tolerance or abs(row['high'] - level) <= tolerance:
-                touches += 1
-        
-        return touches
-    
-    def _is_level_broken(self, df: pd.DataFrame, level: float) -> bool:
-        """Check if price decisively broke through level"""
-        for i in range(len(df) - 1):
-            prev_close = df.iloc[i]['close']
-            curr_close = df.iloc[i + 1]['close']
+        for price in merged_levels:
+            touch_count = 0
+            # Look at last 50 candles for touches
+            recent_candles = df.tail(50)
+            for _, row in recent_candles.iterrows():
+                # Check if High/Low touched the level within small tolerance
+                if abs(row['high'] - price) / price < 0.0005 or \
+                   abs(row['low'] - price) / price < 0.0005:
+                    touch_count += 1
             
-            # Bullish break (close above after being below)
-            if prev_close < level and curr_close > level:
-                return True
+            levels.append({
+                'price': price,
+                'timeframe': timeframe,
+                'tested': touch_count >= self.min_level_touches,
+                'touches': touch_count
+            })
             
-            # Bearish break (close below after being above)
-            if prev_close > level and curr_close < level:
-                return True
-        
-        return False
-    
-    def _is_level_retested(self, df: pd.DataFrame, level: float, 
-                          tolerance_pct: float = 0.15) -> bool:
-        """Check if level was retested after being broken"""
-        tolerance = level * (tolerance_pct / 100)
-        broken_idx = None
-        
-        # Find where level was broken
-        for i in range(len(df) - 1):
-            prev_close = df.iloc[i]['close']
-            curr_close = df.iloc[i + 1]['close']
+        return levels
+
+    # --------------------------------------------------------------------------
+    # Helper Methods - Targets & SL
+    # --------------------------------------------------------------------------
+
+    def _identify_tp_sl_levels(self, levels: List[Dict], current_price: float, 
+                               direction: str, daily_data: pd.DataFrame) -> Tuple[Optional[float], Optional[float]]:
+        """
+        TP: Nearest Untested Level (Price Magnet).
+        SL: Price behind last Swing Point (Daily Structure).
+        """
+        target = None
+        stop = None
+
+        # Filter levels by direction
+        if direction == "UP":
+            # Target: Levels ABOVE current price
+            potential_tps = [l for l in levels if l['price'] > current_price]
+            # Sort by proximity
+            potential_tps.sort(key=lambda x: x['price'])
             
-            if (prev_close < level < curr_close) or (prev_close > level > curr_close):
-                broken_idx = i + 1
-                break
+            # Prioritize Untested (Magnets)
+            untested_tps = [l for l in potential_tps if not l['tested']]
+            if untested_tps:
+                target = untested_tps[0]['price']
+            elif potential_tps:
+                target = potential_tps[0]['price'] # Fallback to nearest tested
+
+            # SL: Last Daily Swing Low BELOW current price
+            highs, lows = self._get_swing_points(daily_data)
+            valid_lows = [l for l in lows if l < current_price]
+            if valid_lows:
+                stop = valid_lows[-1] # Most recent valid low
+
+        else: # DOWN
+            # Target: Levels BELOW current price
+            potential_tps = [l for l in levels if l['price'] < current_price]
+            # Sort by proximity (descending)
+            potential_tps.sort(key=lambda x: x['price'], reverse=True)
+            
+            # Prioritize Untested
+            untested_tps = [l for l in potential_tps if not l['tested']]
+            if untested_tps:
+                target = untested_tps[0]['price']
+            elif potential_tps:
+                target = potential_tps[0]['price']
+
+            # SL: Last Daily Swing High ABOVE current price
+            highs, lows = self._get_swing_points(daily_data)
+            valid_highs = [h for h in highs if h > current_price]
+            if valid_highs:
+                stop = valid_highs[-1]
+
+        return target, stop
+
+    def _find_trading_range(self, levels: List[Dict], current_price: float) -> Tuple[Optional[float], Optional[float]]:
+        """Finds the nearest support and resistance to define the current range."""
+        supports = [l['price'] for l in levels if l['price'] < current_price]
+        resistances = [l['price'] for l in levels if l['price'] > current_price]
         
-        if broken_idx is None:
-            return False
-        
-        # Check if price came back to level after break
-        for i in range(broken_idx + 1, len(df)):
-            if abs(df.iloc[i]['close'] - level) <= tolerance:
-                return True
-        
-        return False
-    
-    def _is_in_middle_zone(self, current_price: float) -> bool:
-        """Check if price is in the dangerous middle zone between levels"""
-        if not self.price_levels:
-            return False
-        
-        # Find nearest support and resistance
-        support_levels = [l for l in self.price_levels if l.price < current_price]
-        resistance_levels = [l for l in self.price_levels if l.price > current_price]
-        
-        if not support_levels or not resistance_levels:
-            return False
-        
-        nearest_support = max(support_levels, key=lambda x: x.price)
-        nearest_resistance = min(resistance_levels, key=lambda x: x.price)
-        
-        # Calculate position between levels
-        range_size = nearest_resistance.price - nearest_support.price
-        distance_from_support = current_price - nearest_support.price
-        position_pct = (distance_from_support / range_size) * 100
-        
-        # Check if in middle zone (avoid 30-70% range)
-        lower_bound = (100 - self.middle_zone_pct) / 2
-        upper_bound = 100 - lower_bound
-        
-        in_middle = lower_bound < position_pct < upper_bound
-        
-        if in_middle:
-            logger.debug(f"⚠️ Price at {position_pct:.1f}% between levels (avoid {lower_bound:.0f}-{upper_bound:.0f}%)")
-        
-        return in_middle
-    
-    def _find_nearest_levels(self, current_price: float) -> Tuple[Optional[PriceLevel], Optional[PriceLevel]]:
-        """Find nearest support and resistance levels"""
-        support_levels = [l for l in self.price_levels if l.price < current_price]
-        resistance_levels = [l for l in self.price_levels if l.price > current_price]
-        
-        nearest_support = max(support_levels, key=lambda x: x.price) if support_levels else None
-        nearest_resistance = min(resistance_levels, key=lambda x: x.price) if resistance_levels else None
+        nearest_support = max(supports) if supports else None
+        nearest_resistance = min(resistances) if resistances else None
         
         return nearest_support, nearest_resistance
-    
-    def _detect_momentum_close(self, df_1m: pd.DataFrame, df_5m: pd.DataFrame) -> Dict:
+
+    # --------------------------------------------------------------------------
+    # Helper Methods - Entry Execution
+    # --------------------------------------------------------------------------
+
+    def _is_in_middle_zone(self, current_price: float, level_a: Optional[float], level_b: Optional[float]) -> bool:
         """
-        Detect momentum close: Candle closes decisively beyond a level
-        Uses ATR to measure "decisive" movement
+        Checks if price is in the 'dead zone' (middle 40%) between levels.
         """
-        if len(df_1m) < 2:
-            return {'detected': False, 'reason': 'Insufficient data'}
+        if not level_a or not level_b:
+            return False
+            
+        lower = min(level_a, level_b)
+        upper = max(level_a, level_b)
+        range_size = upper - lower
         
-        current = df_1m.iloc[-1]
-        previous = df_1m.iloc[-2]
-        atr = df_5m.iloc[-1]['atr'] if 'atr' in df_5m.columns else current.get('atr', 0)
+        if range_size == 0:
+            return False
+            
+        dist_from_lower = (current_price - lower) / range_size
         
+        # Dead zone logic: 
+        # If MIDDLE_ZONE_PCT is 40%, we avoid 30% to 70%.
+        # 0.5 +/- (0.4 / 2) -> 0.3 to 0.7
+        half_zone = self.middle_zone_pct / 200.0 # /100 for pct, /2 for half
+        dead_zone_start = 0.5 - half_zone
+        dead_zone_end = 0.5 + half_zone
+        
+        return dead_zone_start < dist_from_lower < dead_zone_end
+
+    def _find_nearest_level(self, current_price: float, levels: List[Dict]) -> Optional[float]:
+        if not levels:
+            return None
+        sorted_levels = sorted(levels, key=lambda x: abs(x['price'] - current_price))
+        return sorted_levels[0]['price']
+
+    def _check_entry_trigger(self, df_1m: pd.DataFrame, level_price: Optional[float], direction: str) -> Tuple[bool, str]:
+        """
+        Validates Entry:
+        1. Momentum Close > 1.5x ATR (Breakout)
+        2. Weak Retest (Pullback < 30%)
+        """
+        if not level_price:
+             return False, "No reference level for entry"
+
+        # Calculate ATR for momentum check
+        atr = self._calculate_atr(df_1m)
         if atr == 0:
-            return {'detected': False, 'reason': 'Invalid ATR'}
+            return False, "ATR calculation failed"
+
+        # Look back 20 candles for a breakout
+        lookback = 20
+        recent_data = df_1m.tail(lookback)
         
-        # Calculate candle movement
-        candle_move = abs(current['close'] - current['open'])
-        candle_range = current['high'] - current['low']
+        breakout_found = False
+        breakout_idx = -1
         
-        # Check momentum strength
-        momentum_strength = candle_move / atr
-        
-        if momentum_strength < self.momentum_close_threshold:
-            return {
-                'detected': False,
-                'reason': f'Weak momentum ({momentum_strength:.2f}x < {self.momentum_close_threshold}x ATR)'
-            }
-        
-        # Determine direction
-        if current['close'] > current['open']:
-            direction = 'BUY'
-        else:
-            direction = 'SELL'
-        
-        # Check if close is near high/low (conviction)
-        if direction == 'BUY':
-            close_near_high = (current['high'] - current['close']) / candle_range < 0.2
-            if not close_near_high:
-                return {'detected': False, 'reason': 'Close not near high (weak conviction)'}
-        else:
-            close_near_low = (current['close'] - current['low']) / candle_range < 0.2
-            if not close_near_low:
-                return {'detected': False, 'reason': 'Close not near low (weak conviction)'}
-        
-        return {
-            'detected': True,
-            'direction': direction,
-            'strength': momentum_strength,
-            'reason': f'Momentum close detected ({momentum_strength:.2f}x ATR)'
-        }
-    
-    def _check_weak_retest(self, df_1m: pd.DataFrame, direction: str) -> Dict:
-        """
-        Check for weak retest: Price moves back slightly to level after breakout
-        Max 30% retracement is considered "weak"
-        """
-        if len(df_1m) < 5:
-            return {'is_weak_retest': False, 'reason': 'Insufficient data'}
-        
-        recent = df_1m.tail(5)
-        
-        if direction == 'BUY':
-            # Find peak in recent candles
-            peak = recent['high'].max()
-            current = recent.iloc[-1]['close']
+        # Check for Momentum Breakout Candle
+        # Logic: Candle must CLOSE beyond level, and body > 1.5x ATR
+        for i in range(len(recent_data)):
+            row = recent_data.iloc[i]
             
-            # Calculate pullback
-            pullback = ((peak - current) / peak) * 100 if peak > 0 else 0
+            # Candle body size
+            body_size = abs(row['close'] - row['open'])
+            is_momentum = body_size >= (self.momentum_threshold * atr)
             
-            # Must have some pullback, but not too much
-            if pullback < 5:
-                return {'is_weak_retest': False, 'reason': 'No pullback detected'}
+            if direction == "UP":
+                # Breakout UP: Close > Level
+                if row['close'] > level_price and is_momentum:
+                    # Filter: Must not have opened way above (gap). Should be a crossing or surge.
+                    if row['open'] < level_price or abs(row['open'] - level_price) < (atr * 2):
+                         breakout_found = True
+                         breakout_idx = i
+                         # Keep searching for the MOST RECENT breakout? 
+                         # Actually we want the first one that started this move, 
+                         # but if there are multiple, the latest one is fine.
+            else: # DOWN
+                # Breakout DOWN: Close < Level
+                if row['close'] < level_price and is_momentum:
+                    if row['open'] > level_price or abs(row['open'] - level_price) < (atr * 2):
+                        breakout_found = True
+                        breakout_idx = i
+
+        if not breakout_found:
+             return False, f"No momentum breakout (>{self.momentum_threshold}x ATR) of level {level_price:.2f}"
+
+        # Check for Weak Retest
+        # Logic: From breakout candle to now, has price pulled back?
+        # A 'Weak Retest' means price touched or came near level, but didn't collapse.
+        
+        post_breakout_data = recent_data.iloc[breakout_idx+1:]
+        current_close = df_1m['close'].iloc[-1]
+        
+        if post_breakout_data.empty:
+            # We are ON the breakout candle. 
+            # If it's a huge candle, entering at close might be chasing.
+            # But the strategy implies momentum entry is allowed.
+            return True, "Fresh Momentum Breakout"
+
+        # Check Depth of Retest
+        if direction == "UP":
+            # Lowest point since breakout
+            min_pullback = post_breakout_data['low'].min()
+            min_pullback = min(min_pullback, current_close)
             
-            if pullback > self.weak_retest_max_pct:
-                return {
-                    'is_weak_retest': False,
-                    'reason': f'Pullback too deep ({pullback:.1f}% > {self.weak_retest_max_pct}%)',
-                    'pullback_pct': pullback
-                }
+            # If pullback went way below level, it failed.
+            # Max tolerance: Level - (0.5 * ATR)
+            if min_pullback < level_price - (atr * 0.5):
+                return False, "Breakout failed (Deep retracement)"
+                
+            # Current price must be above level (or very close)
+            if current_close < level_price - (atr * 0.2):
+                return False, "Price currently below breakout level"
+                
+        else: # DOWN
+            # Highest point since breakout
+            max_pullback = post_breakout_data['high'].max()
+            max_pullback = max(max_pullback, current_close)
             
-            return {
-                'is_weak_retest': True,
-                'reason': 'Weak retest confirmed',
-                'pullback_pct': pullback
-            }
+            if max_pullback > level_price + (atr * 0.5):
+                return False, "Breakout failed (Deep retracement)"
+                
+            if current_close > level_price + (atr * 0.2):
+                return False, "Price currently above breakout level"
+
+        # WEAK_RETEST_MAX_PCT check (optional stricter check)
+        # Check if current price is within retest percentage of the impulse
+        # For simplicity, ensuring we are holding the level is the key 'Weak Retest' validation here.
         
-        else:  # SELL
-            # Find trough in recent candles
-            trough = recent['low'].min()
-            current = recent.iloc[-1]['close']
+        return True, "Momentum Breakout + Weak Retest Confirmed"
+
+    def _calculate_atr(self, df: pd.DataFrame, period: int = 14) -> float:
+        """Calculate ATR for volatility measurement."""
+        if len(df) < period + 1:
+            return 0.0
             
-            # Calculate bounce
-            bounce = ((current - trough) / abs(trough)) * 100 if trough != 0 else 0
-            
-            # Must have some bounce, but not too much
-            if bounce < 5:
-                return {'is_weak_retest': False, 'reason': 'No bounce detected'}
-            
-            if bounce > self.weak_retest_max_pct:
-                return {
-                    'is_weak_retest': False,
-                    'reason': f'Bounce too high ({bounce:.1f}% > {self.weak_retest_max_pct}%)',
-                    'pullback_pct': bounce
-                }
-            
-            return {
-                'is_weak_retest': True,
-                'reason': 'Weak retest confirmed',
-                'pullback_pct': bounce
-            }
-    
-    def _validate_direction(self, signal_direction: str) -> bool:
-        """Validate signal direction against current market bias"""
-        if self.current_bias == TrendBias.NEUTRAL:
-            return False
+        high = df['high']
+        low = df['low']
+        close = df['close']
         
-        if self.current_bias == TrendBias.BULLISH and signal_direction == 'SELL':
-            return False
+        tr1 = high - low
+        tr2 = abs(high - close.shift())
+        tr3 = abs(low - close.shift())
         
-        if self.current_bias == TrendBias.BEARISH and signal_direction == 'BUY':
-            return False
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr = tr.rolling(window=period).mean().iloc[-1]
         
-        return True
-    
-    def _find_tp_target(self, current_price: float, direction: str) -> Optional[PriceLevel]:
-        """Find nearest untested level as TP target"""
-        untested = [l for l in self.price_levels if l.level_type == LevelType.UNTESTED]
-        
-        if direction == 'BUY':
-            # Find untested resistance above current price
-            targets = [l for l in untested if l.price > current_price]
-            return min(targets, key=lambda x: x.price) if targets else None
-        else:
-            # Find untested support below current price
-            targets = [l for l in untested if l.price < current_price]
-            return max(targets, key=lambda x: x.price) if targets else None
-    
-    def _calculate_stop_loss(self, structure: MarketStructure, direction: str) -> float:
-        """Calculate stop loss based on previous swing"""
-        if direction == 'BUY':
-            # Place SL below last swing low
-            return structure.last_swing_low * 0.998  # 0.2% buffer
-        else:
-            # Place SL above last swing high
-            return structure.last_swing_high * 1.002  # 0.2% buffer
-    
-    def _create_signal(self, direction: str, entry_price: float, 
-                      tp_price: float, sl_price: float,
-                      weekly_structure: MarketStructure,
-                      daily_structure: MarketStructure,
-                      momentum: Dict, 
-                      retest: Dict) -> Dict:
-        """Create trading signal with all details"""
-        
-        emoji = get_signal_emoji(direction)
-        
-        # Calculate risk/reward
-        if direction == 'BUY':
-            risk = entry_price - sl_price
-            reward = tp_price - entry_price
-        else:
-            risk = sl_price - entry_price
-            reward = entry_price - tp_price
-        
-        rr_ratio = reward / risk if risk > 0 else 0
-        
-        signal = {
-            'signal': direction,
-            'strategy': 'TOP_DOWN_STRUCTURE',
-            'multiplier': self.multiplier,
-            'entry_price': entry_price,
-            'take_profit': tp_price,
-            'stop_loss': sl_price,
-            'risk_reward_ratio': rr_ratio,
-            'timestamp': pd.Timestamp.now(),
-            'can_trade': True,
-            'details': {
-                'weekly_bias': weekly_structure.trend_bias.value,
-                'daily_bias': daily_structure.trend_bias.value,
-                'trend_bias': self.current_bias.value,
-                'structure_shift': daily_structure.structure_shift,
-                'momentum_strength': momentum['strength'],
-                'retest_pullback': retest['pullback_pct'],
-                'total_levels': len(self.price_levels),
-                'untested_levels': len([l for l in self.price_levels if l.level_type == LevelType.UNTESTED])
-            }
-        }
-        
-        logger.info("=" * 70)
-        logger.info(f"{emoji} {direction} SIGNAL (TOP-DOWN STRUCTURE)")
-        logger.info("=" * 70)
-        logger.info(f"   📍 Entry: {entry_price:.4f}")
-        logger.info(f"   🎯 Take Profit: {tp_price:.4f}")
-        logger.info(f"   🛡️ Stop Loss: {sl_price:.4f}")
-        logger.info(f"   📊 Risk/Reward: 1:{rr_ratio:.2f}")
-        logger.info(f"   ⚡ Momentum: {momentum['strength']:.2f}x ATR")
-        logger.info(f"   🔄 Retest: {retest['pullback_pct']:.1f}% pullback")
-        logger.info(f"   📈 Weekly Bias: {weekly_structure.trend_bias.value}")
-        logger.info(f"   📈 Daily Bias: {daily_structure.trend_bias.value}")
-        logger.info(f"   🎲 Multiplier: {self.multiplier}x")
-        logger.info("=" * 70)
-        
-        return signal
-    
-    def _create_hold_signal(self, reason: str) -> Dict:
-        """Create HOLD signal"""
-        return {
-            'signal': 'HOLD',
-            'strategy': 'TOP_DOWN_STRUCTURE',
-            'timestamp': pd.Timestamp.now(),
-            'can_trade': False,
-            'details': {'reason': reason}
-        }
+        return atr if not pd.isna(atr) else 0.0
