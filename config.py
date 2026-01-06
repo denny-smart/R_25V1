@@ -78,8 +78,8 @@ FIXED_STAKE = 10.0                 # $10 stake per trade
 # Note: MULTIPLIER is now asset-specific in ASSET_CONFIG
 
 # Standard TP/SL Parameters (used when RISK_MODE = "FIXED")
-TAKE_PROFIT_PERCENT = 0.05         # 0.05% TP
-STOP_LOSS_PERCENT = 0.025          # 0.025% SL
+TAKE_PROFIT_PERCENT = 0.24         # 0.24% TP
+STOP_LOSS_PERCENT = 0.0413           # 0.0413% SL
 
 # Maximum loss per trade (acts as emergency stop)
 MAX_LOSS_PER_TRADE = 1.0           # Maximum loss per trade (USD) - hard limit

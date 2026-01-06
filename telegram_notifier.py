@@ -160,19 +160,31 @@ class TelegramNotifier:
         tp_amount = 0
         sl_risk = 0
         
-        # Estimate based on legacy percentages if not explicit
-        if 'take_profit_amount' in trade_info:
-             tp_amount = trade_info['take_profit_amount']
-        else:
-             # Fallback estimation
-             if trade_info.get('take_profit'):
-                 tp_amount = stake * config.MULTIPLIER * (config.TAKE_PROFIT_PERCENT / 100)
+        entry_spot = trade_info.get('entry_spot') or trade_info.get('entry_price', 0)
+        multiplier = trade_info.get('multiplier', config.MULTIPLIER)
         
-        if 'stop_loss_amount' in trade_info:
-            sl_risk = trade_info['stop_loss_amount']
+        # 1. Try to calculate from exact price levels (Dynamic/Top-Down)
+        if entry_spot > 0 and trade_info.get('take_profit') and trade_info.get('stop_loss'):
+            tp_price = trade_info['take_profit']
+            sl_price = trade_info['stop_loss']
+            
+            # Profit = Stake * Multiplier * (% Change)
+            # % Change = abs(Target - Entry) / Entry
+            tp_amount = stake * multiplier * (abs(tp_price - entry_spot) / entry_spot)
+            sl_risk = stake * multiplier * (abs(entry_spot - sl_price) / entry_spot)
+            
+        # 2. Fallback: Use amount estimates if provided (Legacy)
+        elif 'take_profit_amount' in trade_info:
+             tp_amount = trade_info['take_profit_amount']
+             if 'stop_loss_amount' in trade_info:
+                sl_risk = trade_info['stop_loss_amount']
+
+        # 3. Fallback: Estimate based on config percentages (Fixed/Legacy)
         else:
-            if trade_info.get('stop_loss'):
-                sl_risk = stake * config.MULTIPLIER * (config.STOP_LOSS_PERCENT / 100)
+             if trade_info.get('take_profit') or config.TAKE_PROFIT_PERCENT:
+                 tp_amount = stake * multiplier * (config.TAKE_PROFIT_PERCENT / 100)
+             if trade_info.get('stop_loss') or config.STOP_LOSS_PERCENT:
+                 sl_risk = stake * multiplier * (config.STOP_LOSS_PERCENT / 100)
                 
         rr_ratio = f"1:{tp_amount/sl_risk:.1f}" if sl_risk > 0 else "N/A"
         
