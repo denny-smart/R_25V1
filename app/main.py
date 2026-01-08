@@ -17,6 +17,21 @@ from app.ws import live
 # Setup logging
 logger = setup_api_logger()
 
+# Setup Telegram Error Logging
+try:
+    # Try to import from root (assuming PYTHONPATH set correctly)
+    from telegram_notifier import notifier, TelegramLoggingHandler
+    
+    # Attach handler to root logger
+    telegram_handler = TelegramLoggingHandler(notifier)
+    logging.getLogger().addHandler(telegram_handler)
+    logger.info("✅ Telegram error logging enabled for API")
+    
+except ImportError:
+    logger.warning("⚠️ Telegram notifier not available - error logging disabled")
+except Exception as e:
+    logger.warning(f"⚠️ Failed to setup Telegram error logging: {e}")
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """

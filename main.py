@@ -21,8 +21,18 @@ logger = setup_logger(config.LOG_FILE, config.LOG_LEVEL)
 
 # Try to import telegram notifier
 try:
-    from telegram_notifier import notifier
+    from telegram_notifier import notifier, TelegramLoggingHandler
     TELEGRAM_ENABLED = True
+    
+    # Attach Telegram logging handler to root logger
+    if TELEGRAM_ENABLED:
+        try:
+            telegram_handler = TelegramLoggingHandler(notifier)
+            logging.getLogger().addHandler(telegram_handler)
+            logger.info("✅ Telegram error logging enabled")
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to setup Telegram logging: {e}")
+            
 except ImportError:
     TELEGRAM_ENABLED = False
     logger.warning("⚠️ Telegram notifier not available")

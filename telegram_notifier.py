@@ -10,10 +10,42 @@ from typing import Dict, Optional
 from datetime import datetime
 from telegram import Bot
 from telegram.error import TelegramError
+import logging
 import config
 from utils import setup_logger, format_currency
 
 logger = setup_logger()
+
+class TelegramLoggingHandler(logging.Handler):
+    """
+    Logging handler that sends error logs to Telegram
+    """
+    def __init__(self, notifier_instance):
+        super().__init__()
+        self.notifier = notifier_instance
+        self.setLevel(logging.ERROR)
+        
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            # Avoid infinite recursion if the notifier itself logs an error
+            # We can run this in the background or use ensure_future if we are in an async loop context
+            # However, logging emit is sync. Converting to async is tricky without loop reference.
+            # Best effort: use event loop if available
+            
+            try:
+                loop = asyncio.get_running_loop()
+                if loop and loop.is_running():
+                    loop.create_task(self.notifier.notify_error(f"LOG: {msg}"))
+            except RuntimeError:
+                # No running loop, or different thread. 
+                # Ideally we shouldn't block, but for critical errors it might be worth it.
+                # For now, let's just skip if no loop to avoid breaking sync code
+                pass
+                
+        except Exception:
+            self.handleError(record)
+
 
 class TelegramNotifier:
     """Handles Telegram notifications for trading events"""
