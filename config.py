@@ -22,12 +22,9 @@ DERIV_API_TOKEN = API_TOKEN if API_TOKEN else os.getenv("DERIV_API_TOKEN")
 DERIV_APP_ID = APP_ID if APP_ID and APP_ID != "1089" else os.getenv("DERIV_APP_ID", "1089")
 
 if not DERIV_API_TOKEN or DERIV_API_TOKEN == "your_api_token_here":
-    raise ValueError(
-        "API_TOKEN not set! Please add your API token to .env file.\n"
-        "Your .env file should contain:\n"
-        "APP_ID=1089\n"
-        "API_TOKEN=your_actual_token_here"
-    )
+    # In multi-tenant mode, logical fallback is to allow None and require user-specific keys
+    print("⚠️ WARNING: Global API_TOKEN not set. Startup will proceed, but global bot cannot run.")
+    DERIV_API_TOKEN = None
 
 # ==================== MULTI-ASSET CONFIGURATION ====================
 # List of symbols to monitor and trade
@@ -228,7 +225,8 @@ def validate_config():
     errors = []
     
     if not DERIV_API_TOKEN:
-        errors.append("API_TOKEN is not set in .env file")
+        # In multi-tenant, this is allowed. We just warn.
+        pass
     
     # Validate contract types
     if CONTRACT_TYPE not in ["MULTUP", "MULTDOWN"]:
