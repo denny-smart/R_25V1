@@ -12,9 +12,26 @@ from app.core.auth import get_current_active_user
 
 router = APIRouter()
 
+from app.core.supabase import supabase
+
 @router.get("/current", response_model=ConfigResponse)
 async def get_current_config(current_user: dict = Depends(get_current_active_user)):
     """Get current bot configuration"""
+    
+    # Fetch user specifics (deriv_api_key)
+    deriv_api_key = None
+    try:
+        profile = supabase.table('profiles').select('deriv_api_key').eq('id', current_user['id']).single().execute()
+        if profile.data and profile.data.get('deriv_api_key'):
+            key = profile.data['deriv_api_key']
+            # Mask the key (show last 4 chars if long enough)
+            if len(key) > 4:
+                deriv_api_key = f"*****{key[-4:]}"
+            else:
+                deriv_api_key = "*****"
+    except Exception:
+        pass
+
     return {
         "trading": {
             "symbol": config.SYMBOL,
@@ -33,7 +50,8 @@ async def get_current_config(current_user: dict = Depends(get_current_active_use
             "rsi_sell_threshold": config.RSI_SELL_THRESHOLD,
             "adx_threshold": config.ADX_THRESHOLD,
             "minimum_signal_score": config.MINIMUM_SIGNAL_SCORE,
-        }
+        },
+        "deriv_api_key": deriv_api_key
     }
 
 @router.put("/update")
@@ -50,7 +68,19 @@ async def update_config(
         updated_fields = []
         requires_restart = []
         
-        # Trading config (requires restart)
+        # User-Specific Config (Supabase)
+        if "deriv_api_key" in updates:
+            new_key = updates["deriv_api_key"]
+            # Save to Supabase profile
+            supabase.table('profiles').update({
+                "deriv_api_key": new_key
+            }).eq("id", current_user["id"]).execute()
+            
+            updated_fields.append("deriv_api_key")
+            # If the bot is running for this user, it might need restart, 
+            # but for now we just save it. The BotManager will use it next start.
+        
+        # Trading config (Global/Shared for now - requires restart)
         if "fixed_stake" in updates:
             config.FIXED_STAKE = float(updates["fixed_stake"])
             updated_fields.append("fixed_stake")

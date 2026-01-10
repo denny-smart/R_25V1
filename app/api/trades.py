@@ -6,7 +6,7 @@ View active trades, history, and statistics
 from fastapi import APIRouter, Query, Depends
 from typing import List
 
-from app.bot.state import bot_state
+from app.bot.manager import bot_manager
 from app.schemas.trades import TradeResponse, TradeStatsResponse
 from app.core.serializers import prepare_response  # ← ADD THIS LINE
 from app.core.auth import get_current_active_user
@@ -18,7 +18,7 @@ async def get_active_trades(
     current_user: dict = Depends(get_current_active_user)  # ← ADD AUTH
 ):
     """Get all active trades"""
-    trades = bot_state.get_active_trades()
+    trades = bot_manager.get_bot(current_user['id']).state.get_active_trades()
     return prepare_response(
         trades,
         id_fields=['contract_id']  # ← Convert contract_id to string
@@ -30,7 +30,7 @@ async def get_trade_history(
     current_user: dict = Depends(get_current_active_user)  # ← ADD AUTH
 ):
     """Get trade history"""
-    history = bot_state.get_trade_history(limit)
+    history = bot_manager.get_bot(current_user['id']).state.get_trade_history(limit)
     return prepare_response(
         history,
         id_fields=['contract_id']  # ← Convert contract_id to string
@@ -41,5 +41,5 @@ async def get_trade_stats(
     current_user: dict = Depends(get_current_active_user)  # ← ADD AUTH
 ):
     """Get trading statistics"""
-    stats = bot_state.get_statistics()
+    stats = bot_manager.get_bot(current_user['id']).state.get_statistics()
     return prepare_response(stats)  # ← WRAP WITH prepare_response

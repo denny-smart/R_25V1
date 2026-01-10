@@ -21,7 +21,7 @@ from trade_engine import TradeEngine
 from risk_manager import RiskManager
 import config
 
-from app.bot.state import bot_state
+from app.bot.state import BotState
 from app.bot.events import event_manager
 from app.bot.telegram_bridge import telegram_bridge
 
@@ -44,12 +44,19 @@ class BotRunner:
     - Monitors active trades across all assets
     """
     
-    def __init__(self):
+    def __init__(self, api_token: Optional[str] = None, account_id: Optional[str] = None):
         self.is_running = False
         self.task: Optional[asyncio.Task] = None
         self.status = BotStatus.STOPPED
         self.start_time: Optional[datetime] = None
         self.error_message: Optional[str] = None
+        
+        # Identity
+        self.account_id = account_id
+        self.api_token = api_token or config.DERIV_API_TOKEN
+        
+        # Instance State
+        self.state = BotState()
         
         # Bot components (initialized on start)
         self.data_fetcher: Optional[DataFetcher] = None
@@ -72,7 +79,7 @@ class BotRunner:
         # Telegram bridge
         self.telegram_bridge = telegram_bridge
     
-    async def start_bot(self) -> dict:
+    async def start_bot(self, api_token: Optional[str] = None) -> dict:
         """
         Start the trading bot
         Returns status dict
@@ -84,12 +91,16 @@ class BotRunner:
                 "status": self.status.value
             }
         
+        # Update token if provided
+        if api_token:
+            self.api_token = api_token
+            
         try:
-            logger.info("🚀 Starting multi-asset trading bot...")
+            logger.info(f"🚀 Starting bot for {self.account_id or 'default user'}...")
             logger.info(f"📊 Scanning symbols: {', '.join(self.symbols)}")
             self.status = BotStatus.STARTING
             self.error_message = None
-            bot_state.update_status("starting")
+            self.state.update_status("starting")
             
             # Create bot task
             self.task = asyncio.create_task(self._run_bot())
@@ -125,15 +136,14 @@ class BotRunner:
             logger.error(f"❌ Failed to start bot: {e}")
             self.status = BotStatus.ERROR
             self.error_message = str(e)
-            bot_state.update_status("error", error=str(e))
+            self.state.update_status("error", error=str(e))
             
             if self.task and not self.task.done():
                 self.task.cancel()
             
-            try:
-                await self.telegram_bridge.notify_error(f"Failed to start bot: {e}")
-            except:
-                pass
+            # Only notify telegram if this is the main/default bot or configured for it
+            # For now, suppressing per-user telegram errors to avoid spam in admin channel
+            # unless a bridge is configured per user.
             
             return {
                 "success": False,
@@ -156,7 +166,7 @@ class BotRunner:
         try:
             logger.info("🛑 Stopping multi-asset trading bot...")
             self.status = BotStatus.STOPPING
-            bot_state.update_status("stopping")
+            self.state.update_status("stopping")
             
             # Cancel the bot task
             if self.task:
@@ -177,12 +187,15 @@ class BotRunner:
             self.task = None
             self.start_time = None
             
-            bot_state.update_status("stopped")
+            self.task = None
+            self.start_time = None
+            
+            self.state.update_status("stopped")
             logger.info("✅ Bot stopped successfully")
             
             # Notify Telegram with stats
             try:
-                stats = bot_state.get_statistics()
+                stats = self.state.get_statistics()
                 stats['scan_summary'] = {
                     'total_scans': self.scan_count,
                     'signals_by_symbol': self.signals_by_symbol
@@ -244,10 +257,11 @@ class BotRunner:
             "uptime_seconds": uptime,
             "start_time": self.start_time.isoformat() if self.start_time else None,
             "error_message": self.error_message,
-            "balance": bot_state.balance,
-            "active_trades": bot_state.active_trades,
-            "active_trades_count": len(bot_state.active_trades),
-            "statistics": bot_state.get_statistics(),
+            "error_message": self.error_message,
+            "balance": self.state.balance,
+            "active_trades": self.state.active_trades,
+            "active_trades_count": len(self.state.active_trades),
+            "statistics": self.state.get_statistics(),
             "multi_asset": {
                 "symbols": self.symbols,
                 "scan_count": self.scan_count,
@@ -265,15 +279,21 @@ class BotRunner:
         try:
             logger.info("🤖 Multi-asset bot main loop starting...")
             
+            # Initialize components with dynamic token
+            token_to_use = self.api_token or config.DERIV_API_TOKEN
+            
+            if not self.api_token and config.DERIV_API_TOKEN:
+                 logger.warning(f"⚠️ User {self.account_id} falling back to GLOBAL config token! This should not happen in production multi-tenancy.")
+            
             # Initialize bot components
             try:
                 self.data_fetcher = DataFetcher(
-                    config.DERIV_API_TOKEN,
+                    token_to_use,
                     config.DERIV_APP_ID
                 )
                 
                 self.trade_engine = TradeEngine(
-                    config.DERIV_API_TOKEN,
+                    token_to_use,
                     config.DERIV_APP_ID
                 )
                 
@@ -314,7 +334,7 @@ class BotRunner:
             try:
                 balance = await self.data_fetcher.get_balance()
                 if balance:
-                    bot_state.update_balance(balance)
+                    self.state.update_balance(balance)
                     logger.info(f"💰 Initial balance: ${balance:.2f}")
             except Exception as e:
                 logger.warning(f"⚠️ Could not fetch balance: {e}")
@@ -325,7 +345,7 @@ class BotRunner:
             self.status = BotStatus.RUNNING
             self.start_time = datetime.now()
             self.error_message = None
-            bot_state.update_status("running")
+            self.state.update_status("running")
             
             logger.info("✅ Multi-asset bot is now running")
             logger.info(f"🔍 Scanning {len(self.symbols)} symbols per cycle")
@@ -340,6 +360,7 @@ class BotRunner:
             await event_manager.broadcast({
                 "type": "bot_status",
                 "status": "running",
+                "account_id": self.account_id,
                 "message": f"Multi-asset bot started - scanning {len(self.symbols)} symbols",
                 "balance": balance,
                 "symbols": self.symbols
@@ -576,7 +597,7 @@ class BotRunner:
         })
         
         # Record signal in state
-        bot_state.add_signal(signal)
+        self.state.add_signal(signal)
         
         # Get symbol-specific configuration
         multiplier = self.asset_config.get(symbol, {}).get('multiplier', config.MULTIPLIER)
@@ -621,7 +642,7 @@ class BotRunner:
                 
                 # Record trade closure
                 self.risk_manager.record_trade_close(contract_id, pnl, status)
-                bot_state.update_trade(contract_id, result)
+                self.state.update_trade(contract_id, result)
                 
                 # Notify Telegram
                 try:
@@ -643,7 +664,7 @@ class BotRunner:
                 
                 # Update statistics
                 stats = self.risk_manager.get_statistics()
-                bot_state.update_statistics(stats)
+                self.state.update_statistics(stats)
                 
                 await event_manager.broadcast({
                     "type": "statistics",
@@ -708,5 +729,6 @@ class BotRunner:
         except Exception as e:
             logger.warning(f"⚠️ Could not monitor {symbol} trade: {e}")
 
-# Global bot runner instance
+# Global bot runner instance - DEPRECATED / DEFAULT
+# We keep this for backward compatibility if needed, using env vars
 bot_runner = BotRunner()

@@ -7,7 +7,7 @@ from fastapi import APIRouter, Query
 from typing import List
 import os
 
-from app.bot.state import bot_state
+from app.bot.manager import bot_manager
 from app.schemas.common import PerformanceResponse
 from app.core.serializers import prepare_response  # ← ADD THIS LINE
 from app.core.auth import get_current_active_user
@@ -21,7 +21,7 @@ async def get_recent_signals(
     current_user: dict = Depends(get_current_active_user)  # ← ADD AUTH
 ):
     """Get recent trade signals"""
-    signals = bot_state.get_recent_signals(limit)
+    signals = bot_manager.get_bot(current_user['id']).state.get_recent_signals(limit)
     return prepare_response(signals)  # ← WRAP WITH prepare_response
 
 @router.get("/performance", response_model=PerformanceResponse)
@@ -29,9 +29,10 @@ async def get_performance(
     current_user: dict = Depends(get_current_active_user)  # ← ADD AUTH
 ):
     """Get bot performance metrics"""
+    bot = bot_manager.get_bot(current_user['id'])
     performance = {
-        **bot_state.get_performance(),
-        **bot_state.get_statistics()
+        **bot.state.get_performance(),
+        **bot.state.get_statistics()
     }
     return prepare_response(performance)  # ← WRAP WITH prepare_response
 

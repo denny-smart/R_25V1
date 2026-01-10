@@ -17,7 +17,8 @@ class EventManager:
     """
     
     def __init__(self):
-        self.active_connections: Set[WebSocket] = set()
+        # socket -> user_id (None for anonymous/public if allowed)
+        self.active_connections: Dict[WebSocket, str] = {}
         # Event handlers: {event_type: [handler_functions]}
         self.event_handlers: Dict[str, List[Callable]] = {}
     
@@ -44,15 +45,16 @@ class EventManager:
             except ValueError:
                 pass
     
-    async def connect(self, websocket: WebSocket):
-        """Add new WebSocket connection"""
+    async def connect(self, websocket: WebSocket, user_id: str = None):
+        """Add new WebSocket connection with optional user context"""
         await websocket.accept()
-        self.active_connections.add(websocket)
-        logger.info(f"WebSocket client connected. Total: {len(self.active_connections)}")
+        self.active_connections[websocket] = user_id
+        logger.info(f"WebSocket client connected (User: {user_id}). Total: {len(self.active_connections)}")
     
     def disconnect(self, websocket: WebSocket):
         """Remove WebSocket connection"""
-        self.active_connections.discard(websocket)
+        if websocket in self.active_connections:
+            del self.active_connections[websocket]
         logger.info(f"WebSocket client disconnected. Total: {len(self.active_connections)}")
     
     async def broadcast(self, message: Dict):
@@ -75,10 +77,17 @@ class EventManager:
         # Then broadcast to WebSocket clients
         if self.active_connections:
             ws_tasks = []
-            for connection in self.active_connections.copy():
+            target_account = message.get("account_id")
+            
+            for connection, user_id in self.active_connections.items():
+                # Filter: If message has account_id, only send to matching user
+                if target_account and user_id != target_account:
+                    continue
+                    
                 ws_tasks.append(self._send_message(connection, message))
             
-            await asyncio.gather(*ws_tasks, return_exceptions=True)
+            if ws_tasks:
+                await asyncio.gather(*ws_tasks, return_exceptions=True)
     
     async def _call_handler(self, handler: Callable, event: Dict):
         """Call an event handler safely"""
