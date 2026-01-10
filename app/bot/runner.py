@@ -280,10 +280,12 @@ class BotRunner:
             logger.info("🤖 Multi-asset bot main loop starting...")
             
             # Initialize components with dynamic token
-            token_to_use = self.api_token or config.DERIV_API_TOKEN
+            token_to_use = self.api_token
             
-            if not self.api_token and config.DERIV_API_TOKEN:
-                 logger.warning(f"⚠️ User {self.account_id} falling back to GLOBAL config token! This should not happen in production multi-tenancy.")
+            if not token_to_use:
+                 error_msg = f"❌ User {self.account_id} has no API Token! Cannot start bot."
+                 logger.error(error_msg)
+                 raise ValueError(error_msg)
             
             # Initialize bot components
             try:
