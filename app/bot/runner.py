@@ -132,7 +132,8 @@ class BotRunner:
                         "type": "bot_status",
                         "status": "running",
                         "message": f"Multi-asset bot started - scanning {len(self.symbols)} symbols",
-                        "symbols": self.symbols
+                        "symbols": self.symbols,
+                        "account_id": self.account_id
                     })
                     
                     return {
@@ -224,7 +225,8 @@ class BotRunner:
             await event_manager.broadcast({
                 "type": "bot_status",
                 "status": "stopped",
-                "message": "Multi-asset bot stopped successfully"
+                "message": "Multi-asset bot stopped successfully",
+                "account_id": self.account_id
             })
             
             return {
@@ -426,7 +428,8 @@ class BotRunner:
                     await event_manager.broadcast({
                         "type": "error",
                         "message": str(e),
-                        "timestamp": datetime.now().isoformat()
+                        "timestamp": datetime.now().isoformat(),
+                        "account_id": self.account_id
                     })
                     await asyncio.sleep(30)
             
@@ -446,7 +449,8 @@ class BotRunner:
             await event_manager.broadcast({
                 "type": "error",
                 "message": f"Fatal error: {e}",
-                "timestamp": datetime.now().isoformat()
+                "timestamp": datetime.now().isoformat(),
+                "account_id": self.account_id
             })
         finally:
             self.is_running = False
@@ -613,7 +617,8 @@ class BotRunner:
             "signal": signal['signal'],
             "score": signal.get('score', 0),
             "confidence": signal.get('confidence', 0),
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.now().isoformat(),
+            "account_id": self.account_id
         })
         
         # Record signal in state
@@ -679,7 +684,8 @@ class BotRunner:
                     "trade": result,
                     "pnl": pnl,
                     "status": status,
-                    "timestamp": datetime.now().isoformat()
+                    "timestamp": datetime.now().isoformat(),
+                    "account_id": self.account_id
                 })
                 
                 # Update statistics
@@ -689,7 +695,8 @@ class BotRunner:
                 await event_manager.broadcast({
                     "type": "statistics",
                     "stats": stats,
-                    "timestamp": datetime.now().isoformat()
+                    "timestamp": datetime.now().isoformat(),
+                    "account_id": self.account_id
                 })
                 
                 return True  # Trade executed
