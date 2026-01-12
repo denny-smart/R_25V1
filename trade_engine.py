@@ -298,33 +298,65 @@ class TradeEngine:
             logger.error(f"❌ Error buying contract: {e}")
             return None
     
-    async def apply_tp_sl_limits(self, contract_id: str, tp_price: float, sl_price: float) -> bool:
-        """Apply Take Profit and Stop Loss limits to an open contract"""
+    async def apply_tp_sl_limits(self, contract_id: str, tp_price: float, sl_price: float, 
+                                  entry_spot: float, multiplier: int, stake: float) -> bool:
+        """
+        Apply Take Profit and Stop Loss limits to an open multiplier contract
+        
+        Args:
+            contract_id: Contract ID
+            tp_price: Take Profit price level
+            sl_price: Stop Loss price level
+            entry_spot: Entry spot price
+            multiplier: Contract multiplier
+            stake: Stake amount
+        
+        Note: For multiplier contracts, Deriv API requires profit/loss AMOUNTS in USD,
+              not price levels. We must convert price levels to profit/loss amounts.
+        """
         try:
+            # Convert price levels to profit/loss amounts for multiplier contracts
+            # Formula: Profit/Loss = (price_change * multiplier * stake) / entry_spot
+            
+            # Calculate TP amount
+            tp_distance = abs(tp_price - entry_spot)
+            tp_amount = (tp_distance * multiplier * stake) / entry_spot
+            
+            # Calculate SL amount (negative)
+            sl_distance = abs(entry_spot - sl_price)
+            sl_amount = -((sl_distance * multiplier * stake) / entry_spot)
+            
+            logger.info(f"🎯 Converting price levels to profit/loss amounts...")
+            logger.info(f"   TP Price Level: {tp_price:.4f} → Amount: ${tp_amount:.2f}")
+            logger.info(f"   SL Price Level: {sl_price:.4f} → Amount: ${sl_amount:.2f}")
+            
             limit_request = {
                 "limit_order": {
                     "add": {
-                        "take_profit": tp_price,
-                        "stop_loss": sl_price
+                        "take_profit": round(tp_amount, 2),
+                        "stop_loss": round(sl_amount, 2)
                     }
                 },
                 "contract_id": contract_id
             }
             
-            logger.info(f"🎯 Applying TP/SL limits...")
+            logger.info(f"📤 Applying TP/SL limits to Deriv...")
             response = await self.send_request(limit_request)
             
             if "error" in response:
                 logger.error(f"❌ Failed to apply limits: {response['error']['message']}")
+                logger.error(f"   Request: {limit_request}")
                 return False
             
             logger.info(f"✅ TP/SL limits applied successfully!")
-            logger.info(f"   Take Profit: {tp_price:.4f}")
-            logger.info(f"   Stop Loss: {sl_price:.4f}")
+            logger.info(f"   Take Profit: ${tp_amount:.2f} at {tp_price:.4f}")
+            logger.info(f"   Stop Loss: ${sl_amount:.2f} at {sl_price:.4f}")
             
             return True
         except Exception as e:
             logger.error(f"❌ Error applying limits: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return False
     
     async def open_trade(self, direction: str, stake: float, symbol: str,
@@ -429,8 +461,15 @@ class TradeEngine:
                         if rr_ratio < config.MIN_RR_RATIO:
                             logger.warning(f"⚠️ R:R ratio {rr_ratio:.2f} below minimum {config.MIN_RR_RATIO}")
                     
-                    # Apply the limits
-                    await self.apply_tp_sl_limits(contract_id, tp_price, sl_price)
+                    # Apply the limits with proper parameter conversion
+                    await self.apply_tp_sl_limits(
+                        contract_id, 
+                        tp_price, 
+                        sl_price,
+                        entry_spot,
+                        multiplier,
+                        stake
+                    )
                 else:
                     logger.warning("⚠️ No TP/SL provided - trade will run without limits!")
                 
