@@ -57,6 +57,9 @@ class TelegramNotifier:
         self.bot = None
         self.enabled = False
         
+        # Deduplication tracking
+        self.processed_closed_trades = set() # Stores f"{contract_id}_{status}"
+        
         if self.bot_token and self.chat_id:
             try:
                 self.bot = Bot(token=self.bot_token)
@@ -259,6 +262,20 @@ class TelegramNotifier:
         else:
             profit = float(profit)
             
+        contract_id = result.get('contract_id') or trade_info.get('contract_id')
+        
+        # Deduplication check
+        if contract_id:
+            dedup_key = f"{contract_id}_{status}"
+            if dedup_key in self.processed_closed_trades:
+                logger.debug(f"🔁 Duplicate notification prevented for {dedup_key}")
+                return
+            
+            # Add to processed set (limit size to 100)
+            self.processed_closed_trades.add(dedup_key)
+            if len(self.processed_closed_trades) > 100:
+                self.processed_closed_trades.pop()
+        
         symbol = trade_info.get('symbol', config.SYMBOL)
         
         # Safely get stake, default to 1.0 (to avoid division by zero) if None or 0

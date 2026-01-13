@@ -672,9 +672,15 @@ class BotRunner:
                 
                 # Notify Telegram
                 try:
-                    result_with_symbol = result.copy()
-                    result_with_symbol['symbol'] = symbol
-                    await self.telegram_bridge.notify_trade_closed(result_with_symbol, pnl, status)
+                    # MERGE complete trade details into result for notification
+                    result_for_notify = result.copy()
+                    result_for_notify.update(signal_with_symbol) # Contains direction, stake, symbol
+                    
+                    # Ensure symbol is set (sometimes signal uses 'symbol', result uses 'symbol')
+                    if 'symbol' not in result_for_notify:
+                         result_for_notify['symbol'] = symbol
+                    
+                    await self.telegram_bridge.notify_trade_closed(result_for_notify, pnl, status)
                 except:
                     pass
                 
@@ -751,7 +757,11 @@ class BotRunner:
                 
                 # Notify Telegram
                 try:
-                    await self.telegram_bridge.notify_trade_closed(trade_status, pnl, status)
+                    # MERGE complete trade details into result for notification
+                    result_for_notify = trade_status.copy()
+                    result_for_notify.update(active_info) # Contains direction, stake, symbol from RiskManager
+                    
+                    await self.telegram_bridge.notify_trade_closed(result_for_notify, pnl, status)
                 except:
                     pass
             

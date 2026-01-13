@@ -607,11 +607,7 @@ class TradeEngine:
                         await self.close_trade(contract_id)
                         await asyncio.sleep(2)
                         final_status = await self.get_trade_status(contract_id)
-                        if final_status and notifier:
-                            try:
-                                await notifier.notify_trade_closed(final_status, trade_info)
-                            except:
-                                pass
+                        # Removed redundant notification here - Runner handles it
                         return final_status
                     
                     previous_spot = status['current_spot']
@@ -636,11 +632,7 @@ class TradeEngine:
                     logger.info(f"   Final P&L: {format_currency(status['profit'])}")
                     logger.info(f"   Duration: {int(elapsed)}s")
                     
-                    if notifier:
-                        try:
-                            await notifier.notify_trade_closed(status, trade_info)
-                        except:
-                            pass
+                    # Removed redundant notification here - Runner handles it
                     
                     return status
                 
