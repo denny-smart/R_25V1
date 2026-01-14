@@ -27,14 +27,21 @@ async def start_bot(current_user: dict = Depends(get_current_active_user)):
     Only authenticated users can start the bot.
     """
     # Fetch API Key from profile
-    # Fetch API Key from profile
+    # Fetch API Key, Stake, and Strategy from profile
     api_key = None
+    stake_amount = 50.0
+    active_strategy = "Conservative"
+
     try:
-        profile = supabase.table('profiles').select('deriv_api_key').eq('id', current_user['id']).single().execute()
+        profile = supabase.table('profiles').select('deriv_api_key, stake_amount, active_strategy').eq('id', current_user['id']).single().execute()
         if profile.data:
             api_key = profile.data.get('deriv_api_key')
+            if profile.data.get('stake_amount') is not None:
+                stake_amount = float(profile.data['stake_amount'])
+            if profile.data.get('active_strategy'):
+                active_strategy = profile.data['active_strategy']
     except Exception as e:
-        logger.error(f"Error fetching API key for user {current_user['id']}: {e}")
+        logger.error(f"Error fetching profile for user {current_user['id']}: {e}")
 
     # Enforce API Key existence in DB
     if not api_key:
@@ -43,7 +50,12 @@ async def start_bot(current_user: dict = Depends(get_current_active_user)):
             detail="No Deriv API Key found. Please add your API Token in Settings first."
         )
 
-    result = await bot_manager.start_bot(current_user['id'], api_token=api_key)
+    result = await bot_manager.start_bot(
+        current_user['id'], 
+        api_token=api_key,
+        stake=stake_amount,
+        strategy_name=active_strategy
+    )
     
     if not result["success"]:
         raise HTTPException(status_code=400, detail=result["message"])

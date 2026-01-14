@@ -83,6 +83,10 @@ class BotRunner:
         self.symbols: List[str] = config.SYMBOLS
         self.asset_config: Dict = config.ASSET_CONFIG
         
+        # User Configurable Settings
+        self.user_stake: Optional[float] = None
+        self.active_strategy: str = "Conservative" # Default strategy
+        
         # Scanning statistics
         self.scan_count = 0
         self.signals_by_symbol: Dict[str, int] = {symbol: 0 for symbol in self.symbols}
@@ -95,7 +99,7 @@ class BotRunner:
         self.telegram_bridge = telegram_bridge
     
     @with_user_context
-    async def start_bot(self, api_token: Optional[str] = None) -> dict:
+    async def start_bot(self, api_token: Optional[str] = None, stake: Optional[float] = None, strategy_name: Optional[str] = None) -> dict:
         """
         Start the trading bot
         Returns status dict
@@ -110,10 +114,22 @@ class BotRunner:
         # Update token if provided
         if api_token:
             self.api_token = api_token
+
+        # Update User Settings
+        if stake:
+            self.user_stake = stake
+        # Ensure fallback if user_stake is still None (though main.py sends default)
+        
+        if strategy_name:
+            self.active_strategy = strategy_name
+        
+        # Default fallback for logging
+        current_stake = self.user_stake if self.user_stake else config.FIXED_STAKE
             
         try:
             logger.info(f"🚀 Starting bot for {self.account_id or 'default user'}...")
             logger.info(f"📊 Scanning symbols: {', '.join(self.symbols)}")
+            logger.info(f"⚙️ Strategy: {self.active_strategy} | Stake: ${current_stake}")
             self.status = BotStatus.STARTING
             self.error_message = None
             self.state.update_status("starting")
@@ -280,7 +296,13 @@ class BotRunner:
             "balance": self.state.balance,
             "active_trades": self.state.active_trades,
             "active_trades_count": len(self.state.active_trades),
+            "active_trades": self.state.active_trades,
+            "active_trades_count": len(self.state.active_trades),
             "statistics": self.state.get_statistics(),
+            "config": {
+                "stake": self.user_stake if self.user_stake else config.FIXED_STAKE,
+                "strategy": self.active_strategy
+            },
             "multi_asset": {
                 "symbols": self.symbols,
                 "scan_count": self.scan_count,
@@ -556,9 +578,29 @@ class BotRunner:
         data_1d = market_data.get('1d')
         data_1w = market_data.get('1w')
         
-        # Execute strategy analysis
+        # Execute strategy analysis based on Active Strategy
         try:
-            signal = self.strategy.analyze(data_1m, data_5m, data_1h, data_4h, data_1d, data_1w)
+            if self.active_strategy == "Conservative":
+                # Use standard Top-Down Strategy
+                signal = self.strategy.analyze(data_1m, data_5m, data_1h, data_4h, data_1d, data_1w)
+            
+            elif self.active_strategy == "Scalping":
+                # TODO: Implement distinct Scalping logic
+                # For now, we either fallback or return no signal to indicate "Coming Soon" behavior
+                # or strictly separate it.
+                # Given user request: "next will be Scalping". It implies it's not ready or just placeholder.
+                # But to avoid breaking if selected, let's log and return False for now, 
+                # OR we could just map it to the same strategy with different params if that was the intent.
+                # Assuming "Future" means not now:
+                
+                # However, to be safe if user accidentally selects it:
+                logger.debug(f"⚠️ Scalping strategy selected but not fully implemented. Skipping analysis.")
+                return False
+                
+            else:
+                # Default to Conservative if unknown
+                signal = self.strategy.analyze(data_1m, data_5m, data_1h, data_4h, data_1d, data_1w)
+
         except Exception as e:
             logger.error(f"❌ {symbol} - Strategy analysis failed: {e}")
             raise
@@ -627,7 +669,10 @@ class BotRunner:
         
         # Get symbol-specific configuration
         multiplier = self.asset_config.get(symbol, {}).get('multiplier', config.MULTIPLIER)
-        stake = config.FIXED_STAKE * multiplier
+        
+        # Determine Stake (User Preference > Config Default)
+        base_stake = self.user_stake if self.user_stake else config.FIXED_STAKE
+        stake = base_stake * multiplier
         
         # Validate with risk manager (including global checks)
         can_open, validation_msg = self.risk_manager.can_open_trade(

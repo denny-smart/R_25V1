@@ -24,13 +24,13 @@ class BotManager:
             
         return self._bots[user_id]
 
-    async def start_bot(self, user_id: str, api_token: Optional[str] = None) -> dict:
+    async def start_bot(self, user_id: str, api_token: Optional[str] = None, stake: Optional[float] = None, strategy_name: Optional[str] = None) -> dict:
         """
         Start a bot for a specific user.
         If api_token is provided, it updates the bot's token.
         """
         bot = self.get_bot(user_id)
-        return await bot.start_bot(api_token=api_token)
+        return await bot.start_bot(api_token=api_token, stake=stake, strategy_name=strategy_name)
 
     async def stop_bot(self, user_id: str) -> dict:
         """

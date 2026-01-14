@@ -18,17 +18,30 @@ from app.core.supabase import supabase
 async def get_current_config(current_user: dict = Depends(get_current_active_user)):
     """Get current bot configuration"""
     
-    # Fetch user specifics (deriv_api_key)
+    # Fetch user specifics (deriv_api_key, stake_amount, active_strategy)
     deriv_api_key = None
+    stake_amount = 50.0 # Default
+    active_strategy = "Conservative" # Default
+
     try:
-        profile = supabase.table('profiles').select('deriv_api_key').eq('id', current_user['id']).single().execute()
-        if profile.data and profile.data.get('deriv_api_key'):
-            key = profile.data['deriv_api_key']
-            # Mask the key (show last 4 chars if long enough)
-            if len(key) > 4:
-                deriv_api_key = f"*****{key[-4:]}"
-            else:
-                deriv_api_key = "*****"
+        profile = supabase.table('profiles').select('deriv_api_key, stake_amount, active_strategy').eq('id', current_user['id']).single().execute()
+        if profile.data:
+            # API Key
+            if profile.data.get('deriv_api_key'):
+                key = profile.data['deriv_api_key']
+                # Mask the key (show last 4 chars if long enough)
+                if len(key) > 4:
+                    deriv_api_key = f"*****{key[-4:]}"
+                else:
+                    deriv_api_key = "*****"
+            
+            # Stake & Strategy
+            if profile.data.get('stake_amount') is not None:
+                stake_amount = float(profile.data['stake_amount'])
+            
+            if profile.data.get('active_strategy'):
+                active_strategy = profile.data['active_strategy']
+
     except Exception:
         pass
 
@@ -51,7 +64,9 @@ async def get_current_config(current_user: dict = Depends(get_current_active_use
             "adx_threshold": config.ADX_THRESHOLD,
             "minimum_signal_score": config.MINIMUM_SIGNAL_SCORE,
         },
-        "deriv_api_key": deriv_api_key
+        "deriv_api_key": deriv_api_key,
+        "stake_amount": stake_amount,
+        "active_strategy": active_strategy
     }
 
 @router.put("/update")
@@ -69,16 +84,24 @@ async def update_config(
         requires_restart = []
         
         # User-Specific Config (Supabase)
+        user_updates = {}
+        
         if "deriv_api_key" in updates:
-            new_key = updates["deriv_api_key"]
-            # Save to Supabase profile
-            supabase.table('profiles').update({
-                "deriv_api_key": new_key
-            }).eq("id", current_user["id"]).execute()
-            
+            user_updates["deriv_api_key"] = updates["deriv_api_key"]
             updated_fields.append("deriv_api_key")
-            # If the bot is running for this user, it might need restart, 
-            # but for now we just save it. The BotManager will use it next start.
+            
+        if "stake_amount" in updates:
+            user_updates["stake_amount"] = float(updates["stake_amount"])
+            updated_fields.append("stake_amount")
+
+        if "active_strategy" in updates:
+            user_updates["active_strategy"] = updates["active_strategy"]
+            updated_fields.append("active_strategy")
+
+        if user_updates:
+            # Save to Supabase profile
+            supabase.table('profiles').update(user_updates).eq("id", current_user["id"]).execute()
+            # If the bot is running for this user, it might need restart (handled by BotManager/Runner logic on next cycle or restart)
         
         # Trading config (Global/Shared for now - requires restart)
         if "fixed_stake" in updates:

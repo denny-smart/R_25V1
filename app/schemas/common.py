@@ -33,3 +33,5 @@ class ConfigResponse(BaseModel):
     risk_management: Dict[str, Any]
     strategy: Dict[str, Any]
     deriv_api_key: Optional[str] = Field(None, description="Masked Deriv API Key")
+    stake_amount: Optional[float] = Field(None, description="User defined stake amount")
+    active_strategy: Optional[str] = Field(None, description="User defined trading strategy")

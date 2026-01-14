@@ -7,11 +7,19 @@ create table if not exists public.profiles (
   created_at timestamp with time zone default timezone('utc'::text, now()) not null
 );
 
--- 2. Add deriv_api_key column if it doesn't exist
+-- 2. Add deriv_api_key, stake_amount, and active_strategy columns if they don't exist
 do $$
 begin
   if not exists (select 1 from information_schema.columns where table_name = 'profiles' and column_name = 'deriv_api_key') then
     alter table public.profiles add column deriv_api_key text;
+  end if;
+
+  if not exists (select 1 from information_schema.columns where table_name = 'profiles' and column_name = 'stake_amount') then
+    alter table public.profiles add column stake_amount numeric default 50.0;
+  end if;
+
+  if not exists (select 1 from information_schema.columns where table_name = 'profiles' and column_name = 'active_strategy') then
+    alter table public.profiles add column active_strategy text default 'Conservative';
   end if;
 end $$;
 
