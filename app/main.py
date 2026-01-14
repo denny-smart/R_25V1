@@ -52,10 +52,9 @@ async def lifespan(app: FastAPI):
     logger.info(f"Environment: {settings.ENVIRONMENT}")
     logger.info(f"Bot auto-start: {settings.BOT_AUTO_START}")
     
-    # Auto-start bot if configured
-    if settings.BOT_AUTO_START:
-        logger.info("Auto-starting trading bot...")
-        await bot_runner.start_bot()
+    # Bot auto-start removed to support multi-user architecture.
+    # Users must start their bots manually via the API/Dashboard.
+    logger.info("Bot auto-start disabled (Multi-user mode)")
     
     yield
     
