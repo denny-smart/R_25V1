@@ -337,12 +337,34 @@ class TradeEngine:
                  logger.error(f"❌ invalid TP/SL calculation result: TP={tp_amount}, SL={sl_amount}")
                  return False
 
+            # CRITICAL: SL cannot exceed stake amount on Deriv multipliers
+            # If SL exceeds stake, recalculate SL price to fit within constraints
+            if sl_amount > stake:
+                logger.warning(f"⚠️ Stop Loss exceeds stake amount (SL: ${sl_amount:.2f} > Stake: ${stake:.2f})")
+                logger.warning(f"   Adjusting SL to maximum allowable loss of ${stake:.2f}")
+                
+                # Recalculate SL price based on max loss = stake
+                # Formula: SL_price = Entry ± (MaxLoss / (Stake * Multiplier)) * Entry
+                max_loss_pct = stake / (stake * multiplier)
+                if sl_price < entry_spot:  # DOWN trade
+                    sl_price = entry_spot * (1 - max_loss_pct)
+                else:  # UP trade
+                    sl_price = entry_spot * (1 + max_loss_pct)
+                
+                # Recalculate SL amount with new price
+                price_change_sl = sl_price - entry_spot
+                sl_amount = abs((price_change_sl / entry_spot) * stake * multiplier)
+                
+                logger.info(f"✅ SL adjusted to fit constraints")
+                logger.info(f"   New SL Price: {sl_price:.4f}")
+                logger.info(f"   New SL Loss: ${sl_amount:.2f}")
+
             logger.info(f"🎯 Applying TP/SL for multiplier contract...")
             logger.info(f"   Entry Spot: {entry_spot:.4f}")
             logger.info(f"   Multiplier: {multiplier}x")
             logger.info(f"   Stake: ${stake:.2f}")
             logger.info(f"   TP Level: {tp_price:.4f} → Profit: ${tp_amount:.2f}")
-            logger.info(f"   SL Level: {sl_price:.4f} → Loss: ${sl_amount:.2f}")
+            logger.info(f"   SL Level: {sl_price:.4f} → Loss: ${sl_amount:.2f} (Max Allowed: ${stake:.2f})")
             
             # Build limit order request
             # Use contract_update instead of limit_order for open contracts

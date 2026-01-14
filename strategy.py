@@ -35,6 +35,7 @@ class TradingStrategy:
         # Lookback settings
         self.swing_lookback = config.SWING_LOOKBACK
         self.min_level_touches = config.MIN_LEVEL_TOUCHES
+        self.max_sl_distance_pct = config.TOPDOWN_MAX_SL_DISTANCE_PCT
 
     def analyze(self, data_1m: pd.DataFrame, data_5m: pd.DataFrame, 
                 data_1h: pd.DataFrame, data_4h: pd.DataFrame, 
@@ -99,7 +100,7 @@ class TradingStrategy:
         # Identify Targets (TP) and Structure Points (SL)
         target_level, sl_level = self._identify_tp_sl_levels(
             structure_levels, current_price, signal_direction, 
-            data_1d, data_4h, data_1h
+            data_1d, data_4h, data_1h, data_5m
         )
 
         if not target_level:
@@ -329,7 +330,8 @@ class TradingStrategy:
                                direction: str, 
                                daily_data: pd.DataFrame,
                                data_4h: pd.DataFrame,
-                               data_1h: pd.DataFrame) -> Tuple[Optional[float], Optional[float]]:
+                               data_1h: pd.DataFrame,
+                               data_5m: pd.DataFrame) -> Tuple[Optional[float], Optional[float]]:
         """
         TP: Nearest Structure Level (Tested or Untested).
         SL: Price behind last Swing Point (Prioritize 1H -> 4H -> Daily).
@@ -348,12 +350,19 @@ class TradingStrategy:
             if potential_tps:
                 target = potential_tps[0]['price']
 
-            # SL: Last Swing Low BELOW current price (1H -> 4H -> Daily)
-            # Try 1H first
-            h, l = self._get_swing_points(data_1h)
+            # SL: Last Swing Low BELOW current price (5M -> 1H -> 4H -> Daily)
+            # Try 5M first (Scalping precision)
+            h, l = self._get_swing_points(data_5m)
             valid = [x for x in l if x < current_price]
             if valid:
                 stop = valid[-1]
+
+            if not stop:
+                # Try 1H
+                h, l = self._get_swing_points(data_1h)
+                valid = [x for x in l if x < current_price]
+                if valid:
+                    stop = valid[-1]
             
             if not stop:
                 # Try 4H
@@ -379,12 +388,19 @@ class TradingStrategy:
             if potential_tps:
                 target = potential_tps[0]['price']
 
-            # SL: Last Swing High ABOVE current price (1H -> 4H -> Daily)
-            # Try 1H first
-            h, l = self._get_swing_points(data_1h)
+            # SL: Last Swing High ABOVE current price (5M -> 1H -> 4H -> Daily)
+            # Try 5M first
+            h, l = self._get_swing_points(data_5m)
             valid = [x for x in h if x > current_price]
             if valid:
                 stop = valid[-1]
+
+            if not stop:
+                # Try 1H
+                h, l = self._get_swing_points(data_1h)
+                valid = [x for x in h if x > current_price]
+                if valid:
+                    stop = valid[-1]
             
             if not stop:
                 # Try 4H
@@ -400,6 +416,23 @@ class TradingStrategy:
                 if valid:
                     stop = valid[-1]
 
+        # Validate Max SL Distance with Smart Clamping
+        # If structural SL is too far, we clamp it to the max safe limits (0.5%) 
+        # to ensure we don't miss the trade opportunity, while staying safe.
+        if stop:
+            dist_pct = abs(current_price - stop) / current_price * 100
+            
+            if dist_pct > self.max_sl_distance_pct:
+                logger.warning(f"⚠️ Structural SL too wide ({dist_pct:.2f}%). Clamping to {self.max_sl_distance_pct}% to secure entry.")
+                
+                # Clamp SL to the max allowed distance
+                if current_price > stop: # UP Trade: SL is below
+                    stop = current_price * (1 - self.max_sl_distance_pct/100)
+                else: # DOWN Trade: SL is above
+                    stop = current_price * (1 + self.max_sl_distance_pct/100)
+                
+                # Note: TP remains at structural level, so R:R will arguably Improve
+                
         return target, stop
 
     def _find_trading_range(self, levels: List[Dict], current_price: float) -> Tuple[Optional[float], Optional[float]]:
