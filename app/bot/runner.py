@@ -412,7 +412,7 @@ class BotRunner:
             
             # Notify Telegram
             try:
-                await self.telegram_bridge.notify_bot_started(balance or 0.0, current_stake)
+                await self.telegram_bridge.notify_bot_started(balance or 0.0, current_stake, self.active_strategy)
             except Exception as e:
                 logger.warning(f"⚠️ Telegram notification failed: {e}")
             
@@ -692,7 +692,10 @@ class BotRunner:
              logger.error(f"❌ {symbol} - Critical: User stake is None during analysis")
              return False
              
-        stake = base_stake * multiplier
+        # CRITICAL FIX: Do NOT multiply by multiplier. 
+        # The stake passed to Deriv API (amount) is the user's risk amount (cost), 
+        # not the total exposure.
+        stake = base_stake
         
         # Validate with risk manager (including global checks)
         can_open, validation_msg = self.risk_manager.can_open_trade(

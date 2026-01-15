@@ -739,9 +739,17 @@ class TradeEngine:
                 return None
             
             # Open trade on specified asset
+            # CRITICAL: Use stake from signal if available (passed from BotRunner)
+            # Fallback to config.FIXED_STAKE only if signal doesn't provide it
+            trade_stake = signal.get('stake', config.FIXED_STAKE)
+            
+            if not trade_stake:
+                logger.error(f"❌ Missing stake amount for {symbol}")
+                return None
+                
             trade_info = await self.open_trade(
                 direction=direction,
-                stake=config.FIXED_STAKE,
+                stake=trade_stake,
                 symbol=symbol,
                 tp_price=tp_price,
                 sl_price=sl_price

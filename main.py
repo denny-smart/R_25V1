@@ -110,7 +110,8 @@ class TradingBot:
                 logger.info(f"💰 Account Balance: {format_currency(balance)}")
                 if TELEGRAM_ENABLED:
                     try:
-                        await notifier.notify_bot_started(balance)
+                        strategy_mode = "Top-Down Multi-Timeframe" if config.USE_TOPDOWN_STRATEGY else "Two-Phase Scalping"
+                        await notifier.notify_bot_started(balance, config.FIXED_STAKE, strategy_mode)
                     except Exception as e:
                         logger.error(f"❌ Telegram notification failed: {e}")
             
