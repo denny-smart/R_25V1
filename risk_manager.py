@@ -127,6 +127,7 @@ class RiskManager:
             logger.info(f"   Assets: {', '.join(self.symbols)}")
             logger.info(f"   TP/SL: Dynamic (based on levels & swings)")
             logger.info(f"   Min R:R: 1:{config.TOPDOWN_MIN_RR_RATIO}")
+            logger.info(f"   Trailing Stop: Trigger @ {config.SECURE_PROFIT_TRIGGER_PCT}% | Trail Buffer {config.SECURE_PROFIT_BUFFER_PCT}%")
             logger.info(f"   ⚠️ GLOBAL LIMIT: 1 active trade across ALL assets")
             
         elif self.cancellation_enabled:
@@ -472,17 +473,44 @@ class RiskManager:
             self.active_trade['highest_unrealized_pnl'] = current_pnl
             current_peak = current_pnl
             
-        # Rule: Once profit hit trigger, enforce trailing stop
-        SECURE_PROFIT_TRIGGER = config.SECURE_PROFIT_TRIGGER
-        TRAILING_BUFFER = config.SECURE_PROFIT_BUFFER
+        # Calculate dynamic amounts based on stake
+        stake = self.active_trade.get('stake', 0.0)
+        if stake <= 0:
+             # Fallback if stake missing
+             return {'should_close': False, 'reason': 'Stake missing for trailing stop'}
+             
+        # Thresholds
+        TRIGGER_PCT = config.SECURE_PROFIT_TRIGGER_PCT
+        BUFFER_PCT = config.SECURE_PROFIT_BUFFER_PCT
+        BREAKEVEN_PCT = getattr(config, 'BREAKEVEN_TRIGGER_PCT', 5.0)
         
-        if current_peak >= SECURE_PROFIT_TRIGGER:
-            stop_level = current_peak - TRAILING_BUFFER
+        trigger_amount = stake * (TRIGGER_PCT / 100.0)
+        trailing_buffer = stake * (BUFFER_PCT / 100.0)
+        breakeven_trigger = stake * (BREAKEVEN_PCT / 100.0)
+        
+        # 1. Breakeven Check (Priority 1)
+        # If we hit 5% profit but dropped back to near zero (or small loss), kill it to prevent full loss.
+        # We allow a tiny buffer ($0.10 or 0.5%) to account for spread fluctuation at zero.
+        if current_peak >= breakeven_trigger and current_peak < trigger_amount:
+            # We are in the "Breakeven Zone" (5% to 15%)
+            # If current PnL drops to <= 0.05% of stake (basically zero), CLOSE.
+            if current_pnl <= (stake * 0.005): 
+                return {
+                    'should_close': True,
+                    'reason': 'breakeven_trigger',
+                    'message': f'🛡️ Breakeven Trigger: Peak {format_currency(current_peak)} → Dropped to Entry',
+                    'current_pnl': current_pnl
+                }
+
+        # 2. Trailing Stop Check (Priority 2)
+        # Once we pass the main trigger (15%), normal trailing logic applies
+        if current_peak >= trigger_amount:
+            stop_level = current_peak - trailing_buffer
             if current_pnl <= stop_level:
                 return {
                     'should_close': True,
                     'reason': 'secure_profit_trailing_stop',
-                    'message': f'🔒 Secure Profit Hit: Peak {format_currency(current_peak)} → Dropped to {format_currency(current_pnl)}',
+                    'message': f'🔒 Secure Profit Hit: Peak {format_currency(current_peak)} ({format_currency(trigger_amount)}+) → Dropped to {format_currency(current_pnl)}',
                     'current_pnl': current_pnl
                 }
         

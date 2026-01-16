@@ -196,8 +196,9 @@ SL_BUFFER_PCT = 0.3                # 0.3% beyond swing (safety margin)
 MIN_TP_DISTANCE_PCT = 0.2          # Minimum TP distance from entry
 
 # ==================== TRAILING STOP SETTINGS ====================
-SECURE_PROFIT_TRIGGER = 5.0        # Trigger trailing stop when profit hits $5.00
-SECURE_PROFIT_BUFFER = 2.0         # Trail by $2.00 (Stop at $3.00 if peak is $5.00)
+BREAKEVEN_TRIGGER_PCT = 5.0          # Move SL to Entry when profit hits 5% of stake
+SECURE_PROFIT_TRIGGER_PCT = 15.0     # Trigger trailing stop when profit hits 15% of stake
+SECURE_PROFIT_BUFFER_PCT = 5.0       # Trail by 5% of stake (Secure 10% if hits 15%)
 
 # ==================== CONFLUENCE SCORING ====================
 CONFLUENCE_WEIGHT_HIGHER_TF = 2.0  # Higher timeframe levels weighted 2x
