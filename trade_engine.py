@@ -773,6 +773,16 @@ class TradeEngine:
                 risk_manager=risk_manager
             )
             
+            if final_status:
+                # Enrich with initial trade info for DB persistence
+                final_status['stake'] = trade_info['stake']
+                final_status['entry_price'] = trade_info['entry_spot']
+                final_status['exit_price'] = final_status.get('current_spot')
+                final_status['direction'] = direction
+                final_status['symbol'] = symbol
+                # Ensure alias 'signal' is present (DB uses 'signal')
+                final_status['signal'] = direction
+            
             if final_status is None:
                 logger.error("❌ Monitoring failed - unlocking trade slot")
                 risk_manager.has_active_trade = False
