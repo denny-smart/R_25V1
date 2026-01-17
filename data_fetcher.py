@@ -43,6 +43,7 @@ class DataFetcher:
     async def connect(self) -> bool:
         """Connect to Deriv WebSocket API"""
         try:
+            logger.info(f"Connecting to Deriv API at {self.ws_url}...")
             self.ws = await websockets.connect(
                 self.ws_url,
                 ping_interval=30,
@@ -53,11 +54,17 @@ class DataFetcher:
             logger.info("[OK] Connected to Deriv API")
             
             # Authorize
-            await self.authorize()
+            if not await self.authorize():
+                logger.error("[ERROR] Authorization failed during connection")
+                await self.disconnect()
+                return False
+                
             return True
             
         except Exception as e:
             logger.error(f"[ERROR] Failed to connect to Deriv API: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             self.is_connected = False
             return False
     

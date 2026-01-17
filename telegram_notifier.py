@@ -18,33 +18,53 @@ logger = setup_logger()
 
 class TelegramLoggingHandler(logging.Handler):
     """
-    Logging handler that sends error logs to Telegram
+    Logging handler that sends error logs to Telegram with rate limiting
     """
     def __init__(self, notifier_instance):
         super().__init__()
         self.notifier = notifier_instance
         self.setLevel(logging.ERROR)
         
+        # Rate limiting: track last send time
+        self.last_send_time = 0
+        self.min_interval = 5  # Minimum 5 seconds between messages
+        
     def emit(self, record):
         try:
-            msg = self.format(record)
-            # Avoid infinite recursion if the notifier itself logs an error
-            # We can run this in the background or use ensure_future if we are in an async loop context
-            # However, logging emit is sync. Converting to async is tricky without loop reference.
-            # Best effort: use event loop if available
+            # Prevent infinite loops - don't log Telegram errors via Telegram
+            if 'telegram' in record.name.lower() or 'Failed to send Telegram' in record.getMessage():
+                return
+                
+            # Rate limiting
+            import time
+            current_time = time.time()
+            if current_time - self.last_send_time < self.min_interval:
+                return  # Skip this message to avoid flooding
             
+            msg = self.format(record)
+            
+            # Best effort: use event loop if available
             try:
                 loop = asyncio.get_running_loop()
                 if loop and loop.is_running():
-                    loop.create_task(self.notifier.notify_error(f"LOG: {msg}"))
+                    # Don't wait for completion, fire and forget
+                    loop.create_task(self._send_safe(msg))
+                    self.last_send_time = current_time
             except RuntimeError:
-                # No running loop, or different thread. 
-                # Ideally we shouldn't block, but for critical errors it might be worth it.
-                # For now, let's just skip if no loop to avoid breaking sync code
+                # No running loop, skip to avoid blocking
                 pass
                 
         except Exception:
             self.handleError(record)
+    
+    async def _send_safe(self, msg: str):
+        """Safely send message without retriggering errors"""
+        try:
+            await self.notifier.notify_error(f"LOG: {msg}")
+        except Exception:
+            # Silently ignore - we don't want to create a loop
+            pass
+
 
 
 class TelegramNotifier:
@@ -90,13 +110,14 @@ class TelegramNotifier:
         empty = 5 - filled
         return "▮" * filled + "▯" * empty
 
-    async def send_message(self, message: str, parse_mode: str = "HTML") -> bool:
+    async def send_message(self, message: str, parse_mode: str = "HTML", retries: int = 3) -> bool:
         """
-        Send a message via Telegram
+        Send a message via Telegram with timeout and retry logic
         
         Args:
             message: Message text
             parse_mode: Parse mode (HTML or Markdown)
+            retries: Number of retry attempts (default: 3)
         
         Returns:
             True if sent successfully
@@ -104,19 +125,42 @@ class TelegramNotifier:
         if not self.enabled:
             return False
         
-        try:
-            await self.bot.send_message(
-                chat_id=self.chat_id,
-                text=message,
-                parse_mode=parse_mode
-            )
-            return True
-        except TelegramError as e:
-            logger.error(f"❌ Failed to send Telegram message: {e}")
-            return False
-        except Exception as e:
-            logger.error(f"❌ Telegram error: {e}")
-            return False
+        for attempt in range(retries):
+            try:
+                # Add timeout to prevent indefinite hanging (10 seconds)
+                await asyncio.wait_for(
+                    self.bot.send_message(
+                        chat_id=self.chat_id,
+                        text=message,
+                        parse_mode=parse_mode
+                    ),
+                    timeout=10.0  # 10 second timeout
+                )
+                return True
+                
+            except asyncio.TimeoutError:
+                if attempt < retries - 1:
+                    wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
+                    logger.warning(f"⚠️ Telegram timeout (attempt {attempt + 1}/{retries}), retrying in {wait_time}s...")
+                    await asyncio.sleep(wait_time)
+                else:
+                    logger.error(f"❌ Failed to send Telegram message: Timed out after {retries} attempts")
+                    return False
+                    
+            except TelegramError as e:
+                if attempt < retries - 1 and "timeout" in str(e).lower():
+                    wait_time = 2 ** attempt
+                    logger.warning(f"⚠️ Telegram error (attempt {attempt + 1}/{retries}): {e}, retrying in {wait_time}s...")
+                    await asyncio.sleep(wait_time)
+                else:
+                    logger.error(f"❌ Failed to send Telegram message: {e}")
+                    return False
+                    
+            except Exception as e:
+                logger.error(f"❌ Telegram error: {e}")
+                return False
+        
+        return False
     
     async def notify_bot_started(self, balance: float, stake: float = None, strategy_name: str = None):
         """Notify that bot has started"""

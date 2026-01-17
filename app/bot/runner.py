@@ -41,7 +41,9 @@ def with_user_context(func):
                 user_id_var.reset(token)
     return wrapper
 
-logger = logging.getLogger(__name__)
+from utils import setup_logger
+
+logger = setup_logger()
 
 class BotStatus(str, Enum):
     """Bot status enumeration"""
@@ -382,11 +384,15 @@ class BotRunner:
             
             # Connect to Deriv API
             try:
+                logger.info("🔌 Connecting DataFetcher...")
                 data_connected = await self.data_fetcher.connect()
-                trade_connected = await self.trade_engine.connect()
+                if not data_connected:
+                    raise Exception("DataFetcher failed to connect (check logs for details)")
                 
-                if not data_connected or not trade_connected:
-                    raise Exception("Failed to connect to Deriv API")
+                logger.info("🔌 Connecting TradeEngine...")
+                trade_connected = await self.trade_engine.connect()
+                if not trade_connected:
+                    raise Exception("TradeEngine failed to connect (check logs for details)")
                 
                 logger.info("✅ Connected to Deriv API")
             except Exception as e:

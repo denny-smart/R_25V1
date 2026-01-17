@@ -63,6 +63,7 @@ class TradeEngine:
     async def connect(self) -> bool:
         """Connect to Deriv WebSocket API"""
         try:
+            logger.info(f"TradeEngine connecting to {self.ws_url}...")
             self.ws = await websockets.connect(
                 self.ws_url,
                 ping_interval=30,
@@ -71,10 +72,17 @@ class TradeEngine:
             self.is_connected = True
             self.reconnect_attempts = 0
             logger.info("✅ Trade Engine connected to Deriv API")
-            await self.authorize()
+            
+            if not await self.authorize():
+                logger.error("❌ Trade Engine authorization failed")
+                await self.disconnect()
+                return False
+                
             return True
         except Exception as e:
             logger.error(f"❌ Failed to connect Trade Engine: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             self.is_connected = False
             return False
     
