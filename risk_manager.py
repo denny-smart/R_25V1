@@ -201,7 +201,7 @@ class RiskManager:
             self.trades_by_symbol = {symbol: 0 for symbol in self.symbols}
             self.pnl_by_symbol = {symbol: 0.0 for symbol in self.symbols}
     
-    def can_trade(self, symbol: str = None) -> tuple[bool, str]:
+    def can_trade(self, symbol: str = None, verbose: bool = False) -> tuple[bool, str]:
         """
         Check if trading is allowed GLOBALLY
         
@@ -210,44 +210,118 @@ class RiskManager:
         
         Args:
             symbol: Optional symbol to check (for logging context)
+            verbose: If True, log every check to terminal
         
         Returns:
             (can_trade, reason) - False if any global limit hit
         """
         self.reset_daily_stats()
         
+        if verbose:
+            print("\n[RISK] CHECK: Global Position Lock")
+            print("Rule: Max 1 active trade across ALL assets")
+            print(f"Actual: {'Locked by ' + self.active_symbol if self.has_active_trade else 'Unlocked'}")
+        
         # CRITICAL: Global position check
         if self.has_active_trade:
             reason = f"GLOBAL LOCK: Active {self.active_symbol} trade in progress (1/1 limit)"
             if symbol and symbol != self.active_symbol:
                 logger.debug(f"⏸️ {symbol} blocked: {reason}")
+            
+            if verbose:
+                print("Result: FAIL")
+                print("\n[RISK RESULT] ⛔ TRADE BLOCKED")
+                print(f"Blocking Rule: {reason}")
+                print("FINAL DECISION: ⛔ TRADE BLOCKED")
+                print("Blocked By: RISK MANAGER")
             return False, reason
+            
+        if verbose: print("Result: PASS")
         
         # GLOBAL circuit breaker
+        if verbose:
+            print("\n[RISK] CHECK: Circuit Breaker")
+            print(f"Rule: < {self.max_consecutive_losses} consecutive losses")
+            print(f"Actual: {self.consecutive_losses}")
+            
         if self.consecutive_losses >= self.max_consecutive_losses:
             reason = f"GLOBAL circuit breaker: {self.consecutive_losses} consecutive losses"
             logger.warning(f"🛑 {reason}")
+            
+            if verbose:
+                print("Result: FAIL")
+                print("\n[RISK RESULT] ⛔ TRADE BLOCKED")
+                print(f"Blocking Rule: {reason}")
+                print("FINAL DECISION: ⛔ TRADE BLOCKED")
+                print("Blocked By: RISK MANAGER")
             return False, reason
+            
+        if verbose: print("Result: PASS")
         
         # GLOBAL daily trade limit
+        if verbose:
+            print("\n[RISK] CHECK: Daily Trade Limit")
+            print(f"Rule: < {self.max_trades_per_day} trades")
+            print(f"Actual: {len(self.trades_today)}")
+            
         if len(self.trades_today) >= self.max_trades_per_day:
             reason = f"GLOBAL daily trade limit reached ({self.max_trades_per_day} trades)"
             logger.warning(f"⚠️ {reason}")
+            
+            if verbose:
+                print("Result: FAIL")
+                print("\n[RISK RESULT] ⛔ TRADE BLOCKED")
+                print(f"Blocking Rule: {reason}")
+                print("FINAL DECISION: ⛔ TRADE BLOCKED")
+                print("Blocked By: RISK MANAGER")
             return False, reason
+            
+        if verbose: print("Result: PASS")
         
         # GLOBAL daily loss limit
+        if verbose:
+            print("\n[RISK] CHECK: Daily Loss Limit")
+            print(f"Rule: Loss < {format_currency(self.max_daily_loss)}")
+            print(f"Actual: {format_currency(abs(self.daily_pnl) if self.daily_pnl < 0 else 0)}")
+            
         if self.daily_pnl <= -self.max_daily_loss:
             reason = f"GLOBAL daily loss limit reached ({format_currency(self.daily_pnl)})"
             logger.warning(f"⚠️ {reason}")
+            
+            if verbose:
+                print("Result: FAIL")
+                print("\n[RISK RESULT] ⛔ TRADE BLOCKED")
+                print(f"Blocking Rule: {reason}")
+                print("FINAL DECISION: ⛔ TRADE BLOCKED")
+                print("Blocked By: RISK MANAGER")
             return False, reason
+            
+        if verbose: print("Result: PASS")
         
         # GLOBAL cooldown (applies to all assets)
+        if verbose:
+            print("\n[RISK] CHECK: Cooldown Timer")
+            print(f"Rule: >= {self.cooldown_seconds} seconds")
+            
         if self.last_trade_time:
             time_since_last = (datetime.now() - self.last_trade_time).total_seconds()
+            if verbose: print(f"Actual: {time_since_last:.0f} seconds")
+            
             if time_since_last < self.cooldown_seconds:
                 remaining = self.cooldown_seconds - time_since_last
                 reason = f"GLOBAL cooldown active ({remaining:.0f}s remaining)"
+                
+                if verbose:
+                    print("Result: FAIL")
+                    print("\n[RISK RESULT] ⛔ TRADE BLOCKED")
+                    print(f"Blocking Rule: {reason}")
+                    print("FINAL DECISION: ⛔ TRADE BLOCKED")
+                    print("Blocked By: RISK MANAGER")
                 return False, reason
+        else:
+            if verbose: print("Actual: No recent trades")
+        
+        if verbose: print("Result: PASS")
         
         return True, "OK"
     
@@ -269,7 +343,8 @@ class RiskManager:
             (can_open, reason) - True only if ALL checks pass
         """
         # Step 1: Check GLOBAL trade permission
-        can_trade_global, reason = self.can_trade(symbol)
+        # Use verbose=True here as we are in the trade execution flow
+        can_trade_global, reason = self.can_trade(symbol, verbose=True)
         if not can_trade_global:
             return False, reason
         
@@ -279,7 +354,7 @@ class RiskManager:
         
         # Step 3: Validate trade parameters
         is_valid, validation_reason = self.validate_trade_parameters(
-            symbol, stake, take_profit, stop_loss
+            symbol, stake, take_profit, stop_loss, verbose=True
         )
         if not is_valid:
             return False, validation_reason
@@ -288,7 +363,8 @@ class RiskManager:
     
     def validate_trade_parameters(self, symbol: str, stake: float, 
                                   take_profit: float = None, 
-                                  stop_loss: float = None) -> tuple[bool, str]:
+                                  stop_loss: float = None,
+                                  verbose: bool = False) -> tuple[bool, str]:
         """Validate trade parameters for specific symbol"""
         if stake <= 0:
             return False, "Stake must be positive"
@@ -309,8 +385,22 @@ class RiskManager:
         # Limit: 1.5x of user's base stake setting
         max_stake = base_reference * multiplier * 1.5
         
+        if verbose:
+            print("\n[RISK] CHECK: Stake Limit via Multiplier")
+            print(f"Rule: Stake <= {format_currency(max_stake)} (1.5x Base)")
+            print(f"Actual: {format_currency(stake)}")
+        
         if stake > max_stake:
-            return False, f"Stake {stake:.2f} exceeds max {max_stake:.2f} for {symbol}"
+            reason = f"Stake {stake:.2f} exceeds max {max_stake:.2f} for {symbol}"
+            if verbose:
+                print("Result: FAIL")
+                print("\n[RISK RESULT] ⛔ TRADE BLOCKED")
+                print(f"Blocking Rule: {reason}")
+                print("FINAL DECISION: ⛔ TRADE BLOCKED")
+                print("Blocked By: RISK MANAGER")
+            return False, reason
+            
+        if verbose: print("Result: PASS")
         
         # Top-Down: TP/SL validation done by strategy
         # Strategy already validates R:R correctly using price distances
