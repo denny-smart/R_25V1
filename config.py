@@ -79,16 +79,20 @@ FIXED_STAKE = None               # NO DEFAULT - STRICTLY USER DEFINED
 TAKE_PROFIT_PERCENT = 0.24         # 0.24% TP
 STOP_LOSS_PERCENT = 0.0413           # 0.0413% SL
 
+# Maximum Risk (Percentage of Stake)
+MAX_RISK_PCT = 15.0                # Never risk more than 15% of stake
+
 # Maximum loss per trade (acts as emergency stop)
 MAX_LOSS_PER_TRADE = None           # DYNAMIC (1x User Stake)
 
 # Minimum Risk-to-Reward Ratio
-MIN_RR_RATIO = 2.0                 # Minimum 1:2.0 risk/reward to take trade
+MIN_RR_RATIO = 2.5                 # Minimum 1:2.5 risk/reward to take trade (Increased from 2.0)
+STRICT_RR_ENFORCEMENT = True       # Hard reject if fails
+
 COOLDOWN_SECONDS = 180             # 3 minutes between trades
 MAX_TRADES_PER_DAY = 30            # Maximum trades per day
-MAX_DAILY_LOSS = None               # DYNAMIC (3x User Stake)
+MAX_DAILY_LOSS = None               # DYNAMIC (1.5x User Stake)
 
-# Valid multipliers for all assets
 # Valid multipliers for all assets
 VALID_MULTIPLIERS = [40, 50, 80, 160, 400, 800, 1200, 1600]
 
@@ -122,7 +126,8 @@ SMA_PERIOD = 100
 EMA_PERIOD = 20
 
 # Signal Scoring
-MINIMUM_SIGNAL_SCORE = 7          # Minimum score to trade (Increased for quality)
+MIN_SIGNAL_STRENGTH = 8.0          # Only strength 8.0+ signals (Absolute score)
+MINIMUM_SIGNAL_SCORE = 7          # Legacy param (Keep for compatibility, but MIN_SIGNAL_STRENGTH takes precedence)
 
 # Filters
 VOLATILITY_SPIKE_MULTIPLIER = 2.0
@@ -132,6 +137,17 @@ WEAK_CANDLE_MULTIPLIER = 0.35
 # No time-based cancellation - trades exit only via TP/SL
 MAX_TRADE_DURATION = None          # No maximum duration - let TP/SL handle exits
 MONITOR_INTERVAL = 2               # Check every 2 seconds for TP/SL hits
+
+# Early Exit "Fast Failure" Settings (Percentage Based)
+ENABLE_EARLY_EXIT = True           # Enable early exit monitoring
+EARLY_EXIT_TIME_DAY = 45           # 45 seconds during safe hours (12-22)
+EARLY_EXIT_TIME_NIGHT = 20         # 20 seconds during risky hours
+EARLY_EXIT_LOSS_PCT = 5.0          # Exit if down 5% of stake
+
+# Stagnation Exit Settings (Percentage Based)
+ENABLE_STAGNATION_EXIT = True      # Close if trade is stuck in loss
+STAGNATION_EXIT_TIME = 90          # 90 seconds
+STAGNATION_LOSS_PCT = 6.0          # Exit if losing 6% of stake after 90s
 
 # ==================== LOGGING ====================
 LOG_FILE = "trading_bot.log"
@@ -184,7 +200,7 @@ STRUCTURE_CONFIRMATION_CANDLES = 3 # Wait N candles to confirm structure break
 # ==================== RISK MANAGEMENT FOR TOP-DOWN ====================
 TOPDOWN_USE_DYNAMIC_TP = True      # TP based on untested levels (not fixed %)
 TOPDOWN_USE_STRUCTURE_SL = True    # SL based on swing points (not fixed %)
-TOPDOWN_MIN_RR_RATIO = 2.0         # Minimum 1:2.0 risk/reward to take trade (aligned with MIN_RR_RATIO)
+TOPDOWN_MIN_RR_RATIO = 2.5         # Minimum 1:2.5 risk/reward to take trade (Synced with MIN_RR_RATIO)
 TOPDOWN_MAX_SL_DISTANCE_PCT = 0.5   # Maximum SL distance: 0.5% from entry (Reduced Risk)
 
 # Exit strategy - TP/SL only (no time-based exits)
@@ -196,9 +212,42 @@ SL_BUFFER_PCT = 0.3                # 0.3% beyond swing (safety margin)
 MIN_TP_DISTANCE_PCT = 0.2          # Minimum TP distance from entry
 
 # ==================== TRAILING STOP SETTINGS ====================
-BREAKEVEN_TRIGGER_PCT = 5.0          # Move SL to Entry when profit hits 5% of stake
-SECURE_PROFIT_TRIGGER_PCT = 15.0     # Trigger trailing stop when profit hits 15% of stake
-SECURE_PROFIT_BUFFER_PCT = 5.0       # Trail by 5% of stake (Secure 10% if hits 15%)
+# Breakeven Protection (DISABLED - Was Killing Profits)
+ENABLE_BREAKEVEN_PROTECTION = False  # ❌ PERMANENTLY OFF
+
+# percentage-based trailing stop tiers
+ENABLE_MULTI_TIER_TRAILING = True
+
+# Tiers: Lock profits as they grow
+TRAILING_STOPS = [
+    # Stage 1: Initial protection
+    {
+        'trigger_pct': 8.0,      # Activate at 8% profit
+        'trail_pct': 4.0,        # Trail 4% behind current price
+        'name': 'Initial Lock'
+    },
+    # Stage 2: Profit secured
+    {
+        'trigger_pct': 15.0,     # At 15% profit
+        'trail_pct': 6.0,        # Trail 6% behind
+        'name': 'Profit Secured'
+    },
+    # Stage 3: Big winner
+    {
+        'trigger_pct': 25.0,     # At 25% profit
+        'trail_pct': 8.0,        # Trail 8% behind
+        'name': 'Big Winner'
+    },
+    # Stage 4: Excellent winner
+    {
+        'trigger_pct': 50.0,     # At 50% profit
+        'trail_pct': 15.0,       # Trail 15% behind
+        'name': 'Excellent Winner'
+    }
+]
+
+SECURE_PROFIT_TRIGGER_PCT = 15.0     # Legacy param fallback
+SECURE_PROFIT_BUFFER_PCT = 5.0       # Legacy param fallback
 
 # ==================== CONFLUENCE SCORING ====================
 CONFLUENCE_WEIGHT_HIGHER_TF = 2.0  # Higher timeframe levels weighted 2x

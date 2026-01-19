@@ -726,7 +726,8 @@ class BotRunner:
             symbol=symbol,
             stake=stake,
             take_profit=signal.get('take_profit'),
-            stop_loss=signal.get('stop_loss')
+            stop_loss=signal.get('stop_loss'),
+            signal_dict=signal
         )
         
         if not can_open:

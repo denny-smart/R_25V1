@@ -269,7 +269,8 @@ class RiskManager:
         return True, "OK"
     
     def can_open_trade(self, symbol: str, stake: float, 
-                      take_profit: float = None, stop_loss: float = None) -> tuple[bool, str]:
+                      take_profit: float = None, stop_loss: float = None,
+                      signal_dict: Dict = None) -> tuple[bool, str]:
         """
         Complete validation before opening trade on specific symbol
         
@@ -281,6 +282,7 @@ class RiskManager:
             stake: Trade stake amount
             take_profit: Optional TP level
             stop_loss: Optional SL level
+            signal_dict: Optional full signal dictionary for advanced validation
         
         Returns:
             (can_open, reason) - True only if ALL checks pass
@@ -297,31 +299,64 @@ class RiskManager:
         
         # Step 3: Validate trade parameters
         is_valid, validation_reason = self.validate_trade_parameters(
-            symbol, stake, take_profit, stop_loss, verbose=True
+            symbol, stake, take_profit, stop_loss, signal_dict, verbose=True
         )
         if not is_valid:
             return False, validation_reason
         
         return True, "OK - FIRST-COME-FIRST-SERVED slot available"
     
+    def calculate_risk_amounts(self, signal_dict: Dict, stake: float) -> Dict:
+        """Calculate risk/reward in dollars from percentages"""
+        if not signal_dict:
+            return {}
+
+        entry_price = signal_dict.get('entry_price', 0.0)
+        stop_loss = signal_dict.get('stop_loss', 0.0)
+        take_profit = signal_dict.get('take_profit', 0.0)
+        symbol = signal_dict.get('symbol', 'UNKNOWN')
+        multiplier = self.asset_config.get(symbol, {}).get('multiplier', config.MULTIPLIER)
+
+        if entry_price == 0:
+             return {}
+
+        # Risk in dollars
+        risk_distance_pct = abs(entry_price - stop_loss) / entry_price * 100
+        risk_usd = stake * (risk_distance_pct / 100) * multiplier
+
+        # Reward in dollars
+        reward_distance_pct = abs(take_profit - entry_price) / entry_price * 100
+        reward_usd = stake * (reward_distance_pct / 100) * multiplier
+
+        # R:R ratio (stake-independent)
+        rr_ratio = reward_usd / risk_usd if risk_usd > 0 else 0
+
+        # Risk as percentage of stake
+        risk_pct = (risk_usd / stake) * 100
+
+        return {
+            'risk_usd': risk_usd,
+            'reward_usd': reward_usd,
+            'rr_ratio': rr_ratio,
+            'risk_pct': risk_pct
+        }
+
     def validate_trade_parameters(self, symbol: str, stake: float, 
                                   take_profit: float = None, 
                                   stop_loss: float = None,
+                                  signal_dict: Dict = None,
                                   verbose: bool = False) -> tuple[bool, str]:
         """Validate trade parameters for specific symbol"""
         if stake <= 0:
             return False, "Stake must be positive"
         
         # Get symbol-specific max stake
-        # Get symbol-specific max stake
         multiplier = self.asset_config.get(symbol, {}).get('multiplier', config.MULTIPLIER)
         
         # Ensure stake is set
         if self.fixed_stake is None:
-             # If called before initialization, we can't validate max stake properly relative to user setting
-             # But we can check for absolute sanity or just return info
              logger.warning("⚠️ Accessing validation before stake initialized. Defaulting base to stake.")
-             base_reference = stake # Treat current stake as base for check
+             base_reference = stake
         else:
              base_reference = self.fixed_stake
 
@@ -333,32 +368,46 @@ class RiskManager:
             if verbose:
                 print(f"[RISK] ⛔ Stake Limit Exceeded: {stake:.2f} > {max_stake:.2f}")
             return False, reason
+
+        # NEW: Extensive Validation using Signal Dict if available
+        if signal_dict:
+            amounts = self.calculate_risk_amounts(signal_dict, stake)
+            
+            # Check 1: R:R Ratio
+            if amounts.get('rr_ratio', 0) < config.MIN_RR_RATIO:
+                # Only enforce STRICTLY if configured
+                msg = f"R:R {amounts.get('rr_ratio', 0):.2f} < {config.MIN_RR_RATIO}"
+                if getattr(config, 'STRICT_RR_ENFORCEMENT', False):
+                    logger.warning(f"❌ REJECTED: {msg}")
+                    return False, f"Invalid R:R: {amounts.get('rr_ratio', 0):.2f}"
+                else:
+                    logger.warning(f"⚠️ Low R:R: {msg}")
+
+            # Check 2: Maximum Risk Percentage
+            max_risk_pct = getattr(config, 'MAX_RISK_PCT', 15.0)
+            if amounts.get('risk_pct', 0) > max_risk_pct:
+                logger.warning(f"❌ REJECTED: Risk {amounts.get('risk_pct', 0):.1f}% > {max_risk_pct}%")
+                return False, f"Risk too high: {amounts.get('risk_pct', 0):.1f}% of stake"
+
+            # Check 3: Signal Strength
+            min_strength = getattr(config, 'MIN_SIGNAL_STRENGTH', 8.0)
+            strength = signal_dict.get('score', 0)
+            if strength < min_strength:
+                logger.warning(f"❌ REJECTED: Strength {strength:.1f} < {min_strength}")
+                return False, f"Signal too weak: {strength:.1f}"
+
+            logger.info(f"✅ VALIDATED: R:R {amounts.get('rr_ratio', 0):.2f}, Risk {amounts.get('risk_pct', 0):.1f}%, Strength {strength:.1f}")
+
         
-        # Top-Down: TP/SL validation done by strategy
-        # Strategy already validates R:R correctly using price distances
-        if self.use_topdown:
-            return True, f"Valid (Top-Down mode for {symbol})"
-        
-        # Cancellation mode: TP/SL applied after Phase 1
+        # Legacy Validation (Fallbacks)
         if self.cancellation_enabled and (take_profit is None or stop_loss is None):
             return True, f"Valid (wait-and-cancel mode for {symbol})"
         
-        # Legacy: Validate provided TP/SL
         if take_profit is not None and take_profit <= 0:
             return False, "Take profit must be positive"
         
         if stop_loss is not None and stop_loss <= 0:
             return False, "Stop loss must be positive"
-        
-        # Use dynamic max loss base
-        max_loss_per_trade = self.max_loss_per_trade_base * multiplier
-        if stop_loss and stop_loss > max_loss_per_trade * 1.15:
-            return False, f"SL {format_currency(stop_loss)} exceeds max for {symbol}"
-        
-        if take_profit and stop_loss:
-            risk_reward_ratio = take_profit / stop_loss
-            if risk_reward_ratio < 1.5:
-                logger.warning(f"⚠️ Low R:R ratio for {symbol}: {risk_reward_ratio:.2f}")
         
         return True, "Valid"
     
@@ -378,6 +427,7 @@ class RiskManager:
             'direction': trade_info.get('direction'),
             'stake': trade_info.get('stake', 0.0),
             'entry_price': trade_info.get('entry_price', 0.0),
+            'entry_spot': trade_info.get('entry_spot', 0.0),
             'take_profit': trade_info.get('take_profit'),
             'stop_loss': trade_info.get('stop_loss'),
             'status': 'open',
@@ -385,7 +435,8 @@ class RiskManager:
             'phase': 'cancellation' if self.cancellation_enabled else 'committed',
             'cancellation_enabled': trade_info.get('cancellation_enabled', False),
             'cancellation_expiry': trade_info.get('cancellation_expiry'),
-            'highest_unrealized_pnl': 0.0 # Track peak profit for trailing stop
+            'highest_unrealized_pnl': 0.0, # Track peak profit for trailing stop
+            'has_been_profitable': False   # Track if trade ever went into profit
         }
         
         self.trades_today.append(trade_record)
@@ -470,74 +521,196 @@ class RiskManager:
                 
                 break
     
+    def check_early_exit(self, trade, current_price, elapsed_seconds, stake):
+        """Check if trade should be exited early (Fast Failure)"""
+        if not getattr(config, 'ENABLE_EARLY_EXIT', True):
+            return False, None
+
+        # Get time window based on hour
+        current_hour = datetime.now().hour
+        time_window = getattr(config, 'EARLY_EXIT_TIME_DAY', 45) if 12 <= current_hour <= 22 else getattr(config, 'EARLY_EXIT_TIME_NIGHT', 20)
+
+        if elapsed_seconds > time_window:
+            return False, None  # Past early exit window
+
+        entry_price = trade.get('entry_price', 0.0)
+        direction = trade.get('direction', 'UP')
+
+        # Calculate current loss as percentage of stake (using distances)
+        # Note: We need approx loss pct.
+        # Loss Pct = (Dist / Entry) * Multiplier * Stake / Stake * 100
+        #          = (Dist / Entry) * Multiplier * 100
+        
+        symbol = trade.get('symbol', 'UNKNOWN')
+        multiplier = self.asset_config.get(symbol, {}).get('multiplier', config.MULTIPLIER)
+        
+        if direction == "UP":
+            dist = entry_price - current_price
+        else:
+            dist = current_price - entry_price
+
+        if dist > 0 and entry_price > 0:
+            loss_pct_of_stake = (dist / entry_price) * multiplier * 100
+            
+            threshold = getattr(config, 'EARLY_EXIT_LOSS_PCT', 5.0)
+            if loss_pct_of_stake >= threshold:
+                logger.warning(f"⚠️ Early exit triggered: Loss {loss_pct_of_stake:.1f}% > {threshold}% at {elapsed_seconds}s")
+                return True, f"early_exit_fast_failure_{loss_pct_of_stake:.1f}pct"
+
+        return False, None
+
+    def update_trailing_stop(self, trade, current_price, current_pnl, stake):
+        """
+        Update trailing stop based on user-defined Price Formula:
+        risk_dollars = stake * trail_percentage
+        price_distance = (risk_dollars * entry_price) / (multiplier * stake)
+        """
+        if not getattr(config, 'ENABLE_MULTI_TIER_TRAILING', True):
+            return None
+
+        if stake <= 0: return None
+        
+        # Calculate Pnl % of Stake for Tier Activation
+        pnl_pct = (current_pnl / stake) * 100
+
+        # Find active tier
+        active_tier = None
+        tiers = getattr(config, 'TRAILING_STOPS', [])
+        for tier in sorted(tiers, key=lambda x: x['trigger_pct'], reverse=True):
+            if pnl_pct >= tier['trigger_pct']:
+                active_tier = tier
+                break
+
+        if not active_tier:
+            return None  # Below minimum threshold
+
+        # ======================================================================
+        # CORRECT FORMULA IMPLEMENTATION
+        # ======================================================================
+        # 1. Get Multiplier
+        symbol = trade.get('symbol', 'UNKNOWN')
+        multiplier = self.asset_config.get(symbol, {}).get('multiplier', config.MULTIPLIER)
+        entry_price = trade.get('entry_price', 0.0)
+        
+        # 2. Calculate Risk in Dollars
+        trail_pct = active_tier['trail_pct'] / 100.0
+        risk_dollars = stake * trail_pct
+        
+        # 3. Convert to Price Distance
+        # Formula: (risk_dollars * entry_price) / (multiplier * stake)
+        if multiplier > 0 and stake > 0:
+            price_distance = (risk_dollars * entry_price) / (multiplier * stake)
+        else:
+            return None
+
+        # 4. Calculate Potential New Stop Price
+        direction = trade.get('direction', 'UP')
+        
+        if direction == 'UP':
+            # UP Trade: Stop is BELOW price
+            potential_stop = current_price - price_distance
+        else:
+            # DOWN Trade: Stop is ABOVE price
+            potential_stop = current_price + price_distance
+            
+        # 5. Update Persistent Stop Price (Only if Tighter)
+        current_dynamic_stop = trade.get('dynamic_stop_price')
+        
+        updated = False
+        if current_dynamic_stop is None:
+            trade['dynamic_stop_price'] = potential_stop
+            updated = True
+            logger.info(f"🛡️ Trailing Activated ({active_tier['name']}): Stop set to {potential_stop:.4f}")
+        else:
+            # Only tighten
+            if direction == 'UP' and potential_stop > current_dynamic_stop:
+                trade['dynamic_stop_price'] = potential_stop
+                updated = True
+            elif direction == 'DOWN' and potential_stop < current_dynamic_stop:
+                trade['dynamic_stop_price'] = potential_stop
+                updated = True
+                
+        if updated:
+             # Log update (optional, reduced spam)
+             pass
+        
+        return {
+            'stop_price': trade['dynamic_stop_price'], 
+            'tier_name': active_tier['name']
+        }
+
     def should_close_trade(self, current_pnl: float, current_price: float, 
                           previous_price: float) -> Dict:
-        """Check if trade should be closed manually (emergency only)"""
+        """Check if trade should be closed manually"""
         if not self.active_trade:
-            return {'should_close': False, 'reason': 'No active trade'}
+             return {'should_close': False, 'reason': 'No active trade'}
+
+        stake = self.active_trade.get('stake', 0.0)
+        if stake <= 0:
+             return {'should_close': False, 'reason': 'Stake missing'}
+
+        elapsed_seconds = (datetime.now() - self.active_trade.get('timestamp', datetime.now())).total_seconds()
+
+        # 1. Early Exit (Fast Failure)
+        should_exit, reason_msg = self.check_early_exit(self.active_trade, current_price, elapsed_seconds, stake)
+        if should_exit:
+             return {'should_close': True, 'reason': 'early_exit', 'message': reason_msg, 'current_pnl': current_pnl}
+
+        # 2. Stagnation Exit
+        if getattr(config, 'ENABLE_STAGNATION_EXIT', True):
+             stagnation_time = getattr(config, 'STAGNATION_EXIT_TIME', 90)
+             if elapsed_seconds >= stagnation_time and current_pnl < 0:
+                  loss_pct = (abs(current_pnl) / stake) * 100
+                  stagnation_loss_limit = getattr(config, 'STAGNATION_LOSS_PCT', 6.0)
+                  
+                  if loss_pct >= stagnation_loss_limit:
+                       return {
+                           'should_close': True, 
+                           'reason': 'stagnation_exit',
+                           'message': f'💤 Stagnation: Loss {loss_pct:.1f}% > {stagnation_loss_limit}% after {int(elapsed_seconds)}s',
+                           'current_pnl': current_pnl
+                       }
         
-        # Emergency exit: daily loss limit approaching
+        # 3. Trailing Stop (Price Based)
+        # Update highest unrealized PnL (still needed for Tier activation)
+        current_peak = self.active_trade.get('highest_unrealized_pnl', 0.0)
+        if current_pnl > current_peak:
+            self.active_trade['highest_unrealized_pnl'] = current_pnl
+            current_peak = current_pnl
+            
+        trailing = self.update_trailing_stop(self.active_trade, current_price, current_peak, stake)
+        if trailing:
+             stop_price = trailing['stop_price']
+             tier_name = trailing['tier_name']
+             direction = self.active_trade.get('direction', 'UP')
+             
+             # Check if Price Crossed Stop
+             hit_stop = False
+             if direction == 'UP' and current_price <= stop_price:
+                 hit_stop = True
+             elif direction == 'DOWN' and current_price >= stop_price:
+                 hit_stop = True
+                 
+             if hit_stop:
+                  return {
+                      'should_close': True,
+                      'reason': 'trailing_stop_hit',
+                      'message': f'🎯 Trailing Stop ({tier_name}): Price {current_price:.4f} hit Stop {stop_price:.4f}',
+                      'current_pnl': current_pnl
+                  }
+        
+        # Emergency exit logic
+        # ... (Global daily loss logic)
         potential_daily_loss = self.daily_pnl + current_pnl
-        if potential_daily_loss <= -(self.max_daily_loss * 0.9):
+        if self.max_daily_loss and potential_daily_loss <= -(self.max_daily_loss * 0.9):
             return {
                 'should_close': True,
                 'reason': 'emergency_daily_loss',
                 'message': f'Emergency: GLOBAL daily loss approaching limit ({format_currency(potential_daily_loss)})',
                 'current_pnl': current_pnl
             }
-        
-        # ----------------------------------------------------------------------
-        # Secure Profit Logic (Trailing Stop)
-        # ----------------------------------------------------------------------
-        # Update highest unrealized PnL
-        current_peak = self.active_trade.get('highest_unrealized_pnl', 0.0)
-        if current_pnl > current_peak:
-            self.active_trade['highest_unrealized_pnl'] = current_pnl
-            current_peak = current_pnl
-            
-        # Calculate dynamic amounts based on stake
-        stake = self.active_trade.get('stake', 0.0)
-        if stake <= 0:
-             # Fallback if stake missing
-             return {'should_close': False, 'reason': 'Stake missing for trailing stop'}
-             
-        # Thresholds
-        TRIGGER_PCT = config.SECURE_PROFIT_TRIGGER_PCT
-        BUFFER_PCT = config.SECURE_PROFIT_BUFFER_PCT
-        BREAKEVEN_PCT = getattr(config, 'BREAKEVEN_TRIGGER_PCT', 5.0)
-        
-        trigger_amount = stake * (TRIGGER_PCT / 100.0)
-        trailing_buffer = stake * (BUFFER_PCT / 100.0)
-        breakeven_trigger = stake * (BREAKEVEN_PCT / 100.0)
-        
-        # 1. Breakeven Check (Priority 1)
-        # If we hit 5% profit but dropped back to near zero (or small loss), kill it to prevent full loss.
-        # We allow a tiny buffer ($0.10 or 0.5%) to account for spread fluctuation at zero.
-        if current_peak >= breakeven_trigger and current_peak < trigger_amount:
-            # We are in the "Breakeven Zone" (5% to 15%)
-            # If current PnL drops to <= 0.05% of stake (basically zero), CLOSE.
-            if current_pnl <= (stake * 0.005): 
-                return {
-                    'should_close': True,
-                    'reason': 'breakeven_trigger',
-                    'message': f'🛡️ Breakeven Trigger: Peak {format_currency(current_peak)} → Dropped to Entry',
-                    'current_pnl': current_pnl
-                }
 
-        # 2. Trailing Stop Check (Priority 2)
-        # Once we pass the main trigger (15%), normal trailing logic applies
-        if current_peak >= trigger_amount:
-            stop_level = current_peak - trailing_buffer
-            if current_pnl <= stop_level:
-                return {
-                    'should_close': True,
-                    'reason': 'secure_profit_trailing_stop',
-                    'message': f'🔒 Secure Profit Hit: Peak {format_currency(current_peak)} ({format_currency(trigger_amount)}+) → Dropped to {format_currency(current_pnl)}',
-                    'current_pnl': current_pnl
-                }
-        
-        # Otherwise let Deriv handle exits (TP/SL via limit_order)
-        return {'should_close': False, 'reason': 'Deriv limit_order active'}
+        return {'should_close': False, 'reason': 'monitor_active'}
     
     def get_exit_status(self, current_pnl: float) -> Dict:
         """Get current exit status"""
