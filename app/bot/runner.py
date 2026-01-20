@@ -560,7 +560,7 @@ class BotRunner:
                 
             except Exception as e:
                 # Log error but continue to next symbol
-                logger.error(f"❌ Error analyzing {symbol}: {e}")
+                logger.error(f"❌ SYMBOL_ANALYSIS_FAILED | Symbol: {symbol} | Error: {type(e).__name__}: {e}", exc_info=True)
                 self.errors_by_symbol[symbol] = self.errors_by_symbol.get(symbol, 0) + 1
                 
                 # If too many errors for this symbol, notify
@@ -671,12 +671,9 @@ class BotRunner:
             return False
         
         # We have a signal! Log it
-        logger.info(f"🎯 {symbol} - SIGNAL DETECTED!")
-        logger.info(f"   Direction: {signal['signal']}")
-        logger.info(f"   Score: {signal.get('score', 0):.2f}")
         checks_passed = ", ".join(signal.get('details', {}).get('passed_checks', []))
-        logger.info(f"   Confidence: {signal.get('confidence', 0):.1f}%")
-        logger.info(f"   Checks Passed: {checks_passed}")
+        logger.info(f"🎯 {symbol} - SIGNAL: {signal['signal']} | Score: {signal.get('score', 0):.2f} | Conf: {signal.get('confidence', 0):.0f}%")
+        logger.debug(f"   Checks: {checks_passed}")
         
         # Track signal
         self.signals_by_symbol[symbol] = self.signals_by_symbol.get(symbol, 0) + 1
@@ -839,7 +836,7 @@ class BotRunner:
                 return False
                 
         except Exception as e:
-            logger.error(f"❌ {symbol} - Trade execution error: {e}")
+            logger.error(f"❌ TRADE_EXECUTION_FAILED | Symbol: {symbol} | Error: {type(e).__name__}: {e}", exc_info=True)
             
             try:
                 await self.telegram_bridge.notify_error(f"{symbol} trade failed: {e}")

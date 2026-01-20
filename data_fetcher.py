@@ -122,7 +122,7 @@ class DataFetcher:
                 data = json.loads(response)
             
             if "error" in data:
-                logger.error(f"[ERROR] Authorization failed: {data['error']['message']}")
+                logger.error(f"❌ AUTH_FAILED | Error: {data['error']['message']}")
                 return False
             
             if "authorize" in data:
@@ -132,7 +132,7 @@ class DataFetcher:
             return False
             
         except Exception as e:
-            logger.error(f"[ERROR] Authorization error: {e}")
+            logger.error(f"❌ AUTH_EXCEPTION | Error: {type(e).__name__}: {e}", exc_info=True)
             return False
     
     async def _rate_limit(self):
@@ -221,11 +221,11 @@ class DataFetcher:
             response = await self.send_request(request)
             
             if "error" in response:
-                logger.error(f"[ERROR] Failed to fetch {symbol} candles: {response['error']['message']}")
+                logger.error(f"❌ CANDLE_FETCH_FAILED | Symbol: {symbol} | Interval: {interval} | Count: {count} | Reason: {response['error']['message']}")
                 return None
             
             if "candles" not in response:
-                logger.error(f"[ERROR] No candle data for {symbol}")
+                logger.error(f"❌ CANDLE_RESPONSE_MISSING | Symbol: {symbol} | Expected: candles field | Got keys: {list(response.keys())}")
                 return None
             
             # Parse candles
@@ -246,7 +246,7 @@ class DataFetcher:
             return df
             
         except Exception as e:
-            logger.error(f"[ERROR] Error fetching {symbol} candles: {e}")
+            logger.error(f"❌ CANDLE_FETCH_EXCEPTION | Symbol: {symbol} | Interval: {interval} | Count: {count} | Error: {type(e).__name__}: {e}", exc_info=True)
             return None
     
     async def fetch_tick(self, symbol: str) -> Optional[float]:
@@ -259,7 +259,7 @@ class DataFetcher:
             response = await self.send_request(request)
             
             if "error" in response:
-                logger.error(f"[ERROR] Failed to fetch {symbol} tick: {response['error']['message']}")
+                logger.error(f"❌ TICK_FETCH_FAILED | Symbol: {symbol} | Reason: {response['error']['message']}")
                 return None
             
             if "tick" in response:
@@ -268,7 +268,7 @@ class DataFetcher:
             return None
             
         except Exception as e:
-            logger.error(f"[ERROR] Error fetching {symbol} tick: {e}")
+            logger.error(f"❌ TICK_FETCH_EXCEPTION | Symbol: {symbol} | Error: {type(e).__name__}: {e}", exc_info=True)
             return None
     
     async def get_balance(self) -> Optional[float]:
@@ -278,7 +278,7 @@ class DataFetcher:
             response = await self.send_request(request)
             
             if "error" in response:
-                logger.error(f"[ERROR] Failed to get balance: {response['error']['message']}")
+                logger.error(f"❌ BALANCE_FETCH_FAILED | Reason: {response['error']['message']}")
                 return None
             
             if "balance" in response:
@@ -287,7 +287,7 @@ class DataFetcher:
             return None
             
         except Exception as e:
-            logger.error(f"[ERROR] Error getting balance: {e}")
+            logger.error(f"❌ BALANCE_FETCH_EXCEPTION | Error: {type(e).__name__}: {e}", exc_info=True)
             return None
     
     async def fetch_timeframe(self, symbol: str, timeframe: str, count: int = 200) -> Optional[pd.DataFrame]:

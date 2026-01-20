@@ -250,11 +250,11 @@ class TradeEngine:
             response = await self.send_request(proposal_request)
             
             if "error" in response:
-                logger.error(f"❌ Proposal failed for {symbol}: {response['error']['message']}")
+                logger.error(f"❌ PROPOSAL_REQUEST_FAILED | Symbol: {symbol} | Multiplier: {multiplier}x | Stake: ${stake:.2f} | Reason: {response['error']['message']}")
                 return None
             
             if "proposal" not in response:
-                logger.error(f"❌ Invalid proposal response for {symbol}")
+                logger.error(f"❌ PROPOSAL_FIELD_MISSING | Symbol: {symbol} | Expected: proposal field | Got keys: {list(response.keys())}")
                 return None
             
             proposal = response["proposal"]
@@ -269,7 +269,7 @@ class TradeEngine:
             }
             
         except Exception as e:
-            logger.error(f"❌ Error getting proposal for {symbol}: {e}")
+            logger.error(f"❌ PROPOSAL_REQUEST_EXCEPTION | Symbol: {symbol} | Error: {type(e).__name__}: {e}", exc_info=True)
             return None
     
     async def buy_with_proposal(self, proposal_id: str, price: float) -> Optional[Dict]:
@@ -290,20 +290,20 @@ class TradeEngine:
                 error_msg = response['error'].get('message', 'Unknown error')
                 
                 if "moved too much" in error_msg.lower() or "payout has changed" in error_msg.lower():
-                    logger.warning(f"⚠️ Price changed: {error_msg}")
+                    logger.warning(f"⚠️ BUY_PRICE_CHANGED | Proposal: {proposal_id} | Max Price: ${max_price:.2f} | Reason: {error_msg}")
                     return None  # Signal to retry
                 
-                logger.error(f"❌ Buy failed: {error_msg}")
+                logger.error(f"❌ BUY_PROPOSAL_FAILED | Proposal: {proposal_id} | Max Price: ${max_price:.2f} | Reason: {error_msg}")
                 return None
             
             if "buy" not in response:
-                logger.error("❌ Invalid buy response")
+                logger.error(f"❌ BUY_RESPONSE_MISSING_FIELD | Proposal: {proposal_id} | Expected: buy field | Got keys: {list(response.keys())}")
                 return None
             
             return response["buy"]
             
         except Exception as e:
-            logger.error(f"❌ Error buying contract: {e}")
+            logger.error(f"❌ BUY_PROPOSAL_EXCEPTION | Proposal: {proposal_id} | Max Price: ${max_price:.2f} | Error: {type(e).__name__}: {e}", exc_info=True)
             return None
     
     async def apply_tp_sl_limits(self, contract_id: str, tp_price: float, sl_price: float, 
@@ -324,7 +324,7 @@ class TradeEngine:
         """
         try:
             if entry_spot <= 0:
-                logger.error(f"❌ Cannot apply limits: Invalid entry spot {entry_spot}")
+                logger.error(f"❌ INVALID_ENTRY_SPOT | Contract: {contract_id} | Entry Spot: {entry_spot} | TP: {tp_price:.4f} | SL: {sl_price:.4f} | Multiplier: {multiplier}x | Stake: ${stake:.2f} | Root cause: Entry spot must be > 0")
                 return False
 
             # For multiplier contracts, calculate profit/loss amounts
@@ -342,7 +342,7 @@ class TradeEngine:
             # Validation for infinite values
             import math
             if math.isinf(tp_amount) or math.isnan(tp_amount) or math.isinf(sl_amount) or math.isnan(sl_amount):
-                 logger.error(f"❌ invalid TP/SL calculation result: TP={tp_amount}, SL={sl_amount}")
+                 logger.error(f"❌ TP/SL_CALCULATION_ERROR | Contract: {contract_id} | Entry: {entry_spot:.4f} | TP Price: {tp_price:.4f} | SL Price: {sl_price:.4f} | Multiplier: {multiplier}x | Stake: ${stake:.2f} | TP Amount: {tp_amount} | SL Amount: {sl_amount}")
                  return False
 
             # CRITICAL: SL cannot exceed stake amount on Deriv multipliers
@@ -363,16 +363,9 @@ class TradeEngine:
                 price_change_sl = sl_price - entry_spot
                 sl_amount = abs((price_change_sl / entry_spot) * stake * multiplier)
                 
-                logger.info(f"✅ SL adjusted to fit constraints")
-                logger.info(f"   New SL Price: {sl_price:.4f}")
-                logger.info(f"   New SL Loss: ${sl_amount:.2f}")
+                logger.info(f"✅ SL adjusted: {sl_price:.4f} → ${sl_amount:.2f} loss (was exceeding ${stake:.2f} limit)")
 
-            logger.info(f"🎯 Applying TP/SL for multiplier contract...")
-            logger.info(f"   Entry Spot: {entry_spot:.4f}")
-            logger.info(f"   Multiplier: {multiplier}x")
-            logger.info(f"   Stake: ${stake:.2f}")
-            logger.info(f"   TP Level: {tp_price:.4f} → Profit: ${tp_amount:.2f}")
-            logger.info(f"   SL Level: {sl_price:.4f} → Loss: ${sl_amount:.2f} (Max Allowed: ${stake:.2f})")
+            logger.info(f"🎯 Applying TP/SL: TP ${tp_amount:.2f} @ {tp_price:.4f} | SL ${sl_amount:.2f} @ {sl_price:.4f} (Max: ${stake:.2f})")
             
             # Build limit order request
             # Use contract_update instead of limit_order for open contracts
@@ -386,29 +379,22 @@ class TradeEngine:
                 }
             }
             
-            logger.info(f"📤 Sending limit order (contract_update) to Deriv...")
-            logger.debug(f"   Request: {limit_request}")
+            logger.debug(f"📤 Sending limit order to Deriv...")
             response = await self.send_request(limit_request)
             
             if "error" in response:
-                logger.error(f"❌ Failed to apply limits: {response['error']['message']}")
-                logger.error(f"   Error code: {response['error'].get('code', 'N/A')}")
-                logger.error(f"   Request sent: {limit_request}")
+                logger.error(f"❌ TP/SL_APPLY_FAILED | Contract: {contract_id} | TP Amount: ${tp_amount:.2f} @ {tp_price:.4f} | SL Amount: ${sl_amount:.2f} @ {sl_price:.4f} | Error: {response['error']['message']} | Code: {response['error'].get('code', 'N/A')}")
                 return False
             
             if "contract_update" in response:
-                logger.info(f"✅ TP/SL limits applied successfully!")
-                logger.info(f"   Take Profit: ${tp_amount:.2f} at {tp_price:.4f}")
-                logger.info(f"   Stop Loss: ${sl_amount:.2f} at {sl_price:.4f}")
+                logger.info(f"✅ TP/SL applied: TP ${tp_amount:.2f} @ {tp_price:.4f} | SL ${sl_amount:.2f} @ {sl_price:.4f}")
                 return True
             else:
                 logger.warning(f"⚠️ Unexpected response format: {response}")
                 return False
             
         except Exception as e:
-            logger.error(f"❌ Error applying limits: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
+            logger.error(f"❌ TP/SL_APPLY_EXCEPTION | Contract: {contract_id} | TP: ${tp_amount:.2f} | SL: ${sl_amount:.2f} | Error: {type(e).__name__}: {e}", exc_info=True)
             return False
     
     async def open_trade(self, direction: str, stake: float, symbol: str,
@@ -521,12 +507,7 @@ class TradeEngine:
                     'risk_mode': self.risk_mode
                 }
                 
-                logger.info(f"✅ Trade opened successfully!")
-                logger.info(f"   Symbol: {symbol}")
-                logger.info(f"   Contract ID: {contract_id}")
-                logger.info(f"   Entry Spot: {entry_spot:.4f}")
-                logger.info(f"   Direction: {direction}")
-                logger.info(f"   Multiplier: {multiplier}x")
+                logger.info(f"✅ Trade opened: {symbol} {direction} @ {entry_spot:.4f} | Contract: {contract_id}")
                 
                 print("\n" + "="*50)
                 print("FINAL DECISION: ✅ TRADE EXECUTED")
@@ -536,8 +517,7 @@ class TradeEngine:
                 
                 # Apply TP/SL limits if provided
                 if tp_price and sl_price:
-                    logger.info(f"   🎯 Take Profit: {tp_price:.4f}")
-                    logger.info(f"   🛡️ Stop Loss: {sl_price:.4f}")
+                    logger.debug(f"TP: {tp_price:.4f} | SL: {sl_price:.4f}")
                     
                     # Validate R:R ratio
                     distance_to_tp = abs(tp_price - entry_spot)
@@ -545,8 +525,6 @@ class TradeEngine:
                     
                     if distance_to_sl > 0:
                         rr_ratio = distance_to_tp / distance_to_sl
-                        logger.info(f"   📊 R:R Ratio: 1:{rr_ratio:.2f}")
-                        
                         if rr_ratio < config.MIN_RR_RATIO:
                             logger.warning(f"⚠️ R:R ratio {rr_ratio:.2f} below minimum {config.MIN_RR_RATIO}")
                     

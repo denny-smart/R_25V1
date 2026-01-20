@@ -324,7 +324,7 @@ class RiskManager:
                 entry_price = current_price
                 logger.warning(f"⚠️ entry_price was 0, using current_price as fallback: {current_price}")
             else:
-                logger.error(f"❌ Cannot calculate R:R: entry_price and current_price both missing")
+                logger.error(f"❌ ENTRY_PRICE_MISSING | Signal: {signal_dict.get('symbol', 'UNKNOWN')} | entry_price: {entry_price} | current_price: {current_price} | Root cause: Both entry_price and current_price are missing or zero")
                 return {}
 
         # Risk in dollars (without multiplier - multiplier affects P&L magnitude, not risk %)
@@ -467,18 +467,13 @@ class RiskManager:
             tp = trade_info.get('take_profit')
             sl = trade_info.get('stop_loss')
             if tp and sl:
-                logger.info(f"🎯 Top-Down Structure Trade ({symbol}):")
-                logger.info(f"   TP Level: {tp:.4f}")
-                logger.info(f"   SL Level: {sl:.4f}")
+                logger.info(f"🎯 Top-Down: TP {tp:.4f} | SL {sl:.4f} ({symbol})")
         elif self.cancellation_enabled:
             # Wait-and-cancel trade
-            logger.info(f"🛡️ Phase 1: Wait-and-Cancel (4-min decision)")
-            logger.info(f"   Will check profit at 240s")
-            logger.info(f"   Cancel if unprofitable, commit if profitable")
+            logger.info(f"🛡️ Phase 1: Wait-and-Cancel (decision @ 240s)")
         else:
             # Legacy trade
-            logger.info(f"   TP: {format_currency(trade_record['take_profit'])}")
-            logger.info(f"   SL: {format_currency(trade_record['stop_loss'])}")
+            logger.debug(f"TP: {format_currency(trade_record['take_profit'])} | SL: {format_currency(trade_record['stop_loss'])}")
         
         # Update BotState if linked
         if self.bot_state:
@@ -1081,7 +1076,7 @@ class RiskManager:
             return False
             
         except Exception as e:
-            logger.error(f"❌ Error checking existing positions: {e}")
+            logger.error(f"❌ EXISTING_POSITION_CHECK_FAILED | Error: {type(e).__name__}: {e}", exc_info=True)
             # On error, assume no positions (safer to allow new trades)
             return False
 
