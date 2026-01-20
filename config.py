@@ -28,16 +28,11 @@ if not DERIV_API_TOKEN or DERIV_API_TOKEN == "your_api_token_here":
 
 # ==================== MULTI-ASSET CONFIGURATION ====================
 # List of symbols to monitor and trade
-# List of symbols to monitor and trade
-SYMBOLS = ["R_10", "R_25", "R_50", "R_75", "R_100"]
+# Removed R_10: 400x multiplier incompatible with 0.5% SL (would exceed stake on Deriv multipliers)
+SYMBOLS = ["R_25", "R_50", "R_75", "R_100"]
 
 # Asset-specific configuration
 ASSET_CONFIG = {
-    "R_10": {
-        "multiplier": 400,
-        "description": "Volatility 10 Index",
-        "tick_size": 0.001
-    },
     "R_25": {
         "multiplier": 160,
         "description": "Volatility 25 Index",
