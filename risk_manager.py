@@ -327,19 +327,19 @@ class RiskManager:
                 logger.error(f"❌ Cannot calculate R:R: entry_price and current_price both missing")
                 return {}
 
-        # Risk in dollars
+        # Risk in dollars (without multiplier - multiplier affects P&L magnitude, not risk %)
         risk_distance_pct = abs(entry_price - stop_loss) / entry_price * 100
-        risk_usd = stake * (risk_distance_pct / 100) * multiplier
+        risk_usd = stake * (risk_distance_pct / 100)
 
-        # Reward in dollars
+        # Reward in dollars (without multiplier)
         reward_distance_pct = abs(take_profit - entry_price) / entry_price * 100
-        reward_usd = stake * (reward_distance_pct / 100) * multiplier
+        reward_usd = stake * (reward_distance_pct / 100)
 
-        # R:R ratio (stake-independent)
+        # R:R ratio (stake-independent, calculated from distances)
         rr_ratio = reward_usd / risk_usd if risk_usd > 0 else 0
 
-        # Risk as percentage of stake
-        risk_pct = (risk_usd / stake) * 100
+        # Risk as percentage of stake (simplified: distance_pct IS the risk %)
+        risk_pct = risk_distance_pct
 
         return {
             'risk_usd': risk_usd,
