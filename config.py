@@ -136,7 +136,7 @@ MAX_TRADE_DURATION = None          # No maximum duration - let TP/SL handle exit
 MONITOR_INTERVAL = 2               # Check every 2 seconds for TP/SL hits
 
 # Early Exit "Fast Failure" Settings (Percentage Based)
-ENABLE_EARLY_EXIT = True           # Enable early exit monitoring
+ENABLE_EARLY_EXIT = False          # Enable early exit monitoring
 EARLY_EXIT_TIME_DAY = 45           # 45 seconds during safe hours (12-22)
 EARLY_EXIT_TIME_NIGHT = 20         # 20 seconds during risky hours
 EARLY_EXIT_LOSS_PCT = 5.0          # Exit if down 5% of stake

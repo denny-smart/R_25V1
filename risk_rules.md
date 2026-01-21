@@ -28,19 +28,13 @@ Every signal must pass ALL these checks to be executed. If one fails, the trade 
 
 ## 3. Dynamic Trade Management (Exits)
 
-### A. Fast Failure (Early Exit)
-Disconnects "heavy" losers quickly before they hit full Stop Loss.
-*   **Condition:** Loss > **5.0%** of Stake.
-    *   *Time Window:*
-        *   **Day Mode (Standard):** First **45 seconds**.
-        *   **Night Mode (Volatile):** First **20 seconds**.
 
-### B. Stagnation Kill
+### A. Stagnation Kill
 Frees up capital if price is going nowhere.
 *   **Condition:** Trade still in a loss (> 6% of stake) after **90 seconds**.
 *   **Action:** Immediate Close.
 
-### C. Price-Based Trailing Stop (Tiered)
+### B. Price-Based Trailing Stop (Tiered)
 *Breakeven Protection is **DISABLED**.*
 We use a **"Lock & Trail"** system using a price-distance formula.
 
