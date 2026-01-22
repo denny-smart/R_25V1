@@ -10,6 +10,7 @@ create table public.trades (
   exit_price numeric null,
   profit numeric null,
   status text null,
+  duration integer null,
   timestamp timestamp with time zone null default now(),
   created_at timestamp with time zone null default now(),
   constraint trades_pkey primary key (id),

@@ -26,7 +26,8 @@ class UserTradesService:
                 "exit_price": trade_data.get("exit_price"),
                 "profit": trade_data.get("profit"),
                 "status": trade_data.get("status"),
-                "timestamp": trade_data.get("timestamp") or trade_data.get("closed_at")
+                "timestamp": trade_data.get("timestamp") or trade_data.get("closed_at"),
+                "duration": trade_data.get("duration")
             }
 
             # Insert into Supabase

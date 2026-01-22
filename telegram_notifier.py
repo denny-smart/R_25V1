@@ -363,7 +363,8 @@ class TelegramNotifier:
             "━━━━━━━━━━━━━━━━━━━━\n"
             f"📍 Direction: {trade_info.get('direction', 'UNKNOWN')}\n"
             f"📉 Exit Price: {result.get('current_price', 0):.2f}\n" 
-            f"⏱️ Reason: {status.upper()}\n\n"
+            f"⏱️ Reason: {status.upper()}\n"
+            f"⏳ Duration: {trade_info.get('duration', result.get('duration', 'N/A'))}s\n\n"
             f"⏰ {datetime.now().strftime('%H:%M:%S')}"
         )
         await self.send_message(message)

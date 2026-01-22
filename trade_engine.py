@@ -600,7 +600,9 @@ class TradeEngine:
                 'profit': profit,
                 'bid_price': float(contract.get('bid_price', 0)),
                 'buy_price': float(contract.get('buy_price', 0)),
-                'is_sold': is_sold
+                'is_sold': is_sold,
+                'date_start': contract.get('date_start'),
+                'sell_time': contract.get('sell_time')
             }
             
             return status_info
@@ -650,6 +652,17 @@ class TradeEngine:
                             final_status['exit_reason'] = exit_check['reason']
                             final_status['symbol'] = symbol  # Ensure symbol is returned
                         # Removed redundant notification here - Runner handles it
+                        # Calculate duration for risk manager exit
+                        duration = 0
+                        if final_status.get('date_start') and final_status.get('sell_time'):
+                             try:
+                                 duration = int(final_status['sell_time']) - int(final_status['date_start'])
+                             except:
+                                 duration = int(elapsed)
+                        else:
+                            duration = int(elapsed)
+                        
+                        final_status['duration'] = duration
                         return final_status
                     
                     previous_spot = status['current_spot']
@@ -668,15 +681,25 @@ class TradeEngine:
                         else:
                             trade_status = 'sold'
                     
+                    duration = 0
+                    if status.get('date_start') and status.get('sell_time'):
+                         try:
+                             duration = int(status['sell_time']) - int(status['date_start'])
+                         except:
+                             duration = int(elapsed)
+                    else:
+                        duration = int(elapsed)
+
                     emoji = get_status_emoji(trade_status)
                     logger.info(f"{emoji} Trade closed | Status: {trade_status.upper()}")
                     logger.info(f"   Symbol: {symbol}")
                     logger.info(f"   Final P&L: {format_currency(status['profit'])}")
-                    logger.info(f"   Duration: {int(elapsed)}s")
+                    logger.info(f"   Duration: {duration}s")
                     
                     # Removed redundant notification here - Runner handles it
                     
                     status['symbol'] = symbol  # Ensure symbol is returned
+                    status['duration'] = duration
                     return status
                 
                 # Periodic status logging
@@ -797,8 +820,15 @@ class TradeEngine:
                 final_status['exit_price'] = final_status.get('current_spot')
                 final_status['direction'] = direction
                 final_status['symbol'] = symbol
+                # Duration is already in final_status from monitor_trade
                 # Ensure alias 'signal' is present (DB uses 'signal')
                 final_status['signal'] = direction
+                
+                # Ensure timestamp is present for DB (use sell_time if available, else now)
+                if final_status.get('sell_time'):
+                    final_status['timestamp'] = datetime.fromtimestamp(int(final_status['sell_time']))
+                else:
+                    final_status['timestamp'] = datetime.now()
             
             if final_status is None:
                 logger.error("❌ Monitoring failed - unlocking trade slot")
