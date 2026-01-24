@@ -49,7 +49,6 @@ pip install -r requirements.txt
 Create `.env` file:
 
 ```env
-DERIV_API_TOKEN=your_token
 DERIV_APP_ID=1089
 SUPABASE_URL=your_url
 SUPABASE_SERVICE_ROLE_KEY=your_key
