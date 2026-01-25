@@ -3,11 +3,13 @@ Pydantic schemas for trade-related responses
 """
 
 from pydantic import BaseModel, Field, AliasChoices
+from datetime import datetime
 from typing import Optional
 
 class TradeResponse(BaseModel):
     """Schema for individual trade response"""
     contract_id: str  # ✅ Already correct as string
+    symbol: str
     direction: str = Field(alias='signal')
     stake: Optional[float] = None
     entry_price: Optional[float] = None
@@ -16,9 +18,12 @@ class TradeResponse(BaseModel):
     stop_loss: Optional[float] = None
     status: str
     pnl: Optional[float] = Field(None, validation_alias=AliasChoices('profit', 'pnl'))
+    timestamp: Optional[datetime] = None
+    duration: Optional[int] = None
     
     class Config:
         from_attributes = True  # For Pydantic v2 compatibility
+        populate_by_name = True
 
 class TradeStatsResponse(BaseModel):
     """Schema for trade statistics response"""
