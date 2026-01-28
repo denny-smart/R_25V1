@@ -2,7 +2,7 @@
 FastAPI Application Settings and Configuration
 Updated with proper authentication support
 """
-from typing import Optional, List
+from typing import Optional, List, Union, Any
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 import os
@@ -49,7 +49,8 @@ class Settings(BaseSettings):
     # ============================================================================
     # CORS Settings - UPDATED FOR PRODUCTION
     # ============================================================================
-    CORS_ORIGINS: List[str] = Field(
+    # Use Any to prevent pydantic from auto-parsing as JSON before validator runs
+    CORS_ORIGINS: Any = Field(
         default_factory=lambda: [
             "http://localhost:3000",
             "http://localhost:3001",
@@ -274,7 +275,8 @@ class Settings(BaseSettings):
     # ============================================================================
     def get_cors_origins(self) -> List[str]:
         """Get CORS origins with environment-specific additions"""
-        origins = self.CORS_ORIGINS.copy()
+        # Ensure CORS_ORIGINS is a list (should be from validator, but be safe)
+        origins = list(self.CORS_ORIGINS) if isinstance(self.CORS_ORIGINS, (list, tuple)) else []
         
         # In production, you might want to restrict origins
         if self.is_production:
