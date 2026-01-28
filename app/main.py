@@ -25,6 +25,7 @@ csp = (
     .font_src("'self'", "https://fonts.gstatic.com", "data:")  # Allow Google Font files
     .connect_src("'self'", "https://*.supabase.co", "wss://*", "https://*.railway.app", "https://*.render.com")  # Allow Supabase, Railway, and Render
     .img_src("'self'", "data:", "https:", "blob:")  # Allow images from various sources
+    .frame_src("'self'", "https://vercel.live")  # Allow Vercel Live iframe
     .object_src("'none'")
 )
 hsts = StrictTransportSecurity().max_age(31536000).include_subdomains()
