@@ -29,7 +29,7 @@ Automated trading bot for Deriv's volatility indices using top-down market struc
 ### Prerequisites
 - Python 3.10+
 - Deriv account with API token
-- Supabase account
+- Supabase account.
 
 ### Installation
 
