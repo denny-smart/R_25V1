@@ -52,10 +52,10 @@ input double   TrailStop4 = 25.0;               // Tier 4: Trail % Behind
 input int      SwingLookback = 20;              // Candles for Swing Detection
 input int      MinSwingWindow = 5;              // Minimum Window for Swing Points
 
-//--- Early Exit Settings
-input bool     EnableEarlyExit = false;         // Enable Early Exit (Fast Failure)
-input int      EarlyExitTimeSeconds = 45;       // Early Exit Time Window
-input double   EarlyExitLossPercent = 5.0;      // Early Exit at % Loss
+//--- Stagnation Exit Settings (Aligned with Python Config)
+input bool     EnableStagnationExit = true;     // Enable Stagnation Exit
+input int      StagnationExitTime = 600;        // Stagnation Exit Time (seconds)
+input double   StagnationLossPct = 10.0;        // Stagnation Exit at % Loss
 
 //+------------------------------------------------------------------+
 //| Global Variables                                                 |
@@ -565,10 +565,10 @@ void MonitorOpenPositions()
                                ? SymbolInfoDouble(_Symbol, SYMBOL_BID)
                                : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
          
-         //--- Check early exit
-         if(EnableEarlyExit)
+         //--- Check stagnation exit
+         if(EnableStagnationExit)
          {
-            if(CheckEarlyExit(ticket, currentPrice, currentProfit))
+            if(CheckStagnationExit(ticket, currentPrice, currentProfit))
                continue;
          }
          
@@ -582,26 +582,33 @@ void MonitorOpenPositions()
 }
 
 //+------------------------------------------------------------------+
-//| Check Early Exit Condition                                       |
+//| Check Stagnation Exit Condition                                  |
 //+------------------------------------------------------------------+
-bool CheckEarlyExit(ulong ticket, double currentPrice, double currentProfit)
+bool CheckStagnationExit(ulong ticket, double currentPrice, double currentProfit)
 {
    datetime openTime = (datetime)PositionGetInteger(POSITION_TIME);
    int elapsed = (int)(TimeCurrent() - openTime);
    
-   if(elapsed > EarlyExitTimeSeconds)
-      return false; // Past early exit window
+   // Only check after stagnation time threshold
+   if(elapsed < StagnationExitTime)
+      return false; // Not yet in stagnation window
    
    if(currentProfit >= 0)
       return false; // Not in loss
    
-   // Calculate loss as % of balance
-   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
-   double lossPercent = MathAbs(currentProfit) / balance * 100.0;
+   // Calculate loss as % of stake (position value)
+   double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+   double volume = PositionGetDouble(POSITION_VOLUME);
+   double stake = openPrice * volume; // Approximate stake
    
-   if(lossPercent >= EarlyExitLossPercent)
+   if(stake == 0)
+      return false;
+   
+   double lossPercent = MathAbs(currentProfit) / stake * 100.0;
+   
+   if(lossPercent >= StagnationLossPct)
    {
-      Print("⚠️ Early Exit: Loss ", DoubleToString(lossPercent, 1), "% at ", elapsed, "s");
+      Print("⚠️ Stagnation Exit: Loss ", DoubleToString(lossPercent, 1), "% after ", elapsed, "s (", elapsed/60, " min)");
       trade.PositionClose(ticket);
       
       dailyPnL += currentProfit;
