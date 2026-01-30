@@ -58,8 +58,10 @@ async def get_current_config(current_user: dict = Depends(get_current_active_use
             if data.get('active_strategy'):
                 active_strategy = data['active_strategy']
 
-    except Exception:
-        pass
+    except Exception as e:
+        logger.error(f"Failed to fetch user profile from Supabase: {e}")
+        logger.error(f"User ID: {current_user.get('id')}")
+
 
     return {
         "trading": {
