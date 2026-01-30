@@ -561,82 +561,58 @@ class RiskManager:
 
         return False, None
 
-    def update_trailing_stop(self, trade, current_price, current_pnl, stake):
+    def update_trailing_stop(self, trade, current_pnl, stake):
         """
-        Update trailing stop based on user-defined Price Formula:
-        risk_dollars = stake * trail_percentage
-        price_distance = (risk_dollars * entry_price) / (multiplier * stake)
+        Update trailing stop based on simple profit percentage logic.
+        
+        Logic: If profit reaches trigger level (e.g., 25%), set stop at (peak_profit% - trail%)
+        Example: At 25% profit with 8% trail → stop at 17% profit
+        
+        This ensures predictable protection: you keep at least (trigger% - trail%) of your stake.
         """
         if not getattr(config, 'ENABLE_MULTI_TIER_TRAILING', True):
             return None
 
-        if stake <= 0: return None
+        if stake <= 0: 
+            return None
         
-        # Calculate Pnl % of Stake for Tier Activation
-        pnl_pct = (current_pnl / stake) * 100
+        # Calculate current profit as percentage of stake
+        current_profit_pct = (current_pnl / stake) * 100
 
-        # Find active tier
+        # Find active tier based on current profit
         active_tier = None
         tiers = getattr(config, 'TRAILING_STOPS', [])
         for tier in sorted(tiers, key=lambda x: x['trigger_pct'], reverse=True):
-            if pnl_pct >= tier['trigger_pct']:
+            if current_profit_pct >= tier['trigger_pct']:
                 active_tier = tier
                 break
 
         if not active_tier:
             return None  # Below minimum threshold
 
-        # ======================================================================
-        # CORRECT FORMULA IMPLEMENTATION
-        # ======================================================================
-        # 1. Get Multiplier
-        symbol = trade.get('symbol', 'UNKNOWN')
-        multiplier = self.asset_config.get(symbol, {}).get('multiplier', config.MULTIPLIER)
-        entry_price = trade.get('entry_price', 0.0)
+        # Calculate stop level as: current_profit% - trail%
+        # Example: 27% profit - 8% trail = 19% stop level
+        trail_pct = active_tier['trail_pct']
+        stop_profit_pct = current_profit_pct - trail_pct
         
-        # 2. Calculate Risk in Dollars
-        trail_pct = active_tier['trail_pct'] / 100.0
-        risk_dollars = stake * trail_pct
-        
-        # 3. Convert to Price Distance
-        # Formula: (risk_dollars * entry_price) / (multiplier * stake)
-        if multiplier > 0 and stake > 0:
-            price_distance = (risk_dollars * entry_price) / (multiplier * stake)
-        else:
-            return None
-
-        # 4. Calculate Potential New Stop Price
-        direction = trade.get('direction', 'UP')
-        
-        if direction == 'UP':
-            # UP Trade: Stop is BELOW price
-            potential_stop = current_price - price_distance
-        else:
-            # DOWN Trade: Stop is ABOVE price
-            potential_stop = current_price + price_distance
-            
-        # 5. Update Persistent Stop Price (Only if Tighter)
-        current_dynamic_stop = trade.get('dynamic_stop_price')
+        # Get current stop level (if any)
+        current_stop_pct = trade.get('trail_stop_profit_pct')
         
         updated = False
-        if current_dynamic_stop is None:
-            trade['dynamic_stop_price'] = potential_stop
+        if current_stop_pct is None:
+            # First time activating trailing stop
+            trade['trail_stop_profit_pct'] = stop_profit_pct
             updated = True
-            logger.info(f"🛡️ Trailing Activated ({active_tier['name']}): Stop set to {potential_stop:.4f}")
+            logger.info(f"🛡️ Trailing Activated ({active_tier['name']}): Stop set at {stop_profit_pct:.1f}% profit")
         else:
-            # Only tighten
-            if direction == 'UP' and potential_stop > current_dynamic_stop:
-                trade['dynamic_stop_price'] = potential_stop
+            # Only tighten the stop (move it up), never loosen
+            if stop_profit_pct > current_stop_pct:
+                trade['trail_stop_profit_pct'] = stop_profit_pct
                 updated = True
-            elif direction == 'DOWN' and potential_stop < current_dynamic_stop:
-                trade['dynamic_stop_price'] = potential_stop
-                updated = True
-                
-        if updated:
-             logger.info(f"🛡️ Trailing Update ({active_tier['name']}): Moving Stop to {potential_stop:.4f} (Profit: {pnl_pct:.1f}%)")
+                logger.info(f"🛡️ Trailing Tightened ({active_tier['name']}): Stop moved to {stop_profit_pct:.1f}% profit (Current: {current_profit_pct:.1f}%)")
         
         return {
-            'stop_price': trade['dynamic_stop_price'], 
+            'stop_profit_pct': trade['trail_stop_profit_pct'], 
             'tier_name': active_tier['name']
         }
 
@@ -672,31 +648,28 @@ class RiskManager:
                            'current_pnl': current_pnl
                        }
         
-        # 3. Trailing Stop (Price Based)
-        # Update highest unrealized PnL (still needed for Tier activation)
+        # 3. Trailing Stop (Profit Percentage Based)
+        # Update highest unrealized PnL for peak tracking
         current_peak = self.active_trade.get('highest_unrealized_pnl', 0.0)
         if current_pnl > current_peak:
             self.active_trade['highest_unrealized_pnl'] = current_pnl
             current_peak = current_pnl
             
-        trailing = self.update_trailing_stop(self.active_trade, current_price, current_peak, stake)
+        # Use peak PnL to determine tier activation, but current PnL for trigger check
+        trailing = self.update_trailing_stop(self.active_trade, current_peak, stake)
         if trailing:
-             stop_price = trailing['stop_price']
+             stop_profit_pct = trailing['stop_profit_pct']
              tier_name = trailing['tier_name']
-             direction = self.active_trade.get('direction', 'UP')
              
-             # Check if Price Crossed Stop
-             hit_stop = False
-             if direction == 'UP' and current_price <= stop_price:
-                 hit_stop = True
-             elif direction == 'DOWN' and current_price >= stop_price:
-                 hit_stop = True
-                 
-             if hit_stop:
+             # Calculate current profit percentage
+             current_profit_pct = (current_pnl / stake) * 100
+             
+             # Check if current profit dropped below stop level
+             if current_profit_pct <= stop_profit_pct:
                   return {
                       'should_close': True,
                       'reason': 'trailing_stop_hit',
-                      'message': f'🎯 Trailing Stop ({tier_name}): Price {current_price:.4f} hit Stop {stop_price:.4f}',
+                      'message': f'🎯 Trailing Stop ({tier_name}): Profit {current_profit_pct:.1f}% ≤ Stop {stop_profit_pct:.1f}%',
                       'current_pnl': current_pnl
                   }
         
