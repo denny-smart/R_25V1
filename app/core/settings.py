@@ -111,8 +111,8 @@ class Settings(BaseSettings):
     # ============================================================================
     # Redis Configuration (Optional)
     # ============================================================================
-    REDIS_HOST: Optional[str] = None
-    REDIS_PORT: int = 6379
+    REDIS_HOST: Optional[str] = Field(None, validation_alias="REDISHOST")
+    REDIS_PORT: int = Field(6379, validation_alias="REDISPORT")
     REDIS_DB: int = 0
     REDIS_PASSWORD: Optional[str] = None
     REDIS_ENABLED: bool = False
