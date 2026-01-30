@@ -78,7 +78,7 @@ async def get_current_config(current_user: dict = Depends(get_current_active_use
             "rsi_buy_threshold": config.RSI_BUY_THRESHOLD,
             "rsi_sell_threshold": config.RSI_SELL_THRESHOLD,
             "adx_threshold": config.ADX_THRESHOLD,
-            "minimum_signal_score": config.MINIMUM_SIGNAL_SCORE,
+            "minimum_signal_score": config.MIN_SIGNAL_STRENGTH,
         },
         "deriv_api_key": deriv_api_key,
         "stake_amount": stake_amount,
