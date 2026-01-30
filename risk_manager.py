@@ -83,6 +83,7 @@ class RiskManager:
         # Multi-asset configuration
         self.symbols = config.SYMBOLS
         self.asset_config = config.ASSET_CONFIG
+        self.max_concurrent_trades = getattr(config, 'MAX_CONCURRENT_TRADES', 1)  # Default to 1 if not configured
         
         # Initialize TP/SL amounts based on strategy
         self._initialize_strategy_parameters()
@@ -126,7 +127,7 @@ class RiskManager:
         logger.info(f"   TP/SL: Dynamic (based on levels & swings)")
         logger.info(f"   Min R:R: 1:{config.TOPDOWN_MIN_RR_RATIO}")
         # Note: SECURE_PROFIT settings were removed from config, using hardcoded trace for log if needed or removing log
-        logger.info(f"   ⚠️ GLOBAL LIMIT: 1 active trade across ALL assets")
+        logger.info(f"   ⚠️ GLOBAL LIMIT: {self.max_concurrent_trades} active trade{'s' if self.max_concurrent_trades != 1 else ''} across ALL assets")
         
         logger.info(f"   Circuit Breaker: {self.max_consecutive_losses} consecutive losses (GLOBAL)")
         logger.info(f"   Max Trades/Day: {self.max_trades_per_day} (GLOBAL)")
@@ -194,7 +195,7 @@ class RiskManager:
         
         # CRITICAL: Global position check
         if self.has_active_trade:
-            reason = f"GLOBAL LOCK: Active {self.active_symbol} trade in progress (1/1 limit)"
+            reason = f"GLOBAL LOCK: Active {self.active_symbol} trade in progress (1/{self.max_concurrent_trades} limit)"
             if symbol and symbol != self.active_symbol:
                 logger.debug(f"⏸️ {symbol} blocked: {reason}")
             
@@ -992,7 +993,7 @@ if __name__ == "__main__":
     print("\n✅ Configuration:")
     print(f"   Mode: {'TOP-DOWN' if rm.use_topdown else 'SCALPING'}")
     print(f"   Assets: {', '.join(rm.symbols)}")
-    print(f"   🔒 GLOBAL LIMIT: 1 active trade across ALL assets")
+    print(f"   🔒 GLOBAL LIMIT: {rm.max_concurrent_trades} active trade{'s' if rm.max_concurrent_trades != 1 else ''} across ALL assets")
     
     print("\n1. Testing can_open_trade for multiple symbols...")
     for symbol in ['R_25', 'R_50', 'R_75']:

@@ -678,13 +678,7 @@ class BotRunner:
         # Track signal
         self.signals_by_symbol[symbol] = self.signals_by_symbol.get(symbol, 0) + 1
         
-        # Notify Telegram about signal
-        try:
-            signal_with_symbol = signal.copy()
-            signal_with_symbol['symbol'] = symbol
-            await self.telegram_bridge.notify_signal(signal_with_symbol)
-        except:
-            pass
+
         
         # Broadcast signal to WebSockets
         timestamp = datetime.now().isoformat()
@@ -741,6 +735,14 @@ class BotRunner:
         if not can_open:
             logger.warning(f"❌ {symbol} - Trade blocked: {validation_msg}")
             return False
+            
+        # Notify Telegram about signal (Moved here to ensure all checks passed)
+        try:
+            signal_with_symbol = signal.copy()
+            signal_with_symbol['symbol'] = symbol
+            await self.telegram_bridge.notify_signal(signal_with_symbol)
+        except:
+            pass
         
         # Execute trade!
         logger.info(f"🚀 {symbol} - Executing {signal['signal']} trade...")
