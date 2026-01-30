@@ -77,7 +77,7 @@ MAX_CONSECUTIVE_LOSSES = 3         # Stop trading after 3 losses in a row (Globa
 DAILY_LOSS_MULTIPLIER = 3.0        # Max Daily Loss = 3.0x Stake
 STAKE_LIMIT_MULTIPLIER = 1.5       # Max Stake Limit = 1.5x Base Stake
 
-COOLDOWN_SECONDS = 180             # 3 minutes between trades
+COOLDOWN_SECONDS = 300             # 5 minutes between trades
 MAX_TRADES_PER_DAY = 30            # Maximum trades per day
 MAX_DAILY_LOSS = None               # DYNAMIC (Multiplied by DAILY_LOSS_MULTIPLIER)
 
@@ -86,7 +86,7 @@ VALID_MULTIPLIERS = [40, 50, 80, 160, 400, 800, 1200, 1600]
 
 # ==================== MULTI-ASSET MONITORING ====================
 MONITOR_ALL_ASSETS = True          # Monitor all assets simultaneously
-MAX_CONCURRENT_TRADES = 1          # Maximum number of concurrent trades across all assets
+MAX_CONCURRENT_TRADES = 2          # Maximum number of concurrent trades across all assets
 PRIORITIZE_BY_SIGNAL_STRENGTH = True  # Trade strongest signals first
 
 # ==================== DATA FETCHING ====================
