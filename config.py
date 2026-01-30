@@ -64,7 +64,7 @@ USE_TOPDOWN_STRATEGY = True        # Active Strategy
 FIXED_STAKE = None               # NO DEFAULT - STRICTLY USER DEFINED
 
 # Maximum Risk (Percentage of Stake)
-MAX_RISK_PCT = 15.0                # Never risk more than 15% of stake
+MAX_RISK_PCT = 25.0                # Never risk more than 25% of stake
 
 # Maximum loss per trade (acts as emergency stop)
 MAX_LOSS_PER_TRADE = None           # DYNAMIC (1x User Stake)
@@ -130,8 +130,8 @@ MONITOR_INTERVAL = 2               # Check every 2 seconds for TP/SL hits
 
 
 # Stagnation Exit Settings (Percentage Based)
-ENABLE_STAGNATION_EXIT = False      # Close if trade is stuck in loss
-STAGNATION_EXIT_TIME = 600          # 600 seconds
+ENABLE_STAGNATION_EXIT = True      # Close if trade is stuck in loss
+STAGNATION_EXIT_TIME = 420          # 420 seconds
 STAGNATION_LOSS_PCT = 10.0          # Exit if losing 10% of stake after 600s
 
 # ==================== LOGGING ====================
