@@ -18,6 +18,19 @@ class UserTradesService:
         Save a completed trade to Supabase.
         """
         try:
+            # Validate required NOT NULL fields from schema
+            required_fields = {
+                'contract_id': 'Contract ID',
+                'symbol': 'Symbol',
+                'signal': 'Signal (UP/DOWN)'
+            }
+            
+            for field, name in required_fields.items():
+                if not trade_data.get(field):
+                    logger.error(f"❌ Cannot save trade: Missing required field '{name}'")
+                    logger.debug(f"Trade data keys: {list(trade_data.keys())}")
+                    return None
+            
             # Get timestamp and convert to string if it's a datetime object
             timestamp = trade_data.get("timestamp") or trade_data.get("closed_at")
             if isinstance(timestamp, datetime):
@@ -30,13 +43,14 @@ class UserTradesService:
                 "symbol": trade_data.get("symbol"),
                 "signal": trade_data.get("signal"),
                 "stake": trade_data.get("stake"),
-                "entry_price": trade_data.get("entry_price"),
+                "entry_price": trade_data.get("entry_price") or trade_data.get("entry_spot"),  # Fallback
                 "exit_price": trade_data.get("exit_price"),
                 "profit": trade_data.get("profit"),
                 "status": trade_data.get("status"),
                 "timestamp": timestamp,
                 "duration": trade_data.get("duration")
             }
+
 
             # Insert into Supabase
             response = supabase.table("trades").insert(record).execute()

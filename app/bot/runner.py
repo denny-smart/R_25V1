@@ -777,8 +777,32 @@ class BotRunner:
                 self.risk_manager.record_trade_close(contract_id, pnl, status)
                 self.state.update_trade(contract_id, result)
 
-                # Persist to Supabase
-                UserTradesService.save_trade(self.account_id, result)
+                # Persist to Supabase with error handling
+                try:
+                    saved = UserTradesService.save_trade(self.account_id, result)
+                    if saved:
+                        logger.info(f"✅ Trade persisted to database: {contract_id}")
+                    else:
+                        logger.error(f"❌ DB persistence failed for contract {contract_id} (no data returned)")
+                        # Notify via Telegram
+                        try:
+                            await self.telegram_bridge.notify_error(
+                                f"⚠️ Trade executed but DB save failed: {symbol} {status}"
+                            )
+                        except:
+                            pass
+                except Exception as e:
+                    logger.error(f"❌ DB save exception for contract {contract_id}: {e}")
+                    import traceback
+                    logger.error(traceback.format_exc())
+                    # Notify via Telegram
+                    try:
+                        await self.telegram_bridge.notify_error(
+                            f"⚠️ Trade executed but DB error: {symbol} - {str(e)}"
+                        )
+                    except:
+                        pass
+
                 
                 # Notify Telegram
                 try:

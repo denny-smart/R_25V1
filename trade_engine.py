@@ -767,7 +767,7 @@ class TradeEngine:
         """
         try:
             direction = signal['signal']
-            symbol = signal.get('symbol', config.SYMBOL)
+            symbol = signal.get('symbol', config.SYMBOLS[0])
             
             # Validate symbol
             if not self.validate_symbol(symbol):
