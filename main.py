@@ -241,31 +241,48 @@ class TradingBot:
     
     async def scan_all_assets(self) -> List[Dict]:
         """
-        Scan all configured assets and return valid trading signals
+        Scan all configured assets in parallel and return valid trading signals
         
         Returns:
             List of valid signals sorted by strength (if prioritization enabled)
         """
         logger.info(f"🔍 Scanning {len(self.symbols)} assets for trading opportunities...")
         
-        valid_signals = []
+        # Create semaphore to limit concurrent asset analysis (prevent CPU/memory overload)
+        max_concurrent = min(10, len(self.symbols))  # Max 10 concurrent analyses
+        semaphore = asyncio.Semaphore(max_concurrent)
         
-        # Analyze each asset sequentially to avoid rate limiting
-        for symbol in self.symbols:
-            signal = await self.analyze_asset(symbol)
-            
-            if signal and signal.get('can_trade'):
-                valid_signals.append(signal)
-                logger.info(f"✅ {symbol}: Valid {signal['signal']} signal (score: {signal.get('score', 0)})")
-            else:
-                reason = signal['details'].get('reason', 'Unknown') if signal else 'Analysis failed'
-                logger.debug(f"⚪ {symbol}: {reason}")
+        async def analyze_with_semaphore(symbol: str) -> Optional[Dict]:
+            """Wrapper to analyze asset with semaphore control"""
+            async with semaphore:
+                return await self.analyze_asset(symbol)
+        
+        # Create tasks for all assets
+        tasks = [analyze_with_semaphore(symbol) for symbol in self.symbols]
+        
+        # Execute all analyses in parallel
+        logger.debug(f"⚡ Running {len(tasks)} analyses in parallel (max {max_concurrent} concurrent)...")
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Process results
+        valid_signals = []
+        for symbol, result in zip(self.symbols, results):
+            # Handle exceptions
+            if isinstance(result, Exception):
+                logger.error(f"❌ {symbol}: Analysis failed with exception: {result}")
+                self.asset_signals[symbol] = None
+                continue
             
             # Store signal for tracking
-            self.asset_signals[symbol] = signal
+            self.asset_signals[symbol] = result
             
-            # Brief pause between assets to respect rate limits
-            await asyncio.sleep(0.5)
+            # Check if signal is valid for trading
+            if result and result.get('can_trade'):
+                valid_signals.append(result)
+                logger.info(f"✅ {symbol}: Valid {result['signal']} signal (score: {result.get('score', 0)})")
+            else:
+                reason = result['details'].get('reason', 'Unknown') if result else 'Analysis failed'
+                logger.debug(f"⚪ {symbol}: {reason}")
         
         if not valid_signals:
             logger.info("📭 No valid signals found across all assets")

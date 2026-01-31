@@ -368,6 +368,90 @@ def calculate_lot_size(balance: float, risk_percent: float,
     lot_size = risk_amount / (stop_loss_pips * pip_value)
     return round(lot_size, 2)
 
+class TokenBucket:
+    """
+    Token Bucket Rate Limiter for API requests
+    
+    This allows bursts of requests up to the bucket capacity,
+    while ensuring long-term rate doesn't exceed the specified limit.
+    
+    Example:
+        # Allow 10 requests per second with burst capacity of 20
+        limiter = TokenBucket(rate=10, capacity=20)
+        
+        # Before making a request:
+        await limiter.acquire()  # Blocks if no tokens available
+    """
+    
+    def __init__(self, rate: float = 10.0, capacity: float = 20.0):
+        """
+        Initialize TokenBucket
+        
+        Args:
+            rate: Tokens added per second (requests per second)
+            capacity: Maximum tokens in bucket (burst capacity)
+        """
+        import asyncio
+        
+        self.rate = rate
+        self.capacity = capacity
+        self.tokens = capacity
+        self.last_update = asyncio.get_event_loop().time()
+        self._lock = asyncio.Lock()
+    
+    async def acquire(self, tokens: float = 1.0) -> None:
+        """
+        Acquire tokens from the bucket (blocks if insufficient tokens)
+        
+        Args:
+            tokens: Number of tokens to acquire (default 1)
+        """
+        import asyncio
+        
+        async with self._lock:
+            while True:
+                now = asyncio.get_event_loop().time()
+                time_passed = now - self.last_update
+                
+                # Add tokens based on time passed
+                self.tokens = min(
+                    self.capacity,
+                    self.tokens + time_passed * self.rate
+                )
+                self.last_update = now
+                
+                # Check if we have enough tokens
+                if self.tokens >= tokens:
+                    self.tokens -= tokens
+                    return
+                
+                # Calculate wait time needed
+                tokens_needed = tokens - self.tokens
+                wait_time = tokens_needed / self.rate
+                
+                # Release lock while waiting
+                self._lock.release()
+                await asyncio.sleep(wait_time)
+                await self._lock.acquire()
+    
+    def available_tokens(self) -> float:
+        """
+        Get current number of available tokens (non-blocking)
+        
+        Returns:
+            Number of tokens currently available
+        """
+        import asyncio
+        
+        now = asyncio.get_event_loop().time()
+        time_passed = now - self.last_update
+        return min(
+            self.capacity,
+            self.tokens + time_passed * self.rate
+        )
+
+
+
 # Testing
 if __name__ == "__main__":
     print("="*60)

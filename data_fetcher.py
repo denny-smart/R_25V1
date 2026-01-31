@@ -11,7 +11,7 @@ import pandas as pd
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 import config
-from utils import setup_logger, parse_candle_data
+from utils import setup_logger, parse_candle_data, TokenBucket
 
 # Setup logger
 logger = setup_logger()
@@ -32,13 +32,11 @@ class DataFetcher:
         self.ws_url = f"{config.WS_URL}?app_id={app_id}"
         self.ws = None
         self.is_connected = False
-        self.request_lock = asyncio.Lock()
         self.reconnect_attempts = 0
         self.max_reconnect_attempts = 5
         
-        # Rate limiting
-        self.last_request_time = 0
-        self.min_request_interval = 0.1  # Minimum 100ms between requests
+        # Rate limiting - TokenBucket allows 10 req/s with burst capacity of 20
+        self.rate_limiter = TokenBucket(rate=10.0, capacity=20.0)
     
     async def connect(self) -> bool:
         """Connect to Deriv WebSocket API"""
@@ -116,10 +114,11 @@ class DataFetcher:
                 "authorize": self.api_token
             }
             
-            async with self.request_lock:
-                await self.ws.send(json.dumps(auth_request))
-                response = await self.ws.recv()
-                data = json.loads(response)
+            # Acquire rate limit token before sending
+            await self.rate_limiter.acquire()
+            await self.ws.send(json.dumps(auth_request))
+            response = await self.ws.recv()
+            data = json.loads(response)
             
             if "error" in data:
                 logger.error(f"❌ AUTH_FAILED | Error: {data['error']['message']}")
@@ -135,24 +134,13 @@ class DataFetcher:
             logger.error(f"❌ AUTH_EXCEPTION | Error: {type(e).__name__}: {e}", exc_info=True)
             return False
     
-    async def _rate_limit(self):
-        """Enforce rate limiting between requests"""
-        now = asyncio.get_event_loop().time()
-        time_since_last = now - self.last_request_time
-        
-        if time_since_last < self.min_request_interval:
-            await asyncio.sleep(self.min_request_interval - time_since_last)
-        
-        self.last_request_time = asyncio.get_event_loop().time()
+    # Removed old _rate_limit method - now using TokenBucket
     
     async def send_request(self, request: Dict[str, Any]) -> Dict[str, Any]:
-        """Send request to API with robust retry logic"""
+        """Send request to API with robust retry logic and rate limiting"""
         # Ensure connection is alive before starting
         if not await self.ensure_connected():
             return {"error": {"message": "Failed to establish early connection"}}
-            
-        # Apply rate limiting
-        await self._rate_limit()
         
         # Retry loop
         for attempt in range(1, config.MAX_RETRIES + 1):
@@ -167,10 +155,11 @@ class DataFetcher:
                         else:
                             return {"error": {"message": "Connection permanently lost"}}
 
-                async with self.request_lock:
-                    await self.ws.send(json.dumps(request))
-                    response_str = await self.ws.recv()
-                    response = json.loads(response_str)
+                # Acquire token from rate limiter (allows parallel requests)
+                await self.rate_limiter.acquire()
+                await self.ws.send(json.dumps(request))
+                response_str = await self.ws.recv()
+                response = json.loads(response_str)
                 
                 # Check for specific transient API errors to retry
                 if "error" in response:
