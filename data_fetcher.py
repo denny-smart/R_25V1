@@ -37,6 +37,9 @@ class DataFetcher:
         
         # Rate limiting - TokenBucket allows 10 req/s with burst capacity of 20
         self.rate_limiter = TokenBucket(rate=10.0, capacity=20.0)
+        
+        # Error tracking
+        self.last_error: Optional[str] = None
     
     async def connect(self) -> bool:
         """Connect to Deriv WebSocket API"""
@@ -53,6 +56,7 @@ class DataFetcher:
             
             # Authorize
             if not await self.authorize():
+                # last_error is set in authorize()
                 logger.error("[ERROR] Authorization failed during connection")
                 await self.disconnect()
                 return False
@@ -60,6 +64,7 @@ class DataFetcher:
             return True
             
         except Exception as e:
+            self.last_error = f"Connection exception: {str(e)}"
             logger.error(f"[ERROR] Failed to connect to Deriv API: {e}")
             import traceback
             logger.error(traceback.format_exc())
@@ -121,16 +126,20 @@ class DataFetcher:
             data = json.loads(response)
             
             if "error" in data:
-                logger.error(f"❌ AUTH_FAILED | Error: {data['error']['message']}")
+                error_msg = data['error']['message']
+                self.last_error = f"Auth failed: {error_msg}"
+                logger.error(f"❌ AUTH_FAILED | Error: {error_msg}")
                 return False
             
             if "authorize" in data:
                 logger.info("[OK] Authorization successful")
                 return True
             
+            self.last_error = "Unknown auth response"
             return False
             
         except Exception as e:
+            self.last_error = f"Auth exception: {str(e)}"
             logger.error(f"❌ AUTH_EXCEPTION | Error: {type(e).__name__}: {e}", exc_info=True)
             return False
     

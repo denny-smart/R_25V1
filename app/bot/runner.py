@@ -387,7 +387,8 @@ class BotRunner:
                 logger.info("🔌 Connecting DataFetcher...")
                 data_connected = await self.data_fetcher.connect()
                 if not data_connected:
-                    raise Exception("DataFetcher failed to connect (check logs for details)")
+                    reason = self.data_fetcher.last_error or "Unknown connection error"
+                    raise Exception(f"DataFetcher failed to connect: {reason}")
                 
                 logger.info("🔌 Connecting TradeEngine...")
                 trade_connected = await self.trade_engine.connect()
