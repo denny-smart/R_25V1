@@ -4,8 +4,11 @@ Automated trading bot for Deriv's volatility indices using top-down market struc
 
 ## Features
 
-- Multi-asset monitoring (R_25, R_50, R_75, R_100)
-- Global risk control: 1 active trade max across all assets
+- Multi-asset monitoring:
+  - **Volatility Indices**: R_25, R_50, R_75, R_100, 1HZ100V
+  - **Range Break**: RB200
+  - **Step Indices**: Step 400 (stpRNG4), Step 500 (stpRNG5)
+- Global risk control: Configurable concurrent trades (Default: 2)
 - Top-down strategy: Weekly/Daily bias + structure-based entries
 - Auto-recovery on restart
 - Telegram notifications

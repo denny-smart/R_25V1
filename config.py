@@ -34,7 +34,7 @@ CONTRACT_TYPE_DOWN = "MULTDOWN"  # Multiplier Down (for DOWN/SELL signals)
 # ==================== MULTI-ASSET CONFIGURATION ====================
 # List of symbols to monitor and trade
 # Removed R_10: 400x multiplier incompatible with 0.5% SL (would exceed stake on Deriv multipliers)
-SYMBOLS = ["R_25", "R_50", "R_75", "R_100"]
+SYMBOLS = ["R_25", "R_50", "R_75", "R_100", "1HZ100V", "RB200", "stpRNG5", "stpRNG4"]
 
 # Asset-specific configuration
 ASSET_CONFIG = {
@@ -57,6 +57,26 @@ ASSET_CONFIG = {
         "multiplier": 40,
         "description": "Volatility 100 Index",
         "tick_size": 0.01
+    },
+    "1HZ100V": {
+        "multiplier": 40,
+        "description": "Volatility 100 (1s) Index",
+        "tick_size": 0.01
+    },
+    "RB200": {
+        "multiplier": 40,
+        "description": "Range Break 200 Index",
+        "tick_size": 0.01
+    },
+    "stpRNG5": {
+        "multiplier": 100,
+        "description": "Step Index 500",
+        "tick_size": 0.1
+    },
+    "stpRNG4": {
+        "multiplier": 200,
+        "description": "Step Index 400",
+        "tick_size": 0.1
     }
 }
 
@@ -87,7 +107,7 @@ MAX_TRADES_PER_DAY = 30            # Maximum trades per day
 MAX_DAILY_LOSS = None               # DYNAMIC (Multiplied by DAILY_LOSS_MULTIPLIER)
 
 # Valid multipliers for all assets
-VALID_MULTIPLIERS = [40, 50, 80, 160, 400, 800, 1200, 1600]
+VALID_MULTIPLIERS = [40, 50, 80, 100, 160, 200, 400, 800, 1200, 1600]
 
 # ==================== MULTI-ASSET MONITORING ====================
 MONITOR_ALL_ASSETS = True          # Monitor all assets simultaneously
