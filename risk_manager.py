@@ -508,21 +508,33 @@ class RiskManager:
 
     def update_trailing_stop(self, trade, current_pnl, stake):
         """
-        Update trailing stop based on simple profit percentage logic.
+        Update trailing stop with breakeven protection and multi-tier trailing.
         
-        Logic: If profit reaches trigger level (e.g., 25%), set stop at (peak_profit% - trail%)
-        Example: At 25% profit with 8% trail → stop at 17% profit
+        Breakeven Rule: At 20% profit, lock stop at -5% loss
+        Trailing Stops: At 25%+ profit, use tier-based trailing
         
-        This ensures predictable protection: you keep at least (trigger% - trail%) of your stake.
+        Both systems work independently - the most protective stop is used.
         """
-        if not config.ENABLE_MULTI_TIER_TRAILING:
-            return None
-
         if stake <= 0: 
             return None
         
         # Calculate current profit as percentage of stake
         current_profit_pct = (current_pnl / stake) * 100
+        
+        # === BREAKEVEN PROTECTION (runs first) ===
+        if config.ENABLE_BREAKEVEN_RULE:
+            if current_profit_pct >= config.BREAKEVEN_TRIGGER_PCT:
+                breakeven_stop_pct = -config.BREAKEVEN_MAX_LOSS_PCT
+                
+                # Check if breakeven is already set
+                if trade.get('breakeven_activated') is None:
+                    trade['breakeven_activated'] = True
+                    trade['breakeven_stop_pct'] = breakeven_stop_pct
+                    logger.info(f"🛡️ BREAKEVEN ACTIVATED: Stop locked at {breakeven_stop_pct}% (max loss protection)")
+        
+        # === MULTI-TIER TRAILING STOPS (existing logic) ===
+        if not config.ENABLE_MULTI_TIER_TRAILING:
+            return self._get_active_stop_info(trade)
 
         # Find active tier based on current profit
         active_tier = None
@@ -533,7 +545,8 @@ class RiskManager:
                 break
 
         if not active_tier:
-            return None  # Below minimum threshold
+            # No trailing tier active, but breakeven might be
+            return self._get_active_stop_info(trade)
 
         # Calculate stop level as: current_profit% - trail%
         # Example: 27% profit - 8% trail = 19% stop level
@@ -547,19 +560,48 @@ class RiskManager:
         if current_stop_pct is None:
             # First time activating trailing stop
             trade['trail_stop_profit_pct'] = stop_profit_pct
+            trade['trail_tier_name'] = active_tier['name']
             updated = True
             logger.info(f"🛡️ Trailing Activated ({active_tier['name']}): Stop set at {stop_profit_pct:.1f}% profit")
         else:
             # Only tighten the stop (move it up), never loosen
             if stop_profit_pct > current_stop_pct:
                 trade['trail_stop_profit_pct'] = stop_profit_pct
+                trade['trail_tier_name'] = active_tier['name']
                 updated = True
                 logger.info(f"🛡️ Trailing Tightened ({active_tier['name']}): Stop moved to {stop_profit_pct:.1f}% profit (Current: {current_profit_pct:.1f}%)")
         
-        return {
-            'stop_profit_pct': trade['trail_stop_profit_pct'], 
-            'tier_name': active_tier['name']
-        }
+        # Return the most protective stop (breakeven or trailing)
+        return self._get_active_stop_info(trade)
+    
+    def _get_active_stop_info(self, trade):
+        """
+        Determine which stop protection is currently active.
+        Returns the most protective (highest) stop level.
+        """
+        stops = []
+        
+        # Breakeven stop
+        if trade.get('breakeven_activated'):
+            stops.append({
+                'stop_profit_pct': trade['breakeven_stop_pct'],
+                'tier_name': 'Breakeven Protection',
+                'type': 'breakeven'
+            })
+        
+        # Trailing stop
+        if trade.get('trail_stop_profit_pct') is not None:
+            stops.append({
+                'stop_profit_pct': trade['trail_stop_profit_pct'],
+                'tier_name': trade.get('trail_tier_name', 'Trailing Stop'),
+                'type': 'trailing'
+            })
+        
+        # Return the highest (most protective) stop
+        if stops:
+            return max(stops, key=lambda x: x['stop_profit_pct'])
+        
+        return None
 
     def should_close_trade(self, contract_id: str, current_pnl: float, 
                           current_price: float, previous_price: float) -> Dict:

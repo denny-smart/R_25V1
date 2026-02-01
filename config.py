@@ -259,6 +259,12 @@ TRAILING_STOPS = [
 ]
 
 
+# ==================== BREAKEVEN PROTECTION ====================
+# Breakeven rule: Lock profit protection once trade reaches threshold
+ENABLE_BREAKEVEN_RULE = True       # Enable/disable breakeven protection
+BREAKEVEN_TRIGGER_PCT = 20.0       # Activate breakeven at 20% profit
+BREAKEVEN_MAX_LOSS_PCT = 5.0       # Maximum allowed loss after breakeven triggers (-5% of stake)
+
 
 # ==================== CONFLUENCE SCORING ====================
 CONFLUENCE_WEIGHT_HIGHER_TF = 2.0  # Higher timeframe levels weighted 2x
