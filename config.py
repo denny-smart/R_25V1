@@ -234,7 +234,7 @@ ENABLE_MULTI_TIER_TRAILING = True
 TRAILING_STOPS = [
     # Stage 1: Initial protection (starts at 25%)
     {
-        'trigger_pct': 25.0,     # Activate at 25% profit
+        'trigger_pct': 30.0,     # Activate at 30% profit
         'trail_pct': 8.0,       # Trail 8% behind current price
         'name': 'Initial Lock'
     },
