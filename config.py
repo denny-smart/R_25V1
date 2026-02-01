@@ -156,8 +156,8 @@ MONITOR_INTERVAL = 2               # Check every 2 seconds for TP/SL hits
 
 # Stagnation Exit Settings (Percentage Based)
 ENABLE_STAGNATION_EXIT = True      # Close if trade is stuck in loss
-STAGNATION_EXIT_TIME = 420          # 420 seconds
-STAGNATION_LOSS_PCT = 10.0          # Exit if losing 10% of stake after 600s
+STAGNATION_EXIT_TIME = 720         # 720 seconds
+STAGNATION_LOSS_PCT = 15.0         # Exit if losing 15% of stake after 720s
 
 # ==================== LOGGING ====================
 LOG_FILE = "trading_bot.log"
