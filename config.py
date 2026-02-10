@@ -97,7 +97,7 @@ USE_TOPDOWN_STRATEGY = True        # Active Strategy
 FIXED_STAKE = None               # NO DEFAULT - STRICTLY USER DEFINED
 
 # Maximum Risk (Percentage of Stake)
-MAX_RISK_PCT = 25.0                # Never risk more than 25% of stake
+MAX_RISK_PCT = 50.0                # Never risk more than 50% of stake
 
 # Maximum loss per trade (acts as emergency stop)
 MAX_LOSS_PER_TRADE = None           # DYNAMIC (1x User Stake)
@@ -219,7 +219,7 @@ STRUCTURE_CONFIRMATION_CANDLES = 3 # Wait N candles to confirm structure break
 TOPDOWN_USE_DYNAMIC_TP = True      # TP based on untested levels (not fixed %)
 TOPDOWN_USE_STRUCTURE_SL = True    # SL based on swing points (not fixed %)
 TOPDOWN_MIN_RR_RATIO = 2.5         # Minimum 1:2.5 risk/reward to take trade (Synced with MIN_RR_RATIO)
-TOPDOWN_MAX_SL_DISTANCE_PCT = 0.5   # Maximum SL distance: 0.5% from entry (Reduced Risk)
+TOPDOWN_MAX_SL_DISTANCE_PCT = 0.9   # Maximum SL distance: 0.9% from entry (Increased for trade breathing room)
 
 # Exit strategy - TP/SL only (no time-based exits)
 EXIT_STRATEGY = "TP_SL_ONLY"       # Only exit on Take Profit or Stop Loss hits
