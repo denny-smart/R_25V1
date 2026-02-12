@@ -621,7 +621,7 @@ class BotRunner:
         try:
             if self.active_strategy == "Conservative":
                 # Use standard Top-Down Strategy
-                signal = self.strategy.analyze(data_1m, data_5m, data_1h, data_4h, data_1d, data_1w)
+                signal = self.strategy.analyze(data_1m, data_5m, data_1h, data_4h, data_1d, data_1w, symbol=symbol)
             
             elif self.active_strategy == "Scalping":
                 # TODO: Implement distinct Scalping logic
@@ -638,7 +638,7 @@ class BotRunner:
                 
             else:
                 # Default to Conservative if unknown
-                signal = self.strategy.analyze(data_1m, data_5m, data_1h, data_4h, data_1d, data_1w)
+                signal = self.strategy.analyze(data_1m, data_5m, data_1h, data_4h, data_1d, data_1w, symbol=symbol)
 
         except Exception as e:
             logger.error(f"❌ {symbol} - Strategy analysis failed: {e}")
