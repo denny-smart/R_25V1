@@ -150,7 +150,7 @@ SMA_PERIOD = 100
 EMA_PERIOD = 20
 
 # Signal Scoring
-MIN_SIGNAL_STRENGTH = 6.0          # Only strength 6.0+ signals (Absolute score)
+MIN_SIGNAL_STRENGTH = 7.0          # Only strength 7.0+ signals (Absolute score)
 
 # Filters
 VOLATILITY_SPIKE_MULTIPLIER = 2.0
