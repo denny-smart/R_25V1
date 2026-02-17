@@ -1,11 +1,11 @@
-﻿"""
+"""
 Bot Runner - Multi-Asset Sequential Scanner
 Manages the lifecycle of the trading bot with multi-asset support
-✅ Scans: R_25, R_50, R_501s, R_75, R_751s
-✅ Sequential Top-Down analysis per symbol
-✅ Global 1-trade limit enforcement
-✅ First-Come-First-Served execution
-✅ Continuous monitoring of active trades
+? Scans: R_25, R_50, R_501s, R_75, R_751s
+? Sequential Top-Down analysis per symbol
+? Global 1-trade limit enforcement
+? First-Come-First-Served execution
+? Continuous monitoring of active trades
 """
 
 import asyncio
@@ -25,7 +25,7 @@ from app.bot.state import BotState
 from app.bot.events import event_manager
 from app.bot.telegram_bridge import telegram_bridge
 from app.core.context import user_id_var
-from app.services.trades_service import UserTradesService  # ← NEW IMPORT
+from app.services.trades_service import UserTradesService  # ? NEW IMPORT
 from functools import wraps
 
 def with_user_context(func):
@@ -62,7 +62,8 @@ class BotRunner:
     - Monitors active trades across all assets
     """
     
-    def __init__(self, api_token: Optional[str] = None, account_id: Optional[str] = None):
+    def __init__(self, api_token: Optional[str] = None, account_id: Optional[str] = None,
+                 strategy = None, risk_manager = None):
         self.is_running = False
         self.task: Optional[asyncio.Task] = None
         self.status = BotStatus.STOPPED
@@ -76,11 +77,23 @@ class BotRunner:
         # Instance State
         self.state = BotState()
         
-        # Bot components (initialized on start)
+        # Bot components (initialized on start or injected)
         self.data_fetcher: Optional[DataFetcher] = None
         self.trade_engine: Optional[TradeEngine] = None
-        self.strategy: Optional[TradingStrategy] = None
-        self.risk_manager: Optional[RiskManager] = None
+        
+        # Strategy and risk manager injection (NEW)
+        if strategy is None:
+            # Default to conservative strategy
+            from conservative_strategy import ConservativeStrategy
+            self.strategy = ConservativeStrategy()
+        else:
+            self.strategy = strategy
+        
+        if risk_manager is None:
+            # Will be initialized in _run_bot for backward compatibility
+            self.risk_manager = None
+        else:
+            self.risk_manager = risk_manager
         
         # Multi-asset configuration
         self.symbols: List[str] = config.SYMBOLS
@@ -130,7 +143,7 @@ class BotRunner:
         if self.user_stake is None:
             return {
                 "success": False,
-                "message": "❌ Start Failed: Stake amount not configured. Please set your stake in Settings.",
+                "message": "? Start Failed: Stake amount not configured. Please set your stake in Settings.",
                 "status": self.status.value
             }
             
@@ -140,9 +153,9 @@ class BotRunner:
         # (self.risk_manager is None here until _run_bot starts)
             
         try:
-            logger.info(f"🚀 Starting bot for {self.account_id or 'default user'}...")
-            logger.info(f"📊 Scanning symbols: {', '.join(self.symbols)}")
-            logger.info(f"⚙️ Strategy: {self.active_strategy} | Stake: ${current_stake}")
+            logger.info(f"?? Starting bot for {self.account_id or 'default user'}...")
+            logger.info(f"?? Scanning symbols: {', '.join(self.symbols)}")
+            logger.info(f"?? Strategy: {self.active_strategy} | Stake: ${current_stake}")
             self.status = BotStatus.STARTING
             self.error_message = None
             self.state.update_status("starting")
@@ -155,9 +168,9 @@ class BotRunner:
                     # Note: We need to adapt the format slightly if needed, but BotState expects dicts
                     # We might want to populate stats based on this history too
                     self.state.trade_history = history
-                    logger.info(f"📜 Loaded {len(history)} historical trades from DB")
+                    logger.info(f"?? Loaded {len(history)} historical trades from DB")
             except Exception as e:
-                logger.warning(f"⚠️ Failed to load trade history: {e}")
+                logger.warning(f"?? Failed to load trade history: {e}")
 
             # Create bot task
             self.task = asyncio.create_task(self._run_bot())
@@ -168,7 +181,7 @@ class BotRunner:
                 await asyncio.sleep(1)
                 
                 if self.is_running:
-                    logger.info("✅ Multi-asset bot started successfully")
+                    logger.info("? Multi-asset bot started successfully")
                     await event_manager.broadcast({
                         "type": "bot_status",
                         "status": "running",
@@ -191,7 +204,7 @@ class BotRunner:
             raise Exception("Bot startup timeout")
                 
         except Exception as e:
-            logger.error(f"❌ Failed to start bot: {e}")
+            logger.error(f"? Failed to start bot: {e}")
             self.status = BotStatus.ERROR
             self.error_message = str(e)
             self.state.update_status("error", error=str(e))
@@ -223,7 +236,7 @@ class BotRunner:
             }
         
         try:
-            logger.info("🛑 Stopping multi-asset trading bot...")
+            logger.info("?? Stopping multi-asset trading bot...")
             self.status = BotStatus.STOPPING
             self.state.update_status("stopping")
             
@@ -250,7 +263,7 @@ class BotRunner:
             self.start_time = None
             
             self.state.update_status("stopped")
-            logger.info("✅ Bot stopped successfully")
+            logger.info("? Bot stopped successfully")
             
             # Notify Telegram with stats
             try:
@@ -277,7 +290,7 @@ class BotRunner:
             }
             
         except Exception as e:
-            logger.error(f"❌ Error stopping bot: {e}")
+            logger.error(f"? Error stopping bot: {e}")
             return {
                 "success": False,
                 "message": f"Error stopping bot: {e}",
@@ -289,7 +302,7 @@ class BotRunner:
         Restart the trading bot
         Returns status dict
         """
-        logger.info("🔄 Restarting multi-asset trading bot...")
+        logger.info("?? Restarting multi-asset trading bot...")
         
         if self.is_running:
             stop_result = await self.stop_bot()
@@ -348,13 +361,13 @@ class BotRunner:
         Continuously scans all symbols looking for first qualifying signal
         """
         try:
-            logger.info("🤖 Multi-asset bot main loop starting...")
+            logger.info("?? Multi-asset bot main loop starting...")
             
             # Initialize components with dynamic token
             token_to_use = self.api_token
             
             if not token_to_use:
-                 error_msg = f"❌ User {self.account_id} has no API Token! Cannot start bot."
+                 error_msg = f"? User {self.account_id} has no API Token! Cannot start bot."
                  logger.error(error_msg)
                  raise ValueError(error_msg)
             
@@ -370,58 +383,66 @@ class BotRunner:
                     config.DERIV_APP_ID
                 )
                 
-                self.strategy = TradingStrategy()
-                self.risk_manager = RiskManager()
-                self.risk_manager.set_bot_state(self.state)
+                # Only initialize risk_manager if not already injected
+                if self.risk_manager is None:
+                    from conservative_risk_manager import ConservativeRiskManager
+                    self.risk_manager = ConservativeRiskManager(user_id=self.account_id)
                 
-                # CRITICAL: Apply user stake immediately after initialization
+                # Set bot state for risk manager
+                if hasattr(self.risk_manager, 'set_bot_state'):
+                    self.risk_manager.set_bot_state(self.state)
+                
+                # Apply user stake if provided
                 if self.user_stake:
-                    self.risk_manager.update_risk_settings(self.user_stake)
-                    logger.info(f"✅ Risk limits updated for stake: ${self.user_stake}")
+                    if hasattr(self.risk_manager, 'update_risk_settings'):
+                        self.risk_manager.update_risk_settings(self.user_stake)
+                    if hasattr(self.risk_manager, 'stake'):
+                        self.risk_manager.stake = self.user_stake
+                    logger.info(f"? Risk limits updated for stake: ${self.user_stake}")
                 
-                logger.info("✅ Components initialized for multi-asset mode")
+                logger.info("? Components initialized for multi-asset mode")
             except Exception as e:
                 self.status = BotStatus.ERROR
                 self.error_message = f"Component initialization failed: {e}"
-                logger.error(f"❌ {self.error_message}")
+                logger.error(f"? {self.error_message}")
                 return
             
             # Connect to Deriv API
             try:
-                logger.info("🔌 Connecting DataFetcher...")
+                logger.info("?? Connecting DataFetcher...")
                 data_connected = await self.data_fetcher.connect()
                 if not data_connected:
                     reason = self.data_fetcher.last_error or "Unknown connection error"
                     raise Exception(f"DataFetcher failed to connect: {reason}")
                 
-                logger.info("🔌 Connecting TradeEngine...")
+                logger.info("?? Connecting TradeEngine...")
                 trade_connected = await self.trade_engine.connect()
                 if not trade_connected:
                     raise Exception("TradeEngine failed to connect (check logs for details)")
                 
-                logger.info("✅ Connected to Deriv API")
+                logger.info("? Connected to Deriv API")
             except Exception as e:
                 self.status = BotStatus.ERROR
                 self.error_message = f"Deriv API connection failed: {e}"
-                logger.error(f"❌ {self.error_message}")
+                logger.error(f"? {self.error_message}")
                 return
             
             # Check for existing positions on startup
             try:
                 has_existing = await self.risk_manager.check_for_existing_positions(self.trade_engine)
                 if has_existing:
-                    logger.warning("⚠️ Existing position detected - system locked on startup")
+                    logger.warning("?? Existing position detected - system locked on startup")
             except Exception as e:
-                logger.warning(f"⚠️ Could not check existing positions: {e}")
+                logger.warning(f"?? Could not check existing positions: {e}")
             
             # Get initial balance
             try:
                 balance = await self.data_fetcher.get_balance()
                 if balance:
                     self.state.update_balance(balance)
-                    logger.info(f"💰 Initial balance: ${balance:.2f}")
+                    logger.info(f"?? Initial balance: ${balance:.2f}")
             except Exception as e:
-                logger.warning(f"⚠️ Could not fetch balance: {e}")
+                logger.warning(f"?? Could not fetch balance: {e}")
                 balance = 0.0
             
             # Mark as running
@@ -431,14 +452,14 @@ class BotRunner:
             self.error_message = None
             self.state.update_status("running")
             
-            logger.info("✅ Multi-asset bot is now running")
-            logger.info(f"🔍 Scanning {len(self.symbols)} symbols per cycle")
+            logger.info("? Multi-asset bot is now running")
+            logger.info(f"?? Scanning {len(self.symbols)} symbols per cycle")
             
             # Notify Telegram
             try:
                 await self.telegram_bridge.notify_bot_started(balance or 0.0, self.user_stake, self.active_strategy)
             except Exception as e:
-                logger.warning(f"⚠️ Telegram notification failed: {e}")
+                logger.warning(f"?? Telegram notification failed: {e}")
             
             # Broadcast to WebSockets
             await event_manager.broadcast({
@@ -454,7 +475,7 @@ class BotRunner:
             while self.is_running:
                 try:
                     self.scan_count += 1
-                    logger.info(f"🔄 Scan cycle #{self.scan_count} - Checking {len(self.symbols)} symbols")
+                    logger.info(f"?? Scan cycle #{self.scan_count} - Checking {len(self.symbols)} symbols")
                     
                     # Execute multi-asset scan cycle
                     await self._multi_asset_scan_cycle()
@@ -465,10 +486,10 @@ class BotRunner:
                     # If actively monitoring a trade, check more frequently
                     if self.risk_manager.active_trades:
                         wait_time = max(cooldown, 10)  # Check every 10s when trade active
-                        logger.debug(f"⏱️ Active trade ({len(self.risk_manager.active_trades)}) - next check in {wait_time}s")
+                        logger.debug(f"?? Active trade ({len(self.risk_manager.active_trades)}) - next check in {wait_time}s")
                     else:
                         wait_time = max(cooldown, 30)  # Standard 30s cycle when scanning
-                        logger.debug(f"⏱️ No active trade - next scan in {wait_time}s")
+                        logger.debug(f"?? No active trade - next scan in {wait_time}s")
                     
                     # Sleep with cancellation check
                     for _ in range(int(wait_time)):
@@ -524,9 +545,9 @@ class BotRunner:
         
         Process:
         1. Check global trade permission (1-trade limit)
-        2. If position active → Monitor only (skip scanning)
-        3. If no position → Scan all symbols sequentially
-        4. First qualifying signal → Execute and lock system
+        2. If position active ? Monitor only (skip scanning)
+        3. If no position ? Scan all symbols sequentially
+        4. First qualifying signal ? Execute and lock system
         5. All other symbols blocked until trade closes
         """
         
@@ -535,22 +556,22 @@ class BotRunner:
         
         # If we have an active trade, monitor it instead of scanning
         if self.risk_manager.active_trades:
-            logger.debug(f"🔒 Monitoring {len(self.risk_manager.active_trades)} active trades")
+            logger.debug(f"?? Monitoring {len(self.risk_manager.active_trades)} active trades")
             await self._monitor_active_trade()
             return
         
         if not can_trade_global:
-            logger.debug(f"⏸️ Global trading paused: {reason}")
+            logger.debug(f"?? Global trading paused: {reason}")
             return
         
         # Step 2: Sequential symbol scanning (First-Come-First-Served)
-        logger.info(f"🔍 Scanning all {len(self.symbols)} symbols for entry signals...")
+        logger.info(f"?? Scanning all {len(self.symbols)} symbols for entry signals...")
         
         for symbol in self.symbols:
             # Check if we can still trade (might have changed during loop)
             can_trade_now, _ = self.risk_manager.can_trade(symbol)
             if not can_trade_now:
-                logger.debug(f"⏸️ {symbol} - Global state changed, stopping scan")
+                logger.debug(f"?? {symbol} - Global state changed, stopping scan")
                 break
             
             try:
@@ -559,13 +580,13 @@ class BotRunner:
                 
                 if signal_found:
                     # CRITICAL: First qualifying signal locks the system
-                    logger.info(f"🎯 {symbol} won the race - executing trade")
-                    logger.info(f"🔒 All other symbols now BLOCKED")
+                    logger.info(f"?? {symbol} won the race - executing trade")
+                    logger.info(f"?? All other symbols now BLOCKED")
                     break  # Exit loop - system is now locked
                 
             except Exception as e:
                 # Log error but continue to next symbol
-                logger.error(f"❌ SYMBOL_ANALYSIS_FAILED | Symbol: {symbol} | Error: {type(e).__name__}: {e}", exc_info=True)
+                logger.error(f"? SYMBOL_ANALYSIS_FAILED | Symbol: {symbol} | Error: {type(e).__name__}: {e}", exc_info=True)
                 self.errors_by_symbol[symbol] = self.errors_by_symbol.get(symbol, 0) + 1
                 
                 # If too many errors for this symbol, notify
@@ -579,7 +600,7 @@ class BotRunner:
                 
                 continue  # Move to next symbol
         
-        logger.debug(f"✅ Scan cycle complete - checked {len(self.symbols)} symbols")
+        logger.debug(f"? Scan cycle complete - checked {len(self.symbols)} symbols")
     
     async def _analyze_symbol(self, symbol: str) -> bool:
         """
@@ -592,7 +613,7 @@ class BotRunner:
         Returns:
             True if trade executed, False if no signal
         """
-        logger.debug(f"🔎 Analyzing {symbol}...")
+        logger.debug(f"?? Analyzing {symbol}...")
         
         # Fetch multi-timeframe data for this symbol
         # Fetch multi-timeframe data for this symbol
@@ -602,11 +623,11 @@ class BotRunner:
             # Validate we have all required timeframes
             required_timeframes = ['1m', '5m', '1h', '4h', '1d', '1w']  # Full Top-Down requirement
             if not all(tf in market_data for tf in required_timeframes):
-                logger.warning(f"⚠️ {symbol} - Missing required timeframes")
+                logger.warning(f"?? {symbol} - Missing required timeframes")
                 return False
             
         except Exception as e:
-            logger.error(f"❌ {symbol} - Data fetch failed: {e}")
+            logger.error(f"? {symbol} - Data fetch failed: {e}")
             raise  # Re-raise to be caught by caller
         
         # Extract timeframe data
@@ -617,31 +638,22 @@ class BotRunner:
         data_1d = market_data.get('1d')
         data_1w = market_data.get('1w')
         
-        # Execute strategy analysis based on Active Strategy
+        # Execute strategy analysis using injected strategy
         try:
-            if self.active_strategy == "Conservative":
-                # Use standard Top-Down Strategy
-                signal = self.strategy.analyze(data_1m, data_5m, data_1h, data_4h, data_1d, data_1w, symbol=symbol)
+            # Get required timeframes for this strategy
+            required_tfs = self.strategy.get_required_timeframes()
             
-            elif self.active_strategy == "Scalping":
-                # TODO: Implement distinct Scalping logic
-                # For now, we either fallback or return no signal to indicate "Coming Soon" behavior
-                # or strictly separate it.
-                # Given user request: "next will be Scalping". It implies it's not ready or just placeholder.
-                # But to avoid breaking if selected, let's log and return False for now, 
-                # OR we could just map it to the same strategy with different params if that was the intent.
-                # Assuming "Future" means not now:
-                
-                # However, to be safe if user accidentally selects it:
-                logger.debug(f"⚠️ Scalping strategy selected but not fully implemented. Skipping analysis.")
-                return False
-                
-            else:
-                # Default to Conservative if unknown
-                signal = self.strategy.analyze(data_1m, data_5m, data_1h, data_4h, data_1d, data_1w, symbol=symbol)
+            # Build kwargs for strategy analyze method
+            strategy_kwargs = {}
+            for tf in required_tfs:
+                strategy_kwargs[f'data_{tf.replace("m", "m").replace("h", "h").replace("d", "d").replace("w", "w")}'] = market_data.get(tf)
+            strategy_kwargs['symbol'] = symbol
+            
+            # Call strategy analyze method
+            signal = self.strategy.analyze(**strategy_kwargs)
 
         except Exception as e:
-            logger.error(f"❌ {symbol} - Strategy analysis failed: {e}")
+            logger.error(f"? {symbol} - Strategy analysis failed: {e}")
             raise
         
         if not signal.get('can_trade'):
@@ -667,17 +679,17 @@ class BotRunner:
                 should_log = True
                 
             if should_log:
-                logger.info(f"⏳ {symbol} - Skipped: {full_reason}")
+                logger.info(f"? {symbol} - Skipped: {full_reason}")
                 self.last_status_log[symbol] = {'msg': full_reason, 'time': now}
             else:
                 # Debug only for spammy updates
-                logger.debug(f"⏭️ {symbol} - No signal: {full_reason}")
+                logger.debug(f"?? {symbol} - No signal: {full_reason}")
                 
             return False
         
         # We have a signal! Log it
         checks_passed = ", ".join(signal.get('details', {}).get('passed_checks', []))
-        logger.info(f"🎯 {symbol} - SIGNAL: {signal['signal']} | Score: {signal.get('score', 0):.2f} | Conf: {signal.get('confidence', 0):.0f}%")
+        logger.info(f"?? {symbol} - SIGNAL: {signal['signal']} | Score: {signal.get('score', 0):.2f} | Conf: {signal.get('confidence', 0):.0f}%")
         logger.debug(f"   Checks: {checks_passed}")
         
         # Track signal
@@ -706,14 +718,14 @@ class BotRunner:
         multiplier = self.asset_config.get(symbol, {}).get('multiplier')
         
         if not multiplier:
-            logger.error(f"❌ {symbol} - Critical: Missing multiplier in asset_config")
+            logger.error(f"? {symbol} - Critical: Missing multiplier in asset_config")
             return False
 
         # Determine Stake (User Preference)
         base_stake = self.user_stake
         if base_stake is None:
              # Should not happen due to start_bot check, but safety first
-             logger.error(f"❌ {symbol} - Critical: User stake is None during analysis")
+             logger.error(f"? {symbol} - Critical: User stake is None during analysis")
              return False
              
         # CRITICAL FIX: Do NOT multiply by multiplier. 
@@ -738,7 +750,7 @@ class BotRunner:
         )
         
         if not can_open:
-            logger.warning(f"❌ {symbol} - Trade blocked: {validation_msg}")
+            logger.warning(f"? {symbol} - Trade blocked: {validation_msg}")
             return False
             
         # Notify Telegram about signal (Moved here to ensure all checks passed)
@@ -750,7 +762,7 @@ class BotRunner:
             pass
         
         # Execute trade!
-        logger.info(f"🚀 {symbol} - Executing {signal['signal']} trade...")
+        logger.info(f"?? {symbol} - Executing {signal['signal']} trade...")
         logger.info(f"   Stake: ${stake:.2f} (multiplier: {multiplier}x)")
         
         try:
@@ -771,39 +783,43 @@ class BotRunner:
                 status = result.get('status', 'unknown')
                 contract_id = result.get('contract_id')
                 
-                logger.info(f"✅ {symbol} - Trade completed: {status}")
-                logger.info(f"💰 P&L: ${pnl:.2f}")
+                logger.info(f"? {symbol} - Trade completed: {status}")
+                logger.info(f"?? P&L: ${pnl:.2f}")
 
                 # CRITICAL FIX: Add signal to result for DB persistence
                 if 'signal' not in result:
                     result['signal'] = signal_with_symbol['signal']
                 
+                # NEW: Add strategy_type to result for database
+                result['strategy_type'] = self.strategy.get_strategy_name()
+                
                 # Record trade closure
                 self.risk_manager.record_trade_close(contract_id, pnl, status)
                 self.state.update_trade(contract_id, result)
+
 
                 # Persist to Supabase with error handling
                 try:
                     saved = UserTradesService.save_trade(self.account_id, result)
                     if saved:
-                        logger.info(f"✅ Trade persisted to database: {contract_id}")
+                        logger.info(f"? Trade persisted to database: {contract_id}")
                     else:
-                        logger.error(f"❌ DB persistence failed for contract {contract_id} (no data returned)")
+                        logger.error(f"? DB persistence failed for contract {contract_id} (no data returned)")
                         # Notify via Telegram
                         try:
                             await self.telegram_bridge.notify_error(
-                                f"⚠️ Trade executed but DB save failed: {symbol} {status}"
+                                f"?? Trade executed but DB save failed: {symbol} {status}"
                             )
                         except:
                             pass
                 except Exception as e:
-                    logger.error(f"❌ DB save exception for contract {contract_id}: {e}")
+                    logger.error(f"? DB save exception for contract {contract_id}: {e}")
                     import traceback
                     logger.error(traceback.format_exc())
                     # Notify via Telegram
                     try:
                         await self.telegram_bridge.notify_error(
-                            f"⚠️ Trade executed but DB error: {symbol} - {str(e)}"
+                            f"?? Trade executed but DB error: {symbol} - {str(e)}"
                         )
                     except:
                         pass
@@ -819,7 +835,7 @@ class BotRunner:
                     if 'symbol' not in result_for_notify:
                          result_for_notify['symbol'] = symbol
                     
-                    await self.telegram_bridge.notify_trade_closed(result_for_notify, pnl, status)
+                    await self.telegram_bridge.notify_trade_closed(result_for_notify, pnl, status, strategy_type=self.strategy.get_strategy_name())
                 except:
                     pass
                 
@@ -871,11 +887,11 @@ class BotRunner:
                 
                 return True  # Trade executed
             else:
-                logger.error(f"❌ {symbol} - Trade execution failed")
+                logger.error(f"? {symbol} - Trade execution failed")
                 return False
                 
         except Exception as e:
-            logger.error(f"❌ TRADE_EXECUTION_FAILED | Symbol: {symbol} | Error: {type(e).__name__}: {e}", exc_info=True)
+            logger.error(f"? TRADE_EXECUTION_FAILED | Symbol: {symbol} | Error: {type(e).__name__}: {e}", exc_info=True)
             
             try:
                 await self.telegram_bridge.notify_error(f"{symbol} trade failed: {e}")
@@ -902,11 +918,64 @@ class BotRunner:
         try:
             # Fetch current trade status from Deriv
             # This allows us to detect early closures or updates
-            trade_status = await self.trade_engine.get_trade_status(contract_id)
+            trade_status = await self.trade_engine.get_trade_status(contract_id)            
+            # Check for stagnation exit (scalping trades only)
+            if trade_status and not trade_status.get('is_sold'):
+                # Import here to avoid circular dependency
+                from scalping_risk_manager import ScalpingRiskManager
+                
+                if isinstance(self.risk_manager, ScalpingRiskManager):
+                    current_pnl = trade_status.get('profit', 0.0)
+                    trade_info = {
+                        'open_time': active_info.get('open_time'),
+                        'stake': active_info.get('stake'),
+                        'symbol': symbol,
+                        'contract_id': contract_id,
+                        'direction': active_info.get('direction'),
+                        'entry_price': active_info.get('entry_price'),
+                        'multiplier': active_info.get('multiplier')
+                    }
+                    
+                    should_exit, exit_reason = self.risk_manager.check_stagnation_exit(trade_info, current_pnl)
+                    
+                    if should_exit:
+                        logger.warning(f"? {symbol} stagnation exit triggered - closing trade")
+                        
+                        # Close the trade immediately
+                        try:
+                            sell_result = await self.trade_engine.close_trade(contract_id)
+                            
+                            if sell_result:
+                                pnl = sell_result.get('profit', current_pnl)
+                                status = 'loss' if pnl < 0 else ('win' if pnl > 0 else 'break_even')
+                                
+                                # Record closure with stagnation exit reason
+                                self.risk_manager.record_trade_close(contract_id, pnl, status)
+                                self.state.update_trade(contract_id, sell_result)
+                                
+                                logger.info(f"?? {symbol} trade closed (stagnation) - system unlocked")
+                                logger.info(f"?? P&L: ${pnl:.2f}")
+                                
+                                # Notify Telegram with stagnation exit reason
+                                try:
+                                    result_for_notify = sell_result.copy()
+                                    result_for_notify.update(active_info)
+                                    result_for_notify['exit_reason'] = exit_reason
+                                    
+                                    await self.telegram_bridge.notify_trade_closed(
+                                        result_for_notify, pnl, status, 
+                                        strategy_type=self.strategy.get_strategy_name()
+                                    )
+                                except:
+                                    pass
+                                
+                                return  # Exit monitoring after closing
+                        except Exception as e:
+                            logger.error(f"? Failed to close stagnant trade: {e}")
             
             if trade_status and trade_status.get('is_sold'):
                 # Trade closed externally or by TP/SL
-                logger.info(f"🔔 {symbol} trade detected as closed")
+                logger.info(f"?? {symbol} trade detected as closed")
                 
                 pnl = trade_status.get('profit', 0.0)
                 status = trade_status.get('status', 'sold')
@@ -915,8 +984,8 @@ class BotRunner:
                 self.risk_manager.record_trade_close(contract_id, pnl, status)
                 self.state.update_trade(contract_id, trade_status)
                 
-                logger.info(f"🔓 {symbol} trade closed - system unlocked")
-                logger.info(f"💰 P&L: ${pnl:.2f}")
+                logger.info(f"?? {symbol} trade closed - system unlocked")
+                logger.info(f"?? P&L: ${pnl:.2f}")
                 
                 # Notify Telegram
                 try:
@@ -924,12 +993,12 @@ class BotRunner:
                     result_for_notify = trade_status.copy()
                     result_for_notify.update(active_info) # Contains direction, stake, symbol from RiskManager
                     
-                    await self.telegram_bridge.notify_trade_closed(result_for_notify, pnl, status)
+                    await self.telegram_bridge.notify_trade_closed(result_for_notify, pnl, status, strategy_type=self.strategy.get_strategy_name())
                 except:
                     pass
             
         except Exception as e:
-            logger.warning(f"⚠️ Could not monitor {symbol} trade: {e}")
+            logger.warning(f"?? Could not monitor {symbol} trade: {e}")
 
 # Global bot runner instance - DEPRECATED / DEFAULT
 # We keep this for backward compatibility if needed, using env vars

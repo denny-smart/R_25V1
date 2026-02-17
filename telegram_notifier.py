@@ -238,8 +238,10 @@ class TelegramNotifier:
         
         await self.send_message(message)
     
-    async def notify_trade_opened(self, trade_info: Dict):
+    async def notify_trade_opened(self, trade_info: Dict, strategy_type: str = "Conservative"):
         """Notify that a trade has been opened"""
+        # Add strategy prefix for scalping trades
+        prefix = "[SCALP] " if strategy_type == "Scalping" else ""
         direction = trade_info.get('direction', 'UNKNOWN')
         emoji = "🟢" if direction == "BUY" else "🔴"
         symbol = trade_info.get('symbol', 'UNKNOWN')
@@ -278,7 +280,7 @@ class TelegramNotifier:
         rr_ratio = f"1:{tp_amount/sl_risk:.1f}" if sl_risk > 0 else "N/A"
         
         message = (
-            f"{emoji} <b>TRADE OPENED: {symbol}</b>\n"
+            f"{prefix}{emoji} <b>TRADE OPENED: {symbol}</b>\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
             f"📍 Direction: <b>{direction}</b>\n"
             f"💵 Stake: {format_currency(stake)} (x{trade_info.get('multiplier', 0)})\n"
@@ -300,8 +302,10 @@ class TelegramNotifier:
         
         await self.send_message(message)
     
-    async def notify_trade_closed(self, result: Dict, trade_info: Dict):
+    async def notify_trade_closed(self, result: Dict, trade_info: Dict, strategy_type: str = "Conservative"):
         """Notify that a trade has been closed"""
+        # Add strategy prefix for scalping trades
+        prefix = "[SCALP] " if strategy_type == "Scalping" else ""
         status = result.get('status', 'unknown')
         # Safely get profit, default to 0.0 if None
         profit = result.get('profit')
@@ -354,9 +358,11 @@ class TelegramNotifier:
         
         if result.get('exit_reason') == 'secure_profit_trailing_stop':
             status = 'TRAILING STOP 🎯'
+        elif result.get('exit_reason') == 'stagnation_exit':
+            status = 'STAGNATION EXIT ?'
         
         message = (
-            f"{emoji} <b>{header}: {symbol}</b>\n"
+            f"{prefix}{emoji} <b>{header}: {symbol}</b>\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
             f"💰 <b>Net Result: {format_currency(profit)}</b>\n"
             f"📈 ROI: {roi:+.1f}%\n"
@@ -464,3 +470,4 @@ class TelegramNotifier:
 
 # Create global instance
 notifier = TelegramNotifier()
+

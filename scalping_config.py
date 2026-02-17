@@ -1,0 +1,37 @@
+"""
+Scalping Bot Configuration
+All scalping-specific constants and thresholds
+"""
+
+# ==================== SCALPING STRATEGY PARAMETERS ====================
+# Scalping bot uses relaxed thresholds for more frequent trading
+
+SCALPING_TIMEFRAMES = ["1h", "5m", "1m"]
+SCALPING_ADX_THRESHOLD = 18
+SCALPING_RSI_UP_MIN = 52
+SCALPING_RSI_UP_MAX = 80
+SCALPING_RSI_DOWN_MIN = 20
+SCALPING_RSI_DOWN_MAX = 48
+SCALPING_MAX_PRICE_MOVEMENT_PCT = 1.2
+SCALPING_MOMENTUM_THRESHOLD = 1.2  # ATR multiplier
+SCALPING_MIN_RR_RATIO = 1.5
+SCALPING_SL_ATR_MULTIPLIER = 1.5
+SCALPING_TP_ATR_MULTIPLIER = 2.25
+
+# Asset-specific movement thresholds (conservative × 1.7)
+SCALPING_ASSET_MOVEMENT_MULTIPLIER = 1.7
+
+# ==================== SCALPING RISK MANAGEMENT ====================
+SCALPING_MAX_CONCURRENT_TRADES = 4
+SCALPING_COOLDOWN_SECONDS = 30
+SCALPING_MAX_TRADES_PER_DAY = 80
+SCALPING_MAX_CONSECUTIVE_LOSSES = 4
+SCALPING_DAILY_LOSS_MULTIPLIER = 2.0
+
+# ==================== RUNAWAY TRADE PROTECTION ====================
+SCALPING_RUNAWAY_WINDOW_MINUTES = 10
+SCALPING_RUNAWAY_TRADE_COUNT = 10
+
+# ==================== STAGNATION EXIT ====================
+SCALPING_STAGNATION_EXIT_TIME = 120  # seconds (2 minutes)
+SCALPING_STAGNATION_LOSS_PCT = 15.0  # percentage of stake

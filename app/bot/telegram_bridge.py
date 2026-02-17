@@ -56,16 +56,16 @@ class TelegramBridge:
         except Exception as e:
             logger.error(f"Telegram error (signal): {e}")
     
-    async def notify_trade_opened(self, trade: Dict):
+    async def notify_trade_opened(self, trade: Dict, strategy_type: str = "Conservative"):
         """Notify trade opened"""
         if not self.active:
             return
         try:
-            await notifier.notify_trade_opened(trade)
+            await notifier.notify_trade_opened(trade, strategy_type=strategy_type)
         except Exception as e:
             logger.error(f"Telegram error (trade_opened): {e}")
     
-    async def notify_trade_closed(self, trade: Dict, pnl: float, status: str):
+    async def notify_trade_closed(self, trade: Dict, pnl: float, status: str, strategy_type: str = "Conservative"):
         """Notify trade closed"""
         if not self.active:
             return
@@ -86,7 +86,7 @@ class TelegramBridge:
                 "symbol": trade.get("symbol")
             }
             
-            await notifier.notify_trade_closed(result, trade_info)
+            await notifier.notify_trade_closed(result, trade_info, strategy_type=strategy_type)
         except Exception as e:
             logger.error(f"Telegram error (trade_closed): {e}")
     
