@@ -217,7 +217,7 @@ class ScalpingRiskManager(BaseRiskManager):
         """Property to check if there are active trades"""
         return len(self.active_trades) > 0
 
-    def record_trade_opened(self, trade_info: Dict) -> None:
+    def record_trade_open(self, trade_info: Dict) -> None:
         """
         Record that a new trade has been opened.
         
