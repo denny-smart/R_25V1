@@ -109,12 +109,31 @@ class ScalpingRiskManager(BaseRiskManager):
             logger.warning(f"⚠️ Could not load daily stats from database: {e}")
             logger.info("   Starting with zero counters")
     
-    def can_trade(self) -> Tuple[bool, str]:
+    def set_bot_state(self, state):
+        """Set BotState instance for real-time API updates (No-op for scalping for now)"""
+        pass
+        
+    def update_risk_settings(self, stake: float):
+        """Update risk limits based on user's stake."""
+        self.stake = stake
+        # Scalping doesn't use dynamic daily loss multiplier based on stake in the same way,
+        # but we update the stake reference.
+        logger.info(f"🔄 Scalping Risk Stake Updated: ${stake}")
+
+    async def check_for_existing_positions(self, trade_engine) -> bool:
+        """
+        Check if there are any existing positions on startup.
+        For scalping, we start fresh usually, but we should sync if possible.
+        """
+        # Simple implementation: just warn that we can't fully sync yet
+        # or implement actual check if trade_engine supports it.
+        # For now, return False to assume no positions or let trade engine handle it.
+        return False
+
+    def can_trade(self, symbol: str = None, verbose: bool = False) -> Tuple[bool, str]:
         """
         Check if trading is allowed.
-        
-        Returns:
-            Tuple of (can_trade: bool, reason: str)
+        Updated signature to match RiskManager interface (accepts symbol and verbose).
         """
         # CHECK 1: Concurrent trades limit
         if len(self.active_trades) >= self.max_concurrent_trades:
@@ -128,7 +147,8 @@ class ScalpingRiskManager(BaseRiskManager):
         if self.last_trade_time:
             time_since_last = (datetime.now() - self.last_trade_time).total_seconds()
             if time_since_last < self.cooldown_seconds:
-                return False, f"Cooldown active ({int(self.cooldown_seconds - time_since_last)}s remaining)"
+                remaining = int(self.cooldown_seconds - time_since_last)
+                return False, f"Cooldown active ({remaining}s remaining)"
         
         # CHECK 4: Consecutive losses (circuit breaker)
         if self.consecutive_losses >= self.max_consecutive_losses:
@@ -145,11 +165,58 @@ class ScalpingRiskManager(BaseRiskManager):
             time_window = (datetime.now() - oldest_trade).total_seconds() / 60  # minutes
             
             if time_window < scalping_config.SCALPING_RUNAWAY_WINDOW_MINUTES:
-                logger.warning(f"⚠️ RUNAWAY TRADE GUARDRAIL TRIGGERED: {scalping_config.SCALPING_RUNAWAY_TRADE_COUNT} trades in {time_window:.1f} minutes")
+                if verbose:
+                    logger.warning(f"⚠️ RUNAWAY TRADE GUARDRAIL: {scalping_config.SCALPING_RUNAWAY_TRADE_COUNT} trades in {time_window:.1f} mins")
                 return False, "Runaway trade protection activated"
         
         return True, "All checks passed"
+
+    def can_open_trade(self, symbol: str, stake: float, 
+                      take_profit: float = None, stop_loss: float = None,
+                      signal_dict: Dict = None) -> Tuple[bool, str]:
+        """
+        Validate trade opening - simplifies to can_trade check for scalping.
+        """
+        # check global limits first
+        can, reason = self.can_trade(symbol, verbose=True)
+        if not can:
+            return False, reason
+            
+        if stake <= 0:
+            return False, "Stake must be positive"
+            
+        return True, "OK"
+        
+    def get_active_trade_info(self):
+        """Return info about first active trade for monitoring (compatibility)"""
+        if not self.active_trades:
+            return None
+        # Return a dummy dict with contract_id of first trade
+        return {'contract_id': self.active_trades[0], 'symbol': 'MULTI', 'strategy': 'Scalping'}
+
+    def get_cooldown_remaining(self) -> int:
+        """Get remaining cooldown in seconds"""
+        if not self.last_trade_time:
+            return 0
+        
+        time_since_last = (datetime.now() - self.last_trade_time).total_seconds()
+        remaining = self.cooldown_seconds - time_since_last
+        return max(0, int(remaining))
+
+    def get_statistics(self) -> Dict:
+        """Get current statistics dicitonary"""
+        return {
+            'total_trades': self.daily_trade_count,
+            'daily_pnl': self.daily_pnl,
+            'win_rate': 0.0, # Not tracking wins separate from pnl yet in this simple view
+            'consecutive_losses': self.consecutive_losses
+        }
     
+    @property
+    def has_active_trade(self) -> bool:
+        """Property to check if there are active trades"""
+        return len(self.active_trades) > 0
+
     def record_trade_opened(self, trade_info: Dict) -> None:
         """
         Record that a new trade has been opened.
@@ -192,7 +259,10 @@ class ScalpingRiskManager(BaseRiskManager):
         # Remove from active trades
         if contract_id in self.active_trades:
             self.active_trades.remove(contract_id)
-        
+        elif isinstance(result, str): # Handle legacy case where just ID passed (rare)
+             if result in self.active_trades:
+                 self.active_trades.remove(result)
+
         # Update P&L
         self.daily_pnl += profit
         
