@@ -26,7 +26,7 @@ class BaseRiskManager(ABC):
         pass
     
     @abstractmethod
-    def record_trade_opened(self, trade_info: Dict) -> None:
+    def record_trade_open(self, trade_info: Dict) -> None:
         """
         Record that a new trade has been opened.
         Updates internal counters and state.

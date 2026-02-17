@@ -244,6 +244,16 @@ class ScalpingRiskManager(BaseRiskManager):
         logger.info(f"📈 Trade opened - Contract: {contract_id}, Daily count: {self.daily_trade_count}/{self.max_trades_per_day}")
         logger.info(f"📊 Active trades: {len(self.active_trades)}/{self.max_concurrent_trades}")
     
+    def record_trade_opened(self, trade_info: Dict) -> None:
+        """
+        Alias for record_trade_open to satisfy base class interface.
+        This method exists for compatibility with the abstract base class.
+        
+        Args:
+            trade_info: Dict containing trade details
+        """
+        self.record_trade_open(trade_info)
+    
     def record_trade_closed(self, result: Dict) -> None:
         """
         Record that a trade has been closed.

@@ -70,7 +70,7 @@ class ConservativeRiskManager(BaseRiskManager):
         """
         return self.risk_manager.can_open_trade(symbol, stake, take_profit, stop_loss, signal_dict)
     
-    def record_trade_opened(self, trade_info: Dict) -> None:
+    def record_trade_open(self, trade_info: Dict) -> None:
         """
         Record that a new trade has been opened.
         
