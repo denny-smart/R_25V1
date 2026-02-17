@@ -77,8 +77,12 @@ class ScalpingStrategy(BaseStrategy):
         # CHECK 2-4: RSI and ADX validation
         # =================================================================
         # Calculate indicators with fallback
-        rsi_1m = calculate_rsi(data_1m, period=14)
-        adx_1m = calculate_adx(data_1m, period=14)
+        rsi_series = calculate_rsi(data_1m, period=14)
+        adx_series = calculate_adx(data_1m, period=14)
+        
+        # Get latest values with safety check
+        rsi_1m = rsi_series.iloc[-1] if rsi_series is not None and not rsi_series.empty else None
+        adx_1m = adx_series.iloc[-1] if adx_series is not None and not adx_series.empty else None
         
         # Fallback on calculation failure
         if rsi_1m is None or np.isnan(rsi_1m):
