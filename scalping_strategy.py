@@ -44,11 +44,11 @@ class ScalpingStrategy(BaseStrategy):
         # Validate required data
         if not all([data_1h is not None, data_5m is not None, data_1m is not None]):
             logger.error("❌ Scalping: Missing required timeframe data (1h, 5m, 1m)")
-            return None
+            return {'can_trade': False, 'reason': 'Missing required timeframe data (1h, 5m, 1m)'}
         
         if len(data_1h) < 50 or len(data_5m) < 50 or len(data_1m) < 50:
             logger.error("❌ Scalping: Insufficient data (need at least 50 candles per timeframe)")
-            return None
+            return {'can_trade': False, 'reason': 'Insufficient data (need >50 candles)'}
         
         logger.info(f"\n{'='*60}\n[SCALPING] 🎯 Analysis: {symbol}\n{'='*60}")
         
@@ -64,11 +64,11 @@ class ScalpingStrategy(BaseStrategy):
         
         if trend_1h is None or trend_5m is None:
             logger.info("[SCALPING] ❌ CHECK 1 FAILED: Could not determine trend")
-            return None
+            return {'can_trade': False, 'reason': 'Could not determine trend'}
         
         if trend_1h != trend_5m:
             logger.info(f"[SCALPING] ❌ CHECK 1 FAILED: Trend mismatch - 1h: {trend_1h}, 5m: {trend_5m}")
-            return None
+            return {'can_trade': False, 'reason': f'Trend mismatch (1h: {trend_1h}, 5m: {trend_5m})'}
         
         direction = trend_1h
         logger.info(f"[SCALPING] ✅ CHECK 1 PASSED: Trend aligned - {direction}")
@@ -94,19 +94,19 @@ class ScalpingStrategy(BaseStrategy):
         # CHECK 2: ADX Threshold
         if adx_1m < scalping_config.SCALPING_ADX_THRESHOLD:
             logger.info(f"[SCALPING] ❌ CHECK 2 FAILED: ADX {adx_1m:.2f} < {scalping_config.SCALPING_ADX_THRESHOLD}")
-            return None
+            return {'can_trade': False, 'reason': f'Weak trend (ADX {adx_1m:.1f} < {scalping_config.SCALPING_ADX_THRESHOLD})'}
         logger.info(f"[SCALPING] ✅ CHECK 2 PASSED: ADX {adx_1m:.2f} >= {scalping_config.SCALPING_ADX_THRESHOLD}")
         
         # CHECK 3 & 4: RSI Range validation
         if direction == "BULLISH":
             if not (scalping_config.SCALPING_RSI_UP_MIN <= rsi_1m <= scalping_config.SCALPING_RSI_UP_MAX):
                 logger.info(f"[SCALPING] ❌ CHECK 3 FAILED: RSI {rsi_1m:.2f} not in UP range [{scalping_config.SCALPING_RSI_UP_MIN}-{scalping_config.SCALPING_RSI_UP_MAX}]")
-                return None
+                return {'can_trade': False, 'reason': f'RSI {rsi_1m:.1f} not in UP range'}
             logger.info(f"[SCALPING] ✅ CHECK 3 PASSED: RSI {rsi_1m:.2f} in UP range")
         else:  # BEARISH
             if not (scalping_config.SCALPING_RSI_DOWN_MIN <= rsi_1m <= scalping_config.SCALPING_RSI_DOWN_MAX):
                 logger.info(f"[SCALPING] ❌ CHECK 4 FAILED: RSI {rsi_1m:.2f} not in DOWN range [{scalping_config.SCALPING_RSI_DOWN_MIN}-{scalping_config.SCALPING_RSI_DOWN_MAX}]")
-                return None
+                return {'can_trade': False, 'reason': f'RSI {rsi_1m:.1f} not in DOWN range'}
             logger.info(f"[SCALPING] ✅ CHECK 4 PASSED: RSI {rsi_1m:.2f} in DOWN range")
         
         # =================================================================
@@ -124,7 +124,7 @@ class ScalpingStrategy(BaseStrategy):
         
         if price_change_pct > movement_threshold:
             logger.info(f"[SCALPING] ❌ CHECK 5 FAILED: Price moved {price_change_pct:.2f}% > threshold {movement_threshold:.2f}%")
-            return None
+            return {'can_trade': False, 'reason': f'Price movement too high ({price_change_pct:.2f}%)'}
         logger.info(f"[SCALPING] ✅ CHECK 5 PASSED: Price movement {price_change_pct:.2f}% <= {movement_threshold:.2f}%")
         
         # =================================================================
@@ -135,7 +135,7 @@ class ScalpingStrategy(BaseStrategy):
         
         if last_candle_size < momentum_threshold:
             logger.info(f"[SCALPING] ❌ CHECK 6 FAILED: Candle size {last_candle_size:.5f} < {momentum_threshold:.5f} ({scalping_config.SCALPING_MOMENTUM_THRESHOLD}x ATR)")
-            return None
+            return {'can_trade': False, 'reason': 'No momentum breakout'}
         logger.info(f"[SCALPING] ✅ CHECK 6 PASSED: Momentum breakout confirmed")
         
         # =================================================================
@@ -143,7 +143,7 @@ class ScalpingStrategy(BaseStrategy):
         # =================================================================
         if self._is_parabolic_spike(data_1m, atr_1m):
             logger.info("[SCALPING] ❌ CHECK 7 FAILED: Parabolic spike detected (3+ large candles)")
-            return None
+            return {'can_trade': False, 'reason': 'Parabolic spike detected'}
         logger.info("[SCALPING] ✅ CHECK 7 PASSED: No parabolic spike")
         
         # =================================================================
@@ -169,13 +169,13 @@ class ScalpingStrategy(BaseStrategy):
         
         if risk == 0:
             logger.info("[SCALPING] ❌ CHECK 9 FAILED: Risk is zero (invalid SL)")
-            return None
+            return {'can_trade': False, 'reason': 'Invalid Stop Loss (Risk=0)'}
         
         rr_ratio = reward / risk
         
         if rr_ratio < scalping_config.SCALPING_MIN_RR_RATIO:
             logger.info(f"[SCALPING] ❌ CHECK 9 FAILED: R:R {rr_ratio:.2f} < {scalping_config.SCALPING_MIN_RR_RATIO}")
-            return None
+            return {'can_trade': False, 'reason': f'Low R:R ({rr_ratio:.2f} < {scalping_config.SCALPING_MIN_RR_RATIO})'}
         logger.info(f"[SCALPING] ✅ CHECK 9 PASSED: R:R ratio {rr_ratio:.2f} >= {scalping_config.SCALPING_MIN_RR_RATIO}")
         
         # =================================================================
@@ -184,6 +184,7 @@ class ScalpingStrategy(BaseStrategy):
         signal_direction = "UP" if direction == "BULLISH" else "DOWN"
         
         signal = {
+            'can_trade': True,
             'signal': signal_direction,
             'symbol': symbol,
             'take_profit': tp_price,
