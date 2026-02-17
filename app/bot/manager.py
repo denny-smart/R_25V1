@@ -91,6 +91,7 @@ class BotManager:
             risk_manager_instance = risk_manager_class(user_id=user_id, overrides=overrides)
             
             logger.info(f"✅ Loaded strategy for {user_id}: {active_strategy}")
+            logger.info(f"📋 Strategy class: {strategy_class.__name__}, Risk Manager: {risk_manager_class.__name__}")
             
             # Create or get bot with injected instances
             bot = self.get_bot(user_id, strategy=strategy_instance, risk_manager=risk_manager_instance)

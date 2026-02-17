@@ -67,6 +67,11 @@ class TradingStrategy:
             }
         }
 
+        # DEBUG: Log strategy execution (helps identify unexpected calls)
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"[CONSERVATIVE] 🔍 TradingStrategy.analyze() called for symbol: {symbol}")
+ 
         # ---------------------------------------------------------
         # MANDATORY LOGGING HEADER (Simplified)
         # ---------------------------------------------------------
