@@ -17,29 +17,29 @@ CTrade trade;
 input double   FixedLotSize = 0.1;              // Lot Size
 input double   MaxRiskPercent = 1.0;            // Max Risk Per Trade (% of balance)
 input int      MaxTradesPerDay = 30;            // Maximum Trades Per Day
-input int      CooldownSeconds = 180;           // Cooldown Between Trades (seconds)
+input int      CooldownSeconds = 300;           // Cooldown Between Trades (seconds)
 
 //--- Strategy Parameters
 input int      RSI_Period = 14;                 // RSI Period
-input int      RSI_BuyThreshold = 58;           // RSI Buy Threshold
-input int      RSI_SellThreshold = 42;          // RSI Sell Threshold
-input int      RSI_MaxThreshold = 75;           // RSI Overbought Limit
-input int      RSI_MinThreshold = 25;           // RSI Oversold Limit
+input int      RSI_BuyThreshold = 20;           // RSI Buy Threshold (Very low for testing)
+input int      RSI_SellThreshold = 80;          // RSI Sell Threshold (Very high for testing)
+input int      RSI_MaxThreshold = 95;           // RSI Overbought Limit
+input int      RSI_MinThreshold = 5;            // RSI Oversold Limit
 
 input int      ADX_Period = 14;                 // ADX Period
-input int      ADX_Threshold = 25;              // Minimum ADX (Trend Strength)
+input int      ADX_Threshold = 0;               // Minimum ADX (DEBUG: 0)
 
 input int      ATR_Period = 14;                 // ATR Period
 input double   MomentumThreshold = 1.5;         // Momentum Close Threshold (x ATR)
 
 //--- TP/SL Settings
-input double   MinTPDistancePercent = 0.2;      // Minimum TP Distance (%)
-input double   MaxSLDistancePercent = 0.5;      // Maximum SL Distance (%)
-input double   MinRRRatio = 2.5;                // Minimum Risk:Reward Ratio
+input double   MinTPDistancePercent = 0.1;      // Minimum TP Distance (%) - Lowered for testing
+input double   MaxSLDistancePercent = 0.9;      // Maximum SL Distance (%)
+input double   MinRRRatio = 0.5;                // Minimum Risk:Reward Ratio - Relaxed for testing
 
 //--- Trailing Stop Settings (4-Tier System - Aligned with Python Config)
 input bool     EnableMultiTierTrailing = true;  // Enable Multi-Tier Trailing Stop
-input double   TrailTrigger1 = 25.0;            // Tier 1: Trigger at % Profit
+input double   TrailTrigger1 = 30.0;            // Tier 1: Trigger at % Profit
 input double   TrailStop1 = 8.0;                // Tier 1: Trail % Behind
 input double   TrailTrigger2 = 40.0;            // Tier 2: Trigger at % Profit
 input double   TrailStop2 = 12.0;               // Tier 2: Trail % Behind
@@ -49,13 +49,13 @@ input double   TrailTrigger4 = 100.0;           // Tier 4: Trigger at % Profit
 input double   TrailStop4 = 25.0;               // Tier 4: Trail % Behind
 
 //--- Swing Detection
-input int      SwingLookback = 20;              // Candles for Swing Detection
-input int      MinSwingWindow = 5;              // Minimum Window for Swing Points
+input int      SwingLookback = 30;              // Candles for Swing Detection (Increased)
+input int      MinSwingWindow = 3;              // Minimum Window for Swing Points (Relaxed)
 
 //--- Stagnation Exit Settings (Aligned with Python Config)
 input bool     EnableStagnationExit = true;     // Enable Stagnation Exit
-input int      StagnationExitTime = 600;        // Stagnation Exit Time (seconds)
-input double   StagnationLossPct = 10.0;        // Stagnation Exit at % Loss
+input int      StagnationExitTime = 720;        // Stagnation Exit Time (seconds) - 12 mins
+input double   StagnationLossPct = 15.0;        // Stagnation Exit at % Loss (of balance)
 
 //+------------------------------------------------------------------+
 //| Global Variables                                                 |
@@ -94,7 +94,7 @@ int OnInit()
    //--- Set trade settings
    trade.SetExpertMagicNumber(123456);
    trade.SetDeviationInPoints(10);
-   trade.SetTypeFilling(ORDER_FILLING_FOK);
+   trade.SetTypeFilling(ORDER_FILLING_IOC);  // Use IOC filling (widely supported)
    
    //--- Initialize date tracking
    currentDate = TimeCurrent();
@@ -127,6 +127,8 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTick()
 {
+   // Print("DEBUG: OnTick Fired"); // Confirm EA is alive
+   
    //--- Check for new day (reset daily stats)
    ResetDailyStatsIfNewDay();
    
@@ -138,17 +140,22 @@ void OnTick()
    }
    
    //--- Check if new bar formed on M5 (avoid multiple signals per bar)
-   static datetime lastBar = 0;
-   datetime currentBar = iTime(_Symbol, PERIOD_M5, 0);
+   // static datetime lastBar = 0;
+   // datetime currentBar = iTime(_Symbol, PERIOD_M5, 0);
    
-   if(currentBar == lastBar)
-      return;
+   // if(currentBar == lastBar)
+   //    return;
       
-   lastBar = currentBar;
+   // lastBar = currentBar;
    
    //--- Check if we can trade
    if(!CanTrade())
+   {
+      // Print("DEBUG: CanTrade returned FALSE");
       return;
+   }
+   
+   Print("DEBUG: Calling TopDownAnalysis..."); // If we see this, logic is reaching here
    
    //--- Analyze market using Top-Down approach
    string signal = TopDownAnalysis();
@@ -192,6 +199,8 @@ void ResetDailyStatsIfNewDay()
 //+------------------------------------------------------------------+
 bool CanTrade()
 {
+   return true; // DEBUG FORCE TRUE
+   
    //--- Check if position already open
    if(PositionsTotal() > 0)
       return false;
@@ -228,35 +237,43 @@ bool CanTrade()
 //+------------------------------------------------------------------+
 string TopDownAnalysis()
 {
+   Print("🔍 Analyzing Market...");
+   
    //--- Phase 1: Directional Bias (Weekly + Daily)
    string weeklyTrend = DetermineTrend(PERIOD_W1);
    string dailyTrend = DetermineTrend(PERIOD_D1);
    
-   string bias = "";
+   Print("   Trend Check: W1=", weeklyTrend, " | D1=", dailyTrend);
    
+   //--- Get RSI for NEUTRAL market direction
+   double rsiArray[];
+   ArraySetAsSeries(rsiArray, true);
+   CopyBuffer(handleRSI_5M, 0, 0, 3, rsiArray);
+   double rsi = rsiArray[0];
+   
+   string bias = "NONE";
+   
+   //--- Determine bias based on trend alignment
    if(weeklyTrend == "BULLISH" && dailyTrend == "BULLISH")
-   {
       bias = "BULLISH";
-   }
    else if(weeklyTrend == "BEARISH" && dailyTrend == "BEARISH")
-   {
       bias = "BEARISH";
+   else if(weeklyTrend == "NEUTRAL" || dailyTrend == "NEUTRAL")
+   {
+      // In NEUTRAL markets, use RSI to determine direction
+      bias = (rsi > 50) ? "BULLISH" : "BEARISH";
+      Print("   📊 NEUTRAL Market Detected - Using RSI Bias: ", bias, " (RSI:", DoubleToString(rsi, 1), ")");
    }
    else
    {
-      // Trend conflict - no trade
+      Print("   ⚠️ Trend Conflict: W1=", weeklyTrend, " | D1=", dailyTrend);
       return "NONE";
    }
    
-   //--- Get indicator values
-   double rsiArray[], adxArray[];
-   ArraySetAsSeries(rsiArray, true);
+   //--- Get ADX for trend strength check
+   double adxArray[];
    ArraySetAsSeries(adxArray, true);
-   
-   CopyBuffer(handleRSI_5M, 0, 0, 3, rsiArray);
    CopyBuffer(handleADX_5M, 0, 0, 3, adxArray);
-   
-   double rsi = rsiArray[0];
    double adx = adxArray[0];
    
    //--- ADX Filter (Trend Strength)
@@ -521,31 +538,64 @@ double FindNearestSupport(double currentPrice)
 //+------------------------------------------------------------------+
 double CalculateLotSize(double slDistancePercent)
 {
+   // Get broker limits first
+   double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double maxLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   double lotStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   
+   // Validate broker limits
+   if(minLot <= 0 || maxLot <= 0 || lotStep <= 0)
+   {
+      Print("⚠️ Invalid broker lot settings, using FixedLotSize: ", FixedLotSize);
+      return NormalizeDouble(FixedLotSize, 2);
+   }
+   
    double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+   if(balance <= 0)
+   {
+      Print("⚠️ Invalid balance, using FixedLotSize: ", FixedLotSize);
+      return NormalizeDouble(FixedLotSize, 2);
+   }
+   
    double riskAmount = balance * (MaxRiskPercent / 100.0);
    
    double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
    double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   
+   if(tickValue <= 0 || tickSize <= 0 || slDistancePercent <= 0)
+   {
+      Print("⚠️ Invalid tick/SL values, using FixedLotSize: ", FixedLotSize);
+      return NormalizeDouble(FixedLotSize, 2);
+   }
    
    // Calculate SL in points
    double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double slDistance = currentPrice * (slDistancePercent / 100.0);
    double slPoints = slDistance / tickSize;
    
-   // Calculate lot size
+   if(slPoints <= 0)
+   {
+      Print("⚠️ Invalid SL points, using FixedLotSize: ", FixedLotSize);
+      return NormalizeDouble(FixedLotSize, 2);
+   }
+   
+   // Calculate lot size based on risk
    double lotSize = riskAmount / (slPoints * tickValue);
    
    // Normalize to broker limits
-   double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-   double maxLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
-   double lotStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-   
    lotSize = MathMax(minLot, MathMin(lotSize, maxLot));
    lotSize = MathFloor(lotSize / lotStep) * lotStep;
    
-   // Fallback to fixed lot if calculation fails
-   if(lotSize < minLot)
+   // Final validation - use FixedLotSize if still invalid
+   if(lotSize < minLot || lotSize > maxLot || lotSize <= 0)
+   {
+      Print("⚠️ Calculated lot size invalid (", DoubleToString(lotSize, 2), "), using FixedLotSize: ", FixedLotSize);
       lotSize = FixedLotSize;
+      
+      // Ensure FixedLotSize is within limits
+      lotSize = MathMax(minLot, MathMin(lotSize, maxLot));
+      lotSize = MathFloor(lotSize / lotStep) * lotStep;
+   }
    
    return NormalizeDouble(lotSize, 2);
 }
@@ -596,15 +646,13 @@ bool CheckStagnationExit(ulong ticket, double currentPrice, double currentProfit
    if(currentProfit >= 0)
       return false; // Not in loss
    
-   // Calculate loss as % of stake (position value)
-   double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
-   double volume = PositionGetDouble(POSITION_VOLUME);
-   double stake = openPrice * volume; // Approximate stake
+   // Calculate loss as % of account balance (more meaningful metric)
+   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
    
-   if(stake == 0)
+   if(balance <= 0)
       return false;
    
-   double lossPercent = MathAbs(currentProfit) / stake * 100.0;
+   double lossPercent = MathAbs(currentProfit) / balance * 100.0;
    
    if(lossPercent >= StagnationLossPct)
    {
@@ -752,3 +800,4 @@ void OnTrade()
    }
 }
 //+------------------------------------------------------------------+
+

@@ -112,6 +112,15 @@ async def get_bot_status(current_user: dict = Depends(get_current_active_user)):
     """
     status = bot_manager.get_status(current_user['id'])
     
+    # Add active_strategy and effective_limits if bot is running
+    bot = bot_manager._bots.get(current_user['id'])
+    if bot and bot.strategy and bot.risk_manager:
+        status["active_strategy"] = bot.strategy.get_strategy_name()
+        status["effective_limits"] = bot.risk_manager.get_current_limits()
+    else:
+        status["active_strategy"] = None
+        status["effective_limits"] = {}
+    
     # Add user info to response
     status["viewed_by"] = current_user["email"]
     status["timestamp"] = datetime.now().isoformat()

@@ -15,37 +15,86 @@ class BotManager:
         # Map user_id -> BotRunner
         self._bots: Dict[str, BotRunner] = {}
         self._lock = asyncio.Lock()
+        self._user_locks: Dict[str, asyncio.Lock] = {}  # NEW: Per-user locks
         self.max_concurrent_bots = max_concurrent_bots
         
-    def get_bot(self, user_id: str) -> BotRunner:
+    def _get_user_lock(self, user_id: str) -> asyncio.Lock:
+        """Get or create a lock for a specific user (for concurrent start protection)"""
+        if user_id not in self._user_locks:
+            self._user_locks[user_id] = asyncio.Lock()
+        return self._user_locks[user_id]
+    
+    def get_bot(self, user_id: str, strategy = None, risk_manager = None) -> BotRunner:
         """
         Get or create a bot instance for the user.
+        If strategy/risk_manager are provided, creates new bot with these instances.
         """
         if user_id not in self._bots:
             logger.info(f"Initializing new bot instance for user {user_id}")
-            self._bots[user_id] = BotRunner(account_id=user_id)
+            self._bots[user_id] = BotRunner(
+                account_id=user_id,
+                strategy=strategy,
+                risk_manager=risk_manager
+            )
             
         return self._bots[user_id]
 
     async def start_bot(self, user_id: str, api_token: Optional[str] = None, stake: Optional[float] = None, strategy_name: Optional[str] = None) -> dict:
         """
-        Start a bot for a specific user.
+        Start a bot for a specific user with strategy selection support.
         If api_token is provided, it updates the bot's token.
+        If strategy_name is provided, it overrides the user's profile strategy.
         """
-        async with self._lock:
-            # Check concurrent bot limit
-            running_count = sum(1 for bot in self._bots.values() if bot.is_running)
+        # Per-user lock to prevent concurrent start requests
+        user_lock = self._get_user_lock(user_id)
+        async with user_lock:
+            # Check if already running with a different strategy
+            if user_id in self._bots and self._bots[user_id].is_running:
+                current_strategy = self._bots[user_id].strategy.get_strategy_name()
+                requested_strategy = strategy_name or await self._get_user_strategy(user_id)
+                
+                if current_strategy != requested_strategy:
+                    logger.info(f"Strategy switch detected for {user_id}: {current_strategy} -> {requested_strategy}")
+                    logger.info(f"Stopping old bot to restart with new strategy...")
+                    await self._bots[user_id].stop_bot()
+                    del self._bots[user_id]
+                else:
+                    return {
+                        "success": False,
+                        "message": "Bot is already running",
+                        "status": self._bots[user_id].status.value
+                    }
             
-            # Allow if bot already exists for this user or under limit
-            if user_id not in self._bots and running_count >= self.max_concurrent_bots:
-                return {
-                    "success": False,
-                    "message": f"Maximum concurrent bots reached ({self.max_concurrent_bots}). Please try again later.",
-                    "status": "error"
-                }
-        
-        bot = self.get_bot(user_id)
-        return await bot.start_bot(api_token=api_token, stake=stake, strategy_name=strategy_name)
+            # Global concurrent bot limit check
+            async with self._lock:
+                running_count = sum(1 for bot in self._bots.values() if bot.is_running)
+                
+                if user_id not in self._bots and running_count >= self.max_concurrent_bots:
+                    return {
+                        "success": False,
+                        "message": f"Maximum concurrent bots reached ({self.max_concurrent_bots}). Please try again later.",
+                        "status": "error"
+                    }
+            
+            # Load strategy from user profile or use provided
+            active_strategy = strategy_name or await self._get_user_strategy(user_id)
+            
+            # Load strategy classes from registry
+            from strategy_registry import get_strategy
+            strategy_class, risk_manager_class = get_strategy(active_strategy)
+            
+            # Load user-specific overrides
+            overrides = await self._load_strategy_overrides(user_id, active_strategy)
+            
+            # Instantiate strategy and risk manager
+            strategy_instance = strategy_class()
+            risk_manager_instance = risk_manager_class(user_id=user_id, overrides=overrides)
+            
+            logger.info(f"✅ Loaded strategy for {user_id}: {active_strategy}")
+            
+            # Create or get bot with injected instances
+            bot = self.get_bot(user_id, strategy=strategy_instance, risk_manager=risk_manager_instance)
+            return await bot.start_bot(api_token=api_token, stake=stake, strategy_name=active_strategy)
 
     async def stop_bot(self, user_id: str) -> dict:
         """
@@ -123,6 +172,67 @@ class BotManager:
             
             if to_remove:
                 logger.info(f"Cleaned up {len(to_remove)} inactive bot instances")
+                # Clean up user locks too
+                for user_id in to_remove:
+                    if user_id in self._user_locks:
+                        del self._user_locks[user_id]
+    
+    async def _get_user_strategy(self, user_id: str) -> str:
+        """
+        Get the user's active strategy from their profile.
+        
+        Args:
+            user_id: User identifier
+        
+        Returns:
+            Strategy name (defaults to 'Conservative' if not set)
+        """
+        try:
+            from app.core.supabase import supabase
+            
+            result = supabase.table('profiles') \
+                .select('active_strategy') \
+                .eq('id', user_id) \
+                .single() \
+                .execute()
+            
+            if result.data:
+                return result.data.get('active_strategy', 'Conservative')
+            
+            return 'Conservative'
+        
+        except Exception as e:
+            logger.warning(f"Failed to load user strategy for {user_id}: {e}")
+            return 'Conservative'
+    
+    async def _load_strategy_overrides(self, user_id: str, strategy_name: str) -> dict:
+        """
+        Load user-specific strategy parameter overrides from database.
+        
+        Args:
+            user_id: User identifier
+            strategy_name: Strategy name
+        
+        Returns:
+            Dict of overrides (empty dict if none found)
+        """
+        try:
+            from app.core.supabase import supabase
+            
+            result = supabase.table('strategy_configs') \
+                .select('*') \
+                .eq('user_id', user_id) \
+                .eq('strategy_type', strategy_name) \
+                .execute()
+            
+            if result.data:
+                return result.data[0]
+            
+            return {}
+        
+        except Exception as e:
+            logger.warning(f"Failed to load strategy overrides for {user_id}: {e}")
+            return {}
         
     async def stop_all(self):
         """
