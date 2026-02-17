@@ -84,7 +84,7 @@ class TradingStrategy:
         if data_1w is None or data_1w.empty: missing_dfs.append("1w")
         
         if missing_dfs:
-            print(f"[TOP-DOWN] ❌ Data Missing: {', '.join(missing_dfs)}")
+            print(f"[CONSERVATIVE] ❌ Data Missing: {', '.join(missing_dfs)}")
             response["details"]["reason"] = "Insufficient data across timeframes"
             return response
             
@@ -107,7 +107,7 @@ class TradingStrategy:
 
         # ADX Filter (Trend Strength)
         if adx_val < config.ADX_THRESHOLD:
-            print(f"[TOP-DOWN] ⚠️ Trend Weak: ADX {adx_val:.1f} < {config.ADX_THRESHOLD}")
+            print(f"[CONSERVATIVE] ⚠️ Trend Weak: ADX {adx_val:.1f} < {config.ADX_THRESHOLD}")
             response["details"]["reason"] = f"Trend too weak (ADX {adx_val:.1f} < {config.ADX_THRESHOLD})"
             response["details"]["adx"] = round(adx_val, 2)
             response["details"]["rsi"] = round(rsi_val, 2)
@@ -125,7 +125,7 @@ class TradingStrategy:
         
         # Reject parabolic spikes immediately (buying tops/selling bottoms)
         if is_parabolic:
-            print(f"[TOP-DOWN] ❌ Parabolic Spike Detected - Late Entry Rejected")
+            print(f"[CONSERVATIVE] ❌ Parabolic Spike Detected - Late Entry Rejected")
             response["details"]["reason"] = "Parabolic spike detected - entry too late"
             response["details"]["movement_pct"] = round(movement_pct, 2)
             response["details"]["is_parabolic"] = True
@@ -144,15 +144,15 @@ class TradingStrategy:
             print(f"[DEBUG] Extracted threshold: {asset_threshold}")
             if asset_threshold:
                 max_movement = asset_threshold
-                print(f"[TOP-DOWN] ✓ Using {symbol}-specific threshold: {max_movement}%")
+                print(f"[CONSERVATIVE] ✓ Using {symbol}-specific threshold: {max_movement}%")
             else:
-                print(f"[TOP-DOWN] ⚠️ No threshold found for {symbol}, using global {max_movement}%")
+                print(f"[CONSERVATIVE] ⚠️ No threshold found for {symbol}, using global {max_movement}%")
         else:
-            print(f"[TOP-DOWN] ⚠️ Using global threshold (symbol={symbol}, hasattr={hasattr(config, 'ASSET_CONFIG')})")
+            print(f"[CONSERVATIVE] ⚠️ Using global threshold (symbol={symbol}, hasattr={hasattr(config, 'ASSET_CONFIG')})")
         
         # Reject if price already moved significantly
         if abs(movement_pct) > max_movement:
-            print(f"[TOP-DOWN] ❌ Price Moved {abs(movement_pct):.2f}% - Late Entry Rejected")
+            print(f"[CONSERVATIVE] ❌ Price Moved {abs(movement_pct):.2f}% - Late Entry Rejected")
             response["details"]["reason"] = f"Price already moved {abs(movement_pct):.2f}% - late entry rejected (max {max_movement}%)"
             response["details"]["movement_pct"] = round(movement_pct, 2)
             return response
@@ -240,7 +240,7 @@ class TradingStrategy:
             passed_checks.append("RSI Momentum (DOWN)")
             
         else:
-            print(f"[TOP-DOWN] ⚠️ Trend Conflict: W:{weekly_trend} | D:{daily_trend}")
+            print(f"[CONSERVATIVE] ⚠️ Trend Conflict: W:{weekly_trend} | D:{daily_trend}")
             response["details"]["reason"] = f"Trend Conflict - Weekly: {weekly_trend}, Daily: {daily_trend}"
             return response
         
@@ -261,7 +261,7 @@ class TradingStrategy:
         )
 
         if not target_level:
-            print("[TOP-DOWN] ⚠️ No Target Found")
+            print("[CONSERVATIVE] ⚠️ No Target Found")
             # response["details"]["reason"] = "No clear Structure Level found for Target"
             # return response
             # Note: Previously this returned early. 
@@ -270,7 +270,7 @@ class TradingStrategy:
             return response
             
         if not sl_level:
-            print("[TOP-DOWN] ⚠️ No Stop Loss Found")
+            print("[CONSERVATIVE] ⚠️ No Stop Loss Found")
             response["details"]["reason"] = "No clear Structure Swing Point found for Stop Loss"
             return response
 
@@ -336,7 +336,7 @@ class TradingStrategy:
                 response["details"]["reason"] = entry_reason
             return response
             
-        print("[TOP-DOWN] ✅ Momentum Breakout Confirmed")
+        print("[CONSERVATIVE] ✅ Momentum Breakout Confirmed")
         passed_checks.append("Momentum Breakout Confirmed")
         
         # Document middle zone override if applicable
