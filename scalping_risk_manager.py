@@ -311,6 +311,55 @@ class ScalpingRiskManager(BaseRiskManager):
             'recent_trade_count': len(self.recent_trade_timestamps),
         }
     
+    def should_close_trade(self, contract_id: str, current_pnl: float, 
+                          current_price: float = None, previous_price: float = None) -> Dict:
+        """
+        Check if a scalping trade should be closed manually.
+        
+        Args:
+            contract_id: Contract ID to identify which trade to check
+            current_pnl: Current profit/loss
+            current_price: Current spot price (optional, for future use)
+            previous_price: Previous spot price (optional, for future use)
+        
+        Returns:
+            Dict with should_close flag and reason
+        """
+        # Find the specific trade by contract_id
+        active_trade = None
+        for i, contract in enumerate(self.active_trades):
+            if contract == contract_id:
+                # We're storing just contract IDs, need to get trade info differently
+                # For now, we'll work with limited info
+                active_trade = {'contract_id': contract_id, 'index': i}
+                break
+        
+        if not active_trade:
+            return {'should_close': False, 'reason': 'Trade not found in active trades'}
+        
+        # Check stagnation exit if enabled
+        # Note: For full stagnation checking, we'd need to track trade open_time
+        # For now, we'll use a simplified check based on configuration
+        if hasattr(scalping_config, 'SCALPING_STAGNATION_EXIT_TIME'):
+            # This would require us to track trade metadata, which we'll add later
+            pass
+        
+        # Check emergency daily loss protection
+        potential_daily_loss = self.daily_pnl + current_pnl
+        max_daily_loss = self.daily_loss_multiplier * self.stake
+        
+        if potential_daily_loss <= -(max_daily_loss * 0.9):
+            return {
+                'should_close': True,
+                'reason': 'emergency_daily_loss',
+                'message': f'Emergency: Daily loss approaching limit (${potential_daily_loss:.2f})',
+                'current_pnl': current_pnl
+            }
+        
+        # No exit conditions met
+        return {'should_close': False, 'reason': 'monitor_active'}
+    
+    
     def check_stagnation_exit(self, trade_info: Dict, current_pnl: float) -> Tuple[bool, str]:
         """
         Check if a trade should be closed due to stagnation.

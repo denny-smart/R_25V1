@@ -194,10 +194,13 @@ class ScalpingStrategy(BaseStrategy):
             'take_profit': tp_price,
             'stop_loss': sl_price,
             'risk_reward_ratio': rr_ratio,
+            'score': 7.0,  # Signal strength score for notifications
             'confidence': 7.0,  # Scalping has moderate confidence
             'entry_price': current_price,
             'details': {
-                'reason': f"Scalping signal - {direction} trend, RSI {rsi_1m:.1f}, ADX {adx_1m:.1f}, R:R {rr_ratio:.2f}"
+                'reason': f"Scalping signal - {direction} trend, RSI {rsi_1m:.1f}, ADX {adx_1m:.1f}, R:R {rr_ratio:.2f}",
+                'rsi': rsi_1m,  # Add RSI to details for notification
+                'adx': adx_1m   # Add ADX to details for notification
             }
         }
         
