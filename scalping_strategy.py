@@ -206,7 +206,7 @@ class ScalpingStrategy(BaseStrategy):
     
     def _determine_trend(self, df: pd.DataFrame, timeframe_name: str) -> Optional[str]:
         """
-        Determine trend based on swing highs/lows.
+        Determine trend based on EMA logic (EMA 9 vs EMA 21).
         
         Args:
             df: DataFrame with OHLC data
@@ -215,29 +215,47 @@ class ScalpingStrategy(BaseStrategy):
         Returns:
             'BULLISH', 'BEARISH', or None
         """
-        if len(df) < 30:
+        if len(df) < 25:
             return None
         
-        # Get swing points
-        highs = df['high'].rolling(window=5, center=True).max()
-        lows = df['low'].rolling(window=5, center=True).min()
+        # Calculate EMAs
+        ema_fast = self._calculate_ema(df, 9)
+        ema_slow = self._calculate_ema(df, 21)
         
-        # Get recent swing points
-        recent_highs = highs.iloc[-20:].dropna()
-        recent_lows = lows.iloc[-20:].dropna()
-        
-        if len(recent_highs) < 2 or len(recent_lows) < 2:
+        if ema_fast is None or ema_slow is None:
             return None
+            
+        current_fast = ema_fast.iloc[-1]
+        current_slow = ema_slow.iloc[-1]
+        prev_fast = ema_fast.iloc[-2]
+        prev_slow = ema_slow.iloc[-2]
         
-        # Check for higher highs and higher lows (bullish)
-        if recent_highs.iloc[-1] > recent_highs.iloc[-2] and recent_lows.iloc[-1] > recent_lows.iloc[-2]:
+        # Bullish: Fast EMA > Slow EMA
+        if current_fast > current_slow:
+            # Strength check: separation increasing or maintaining?
+            # Optional: Add ADX check here, but we do that separately
             return "BULLISH"
         
-        # Check for lower highs and lower lows (bearish)
-        if recent_highs.iloc[-1] < recent_highs.iloc[-2] and recent_lows.iloc[-1] < recent_lows.iloc[-2]:
+        # Bearish: Fast EMA < Slow EMA
+        if current_fast < current_slow:
             return "BEARISH"
         
         return None
+
+    def _calculate_ema(self, df: pd.DataFrame, period: int) -> Optional[pd.Series]:
+        """
+        Calculate Exponential Moving Average.
+        
+        Args:
+            df: DataFrame with 'close' column
+            period: EMA period
+            
+        Returns:
+            pd.Series containing EMA values
+        """
+        if len(df) < period:
+            return None
+        return df['close'].ewm(span=period, adjust=False).mean()
     
     def _calculate_atr(self, df: pd.DataFrame, period: int = 14) -> float:
         """
