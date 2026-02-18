@@ -94,18 +94,24 @@ async def _fetch_user_config() -> dict:
     return result_config
 
 
-async def run(stake: Optional[float] = None, api_token: Optional[str] = None):
+async def run(stake: Optional[float] = None, api_token: Optional[str] = None,
+              user_id: Optional[str] = None):
     """
     Main Rise/Fall bot entry point.
     
     Args:
         stake: User stake amount. If None, fetches from Supabase profiles table.
         api_token: Deriv API token. If None, fetches from Supabase profiles table.
+        user_id: User ID for event broadcasting and DB persistence.
     
     - Creates its own DataFetcher (reuses the class, own WS connection)
     - Creates its own RFTradeEngine (independent WS connection)
     - Loops: fetch 1m candles → analyse → risk check → execute
     """
+    # Lazy import to avoid circular imports at module level
+    from app.bot.events import event_manager
+    from app.services.trades_service import UserTradesService
+
     logger.info("=" * 60)
     logger.info("🚀 Rise/Fall Scalping Bot Starting")
     logger.info("=" * 60)
@@ -146,6 +152,15 @@ async def run(stake: Optional[float] = None, api_token: Optional[str] = None):
     _running = True
     cycle = 0
 
+    # Broadcast bot_status → running
+    await event_manager.broadcast({
+        "type": "bot_status",
+        "status": "running",
+        "message": f"Rise/Fall bot started – scanning {len(rf_config.RF_SYMBOLS)} symbols",
+        "symbols": rf_config.RF_SYMBOLS,
+        "account_id": user_id,
+    })
+
     try:
         while _running:
             cycle += 1
@@ -158,7 +173,9 @@ async def run(stake: Optional[float] = None, api_token: Optional[str] = None):
             for symbol in rf_config.RF_SYMBOLS:
                 try:
                     await _process_symbol(
-                        symbol, strategy, risk_manager, data_fetcher, trade_engine, stake
+                        symbol, strategy, risk_manager, data_fetcher,
+                        trade_engine, stake, user_id, event_manager,
+                        UserTradesService,
                     )
                 except Exception as e:
                     logger.error(f"[RF][{symbol}] ❌ Error: {e}")
@@ -172,17 +189,39 @@ async def run(stake: Optional[float] = None, api_token: Optional[str] = None):
                 f"pnl={stats['total_pnl']:+.2f}"
             )
 
+            # Broadcast statistics after each cycle
+            await event_manager.broadcast({
+                "type": "statistics",
+                "stats": stats,
+                "timestamp": datetime.now().isoformat(),
+                "account_id": user_id,
+            })
+
             await asyncio.sleep(rf_config.RF_SCAN_INTERVAL)
 
     except asyncio.CancelledError:
         logger.info("🛑 Rise/Fall bot cancelled")
     except Exception as e:
         logger.error(f"❌ Rise/Fall bot fatal error: {e}")
+        await event_manager.broadcast({
+            "type": "error",
+            "message": f"Rise/Fall fatal error: {e}",
+            "timestamp": datetime.now().isoformat(),
+            "account_id": user_id,
+        })
     finally:
         _running = False
         await data_fetcher.disconnect()
         await trade_engine.disconnect()
         logger.info("🛑 Rise/Fall bot stopped")
+
+        # Broadcast bot_status → stopped
+        await event_manager.broadcast({
+            "type": "bot_status",
+            "status": "stopped",
+            "message": "Rise/Fall bot stopped",
+            "account_id": user_id,
+        })
 
 
 def stop():
@@ -199,9 +238,13 @@ async def _process_symbol(
     data_fetcher: DataFetcher,
     trade_engine: RFTradeEngine,
     stake: float,
+    user_id: Optional[str],
+    event_manager,
+    UserTradesService,
 ):
     """
     Process one symbol: fetch data → analyse → risk check → trade.
+    Now also broadcasts events and persists trades to DB.
     """
     # 1. Risk gate (per-symbol)
     can_trade, reason = risk_manager.can_trade(symbol=symbol)
@@ -222,16 +265,28 @@ async def _process_symbol(
     if signal is None:
         return  # No triple-confirmation — already logged by strategy
 
-    # 4. Execute trade
+    # 4. Broadcast signal event
+    timestamp = datetime.now().isoformat()
     direction = signal["direction"]
-    stake = signal["stake"]
+
+    await event_manager.broadcast({
+        "type": "signal",
+        "symbol": symbol,
+        "signal": direction,
+        "strategy": "RiseFall",
+        "timestamp": timestamp,
+        "account_id": user_id,
+    })
+
+    # 5. Execute trade
+    stake_val = signal["stake"]
     duration = signal["duration"]
     duration_unit = signal["duration_unit"]
 
     result = await trade_engine.buy_rise_fall(
         symbol=symbol,
         direction=direction,
-        stake=stake,
+        stake=stake_val,
         duration=duration,
         duration_unit=duration_unit,
     )
@@ -242,30 +297,92 @@ async def _process_symbol(
 
     contract_id = result["contract_id"]
 
-    # 5. Record trade open
+    # 6. Record trade open
     risk_manager.record_trade_open({
         "contract_id": contract_id,
         "symbol": symbol,
         "direction": direction,
-        "stake": stake,
+        "stake": stake_val,
     })
 
-    # 6. Wait for contract settlement (async — blocks only this symbol)
-    settlement = await trade_engine.wait_for_result(contract_id)
+    # Broadcast trade_opened event
+    await event_manager.broadcast({
+        "type": "trade_opened",
+        "symbol": symbol,
+        "direction": direction,
+        "stake": stake_val,
+        "contract_id": contract_id,
+        "strategy": "RiseFall",
+        "timestamp": datetime.now().isoformat(),
+        "account_id": user_id,
+    })
+
+    # 7. Wait for contract settlement (async — blocks only this symbol)
+    settlement = await trade_engine.wait_for_result(contract_id, stake=stake_val)
 
     if settlement:
+        pnl = settlement["profit"]
+        status = settlement["status"]
         risk_manager.record_trade_closed({
             "contract_id": contract_id,
-            "profit": settlement["profit"],
-            "status": settlement["status"],
+            "profit": pnl,
+            "status": status,
             "symbol": symbol,
         })
     else:
         # Settlement unknown — conservatively mark as loss
         logger.warning(f"[RF][{symbol}] ⚠️ Settlement unknown for #{contract_id}")
+        pnl = -stake_val
+        status = "loss"
         risk_manager.record_trade_closed({
             "contract_id": contract_id,
-            "profit": -stake,
-            "status": "loss",
+            "profit": pnl,
+            "status": status,
             "symbol": symbol,
         })
+
+    # 8. Broadcast trade_closed + notification events
+    await event_manager.broadcast({
+        "type": "trade_closed",
+        "symbol": symbol,
+        "contract_id": contract_id,
+        "pnl": pnl,
+        "status": status,
+        "strategy": "RiseFall",
+        "timestamp": datetime.now().isoformat(),
+        "account_id": user_id,
+    })
+
+    notification_type = "success" if pnl > 0 else "error" if pnl < 0 else "info"
+    await event_manager.broadcast({
+        "type": "notification",
+        "level": notification_type,
+        "title": f"RF Trade {status.title()}",
+        "message": f"{symbol} Rise/Fall trade closed. P&L: ${pnl:.2f}",
+        "timestamp": datetime.now().isoformat(),
+        "account_id": user_id,
+    })
+
+    # 9. Persist trade to Supabase (same pattern as multiplier bot)
+    if user_id:
+        try:
+            trade_record = {
+                "contract_id": contract_id,
+                "symbol": symbol,
+                "signal": direction,          # CALL or PUT
+                "stake": stake_val,
+                "profit": pnl,
+                "status": status,
+                "duration": f"{duration}{duration_unit}",
+                "strategy_type": "RiseFall",
+                "timestamp": datetime.now().isoformat(),
+                "entry_price": result.get("buy_price"),
+                "exit_price": settlement.get("sell_price") if settlement else None,
+            }
+            saved = UserTradesService.save_trade(user_id, trade_record)
+            if saved:
+                logger.info(f"[RF] ✅ Trade persisted to DB: {contract_id}")
+            else:
+                logger.error(f"[RF] ❌ DB persistence failed for contract {contract_id}")
+        except Exception as e:
+            logger.error(f"[RF] ❌ DB save error for {contract_id}: {e}")

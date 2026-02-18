@@ -55,47 +55,56 @@ async def get_performance(
 @router.get("/logs")
 async def get_recent_logs(
     lines: int = Query(100, ge=1, le=1000),
-    current_user: dict = Depends(get_current_active_user)  # ← ADD AUTH
+    current_user: dict = Depends(get_current_active_user)
 ):
-    """Get recent log entries"""
+    """Get recent log entries from both multiplier and Rise/Fall logs"""
     try:
-        log_file = "trading_bot.log"
-        if not os.path.exists(log_file):
-            return {"logs": []}
-        
-        # Read and filter logs
-        filtered_logs = []
         user_id = current_user['id']
-        
-        with open(log_file, 'r', encoding='utf-8') as f:
-            # Read from end efficiently (simplification: read all for now as logs aren't huge yet)
-            # For production, utilize seek/tell or unix 'tail' equivalent
-            all_lines = f.readlines()
-            
-            for line in reversed(all_lines):
-                # Stop if we have enough
-                if len(filtered_logs) >= lines:
-                    break
-                    
-                # Filter logic:
-                # 1. System logs: "[None]"
-                # 2. User logs: "[{user_id}]"
-                # 3. Allow legacy logs (no bracketed ID) if strict_mode is False (optional)
-                
-                if f"[{user_id}]" in line or "[None]" in line:
-                    filtered_logs.append(line.strip())
-                # If neither, it belongs to another user -> Skip
-        
-        # Reverse back to chronological order
-        filtered_logs.reverse()
-            
+        filtered_logs = []
+        total_lines = 0
+
+        # --- 1. Read multiplier bot logs ---
+        log_file = "trading_bot.log"
+        if os.path.exists(log_file):
+            with open(log_file, 'r', encoding='utf-8') as f:
+                all_lines = f.readlines()
+                total_lines += len(all_lines)
+                for line in all_lines:
+                    stripped = line.strip()
+                    if not stripped:
+                        continue
+                    if f"[{user_id}]" in stripped or "[None]" in stripped:
+                        filtered_logs.append(stripped)
+
+        # --- 2. Read Rise/Fall bot logs ---
+        rf_log_file = "risefall_bot.log"
+        if os.path.exists(rf_log_file):
+            with open(rf_log_file, 'r', encoding='utf-8') as f:
+                rf_lines = f.readlines()
+                total_lines += len(rf_lines)
+                for line in rf_lines:
+                    stripped = line.strip()
+                    if not stripped:
+                        continue
+                    # Tag RF lines for clarity if not already tagged
+                    if "[RF]" not in stripped:
+                        stripped = stripped.replace("| risefallbot", "| [RF] risefallbot", 1)
+                    filtered_logs.append(stripped)
+
+        # --- 3. Sort merged logs by timestamp (best-effort) ---
+        # Both log formats start with a timestamp: "YYYY-MM-DD HH:MM:SS"
+        filtered_logs.sort()
+
+        # Take only the last N lines (most recent)
+        filtered_logs = filtered_logs[-lines:]
+
         return prepare_response({
             "logs": filtered_logs,
-            "total_lines": len(all_lines),
+            "total_lines": total_lines,
             "showing": len(filtered_logs)
         })
     except Exception as e:
-        return prepare_response({  # ← WRAP WITH prepare_response
+        return prepare_response({
             "logs": [],
             "error": str(e)
         })

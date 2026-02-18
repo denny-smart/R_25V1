@@ -250,11 +250,21 @@ class BotManager:
             }
 
         from risefallbot.rf_bot import run as rf_run
+        from app.bot.events import event_manager
 
-        task = asyncio.create_task(rf_run(stake=stake, api_token=api_token))
+        task = asyncio.create_task(rf_run(stake=stake, api_token=api_token, user_id=user_id))
         self._rf_tasks[user_id] = task
 
         logger.info(f"✅ Rise/Fall bot started for user {user_id} | stake=${stake}")
+
+        # Broadcast start event
+        await event_manager.broadcast({
+            "type": "bot_status",
+            "status": "running",
+            "message": f"Rise/Fall bot started (stake=${stake})",
+            "account_id": user_id,
+        })
+
         return {
             "success": True,
             "message": f"Rise/Fall bot started (stake=${stake})",
@@ -273,6 +283,8 @@ class BotManager:
             }
 
         from risefallbot import rf_bot
+        from app.bot.events import event_manager
+
         rf_bot.stop()       # signal the while-loop to exit
         task.cancel()        # cancel the asyncio task
         try:
@@ -282,6 +294,15 @@ class BotManager:
 
         del self._rf_tasks[user_id]
         logger.info(f"🛑 Rise/Fall bot stopped for user {user_id}")
+
+        # Broadcast stop event
+        await event_manager.broadcast({
+            "type": "bot_status",
+            "status": "stopped",
+            "message": "Rise/Fall bot stopped",
+            "account_id": user_id,
+        })
+
         return {
             "success": True,
             "message": "Rise/Fall bot stopped",

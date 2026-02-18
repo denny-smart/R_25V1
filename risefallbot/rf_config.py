@@ -45,6 +45,12 @@ RF_MIN_BARS = 30                   # Minimum bars before trading (warm-up)
 RF_MAX_CONSECUTIVE_LOSSES = 5      # Pause after N consecutive losses
 RF_LOSS_COOLDOWN_SECONDS = 120     # Cooldown after hitting loss streak (2 min)
 
+# Take-profit: sell contract early when profit reaches this % of stake
+RF_TAKE_PROFIT_PCT = 0.50          # 50% — e.g. $1 stake → sell at $0.50 profit
+
+# Stop-loss: sell contract early when loss reaches this % of stake
+RF_STOP_LOSS_PCT = 0.40            # 40% — e.g. $1 stake → sell at -$0.40 loss
+
 # ==================== LOGGING ====================
 RF_LOG_FILE = "risefall_bot.log"
 RF_LOG_LEVEL = "INFO"

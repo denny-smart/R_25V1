@@ -233,13 +233,20 @@ class RFTradeEngine:
     #  Contract outcome tracking                                          #
     # ------------------------------------------------------------------ #
 
-    async def wait_for_result(self, contract_id: str) -> Optional[Dict]:
+    async def wait_for_result(
+        self, contract_id: str, stake: float = 0.0
+    ) -> Optional[Dict]:
         """
-        Subscribe to an open contract and wait until it settles.
-        
+        Subscribe to an open contract and monitor until settlement OR
+        early take-profit.
+
+        If the unrealised profit reaches RF_TAKE_PROFIT_PCT × stake,
+        the contract is sold early to lock in gains.
+
         Args:
             contract_id: The contract ID to track
-            
+            stake: Original stake (used to compute TP threshold)
+
         Returns:
             Dict with settlement result:
             {
@@ -252,6 +259,11 @@ class RFTradeEngine:
         if not await self.ensure_connected():
             return None
 
+        tp_threshold = stake * rf_config.RF_TAKE_PROFIT_PCT if stake > 0 else 0
+        sl_threshold = stake * rf_config.RF_STOP_LOSS_PCT if stake > 0 else 0
+        already_sold = False
+        sell_reason = None  # "tp" or "sl"
+
         # Subscribe to the contract
         sub_request = {
             "proposal_open_contract": 1,
@@ -259,7 +271,11 @@ class RFTradeEngine:
             "subscribe": 1,
         }
 
-        logger.info(f"[RF-Engine] 👁️ Watching contract #{contract_id}")
+        logger.info(
+            f"[RF-Engine] 👁️ Watching contract #{contract_id} "
+            f"| TP: +${tp_threshold:.2f} ({rf_config.RF_TAKE_PROFIT_PCT*100:.0f}%) "
+            f"| SL: -${sl_threshold:.2f} ({rf_config.RF_STOP_LOSS_PCT*100:.0f}%)"
+        )
 
         try:
             await self.ws.send(json.dumps(sub_request))
@@ -284,14 +300,21 @@ class RFTradeEngine:
                 is_sold = poc.get("is_sold", 0)
                 is_expired = poc.get("is_expired", 0)
 
+                # --- Contract has settled (naturally or after our sell) ---
                 if is_sold or is_expired:
                     sell_price = float(poc.get("sell_price", 0))
                     buy_price = float(poc.get("buy_price", 0))
                     profit = sell_price - buy_price
                     status = "win" if profit > 0 else "loss"
 
+                    if sell_reason == "tp":
+                        tag = "🎯 TP-SOLD"
+                    elif sell_reason == "sl":
+                        tag = "🛑 SL-SOLD"
+                    else:
+                        tag = "🏁 SETTLED"
                     logger.info(
-                        f"[RF-Engine] 🏁 Contract #{contract_id} settled: "
+                        f"[RF-Engine] {tag} Contract #{contract_id}: "
                         f"{status.upper()} pnl={profit:+.2f}"
                     )
 
@@ -312,9 +335,75 @@ class RFTradeEngine:
                         "sell_price": sell_price,
                     }
 
+                # --- Still open: check for take-profit / stop-loss ---
+                if not already_sold:
+                    bid_price = float(poc.get("bid_price", 0))
+                    buy_price = float(poc.get("buy_price", 0))
+                    unrealised_pnl = bid_price - buy_price
+
+                    # Take-profit check
+                    if tp_threshold > 0 and unrealised_pnl >= tp_threshold:
+                        logger.info(
+                            f"[RF-Engine] 💰 TP hit! Unrealised +${unrealised_pnl:.2f} "
+                            f">= threshold ${tp_threshold:.2f} — selling early"
+                        )
+                        sold = await self._sell_contract(contract_id, bid_price)
+                        if sold:
+                            already_sold = True
+                            sell_reason = "tp"
+
+                    # Stop-loss check
+                    elif sl_threshold > 0 and unrealised_pnl <= -sl_threshold:
+                        logger.info(
+                            f"[RF-Engine] 🛑 SL hit! Unrealised ${unrealised_pnl:.2f} "
+                            f"<= threshold -${sl_threshold:.2f} — cutting loss"
+                        )
+                        sold = await self._sell_contract(contract_id, bid_price)
+                        if sold:
+                            already_sold = True
+                            sell_reason = "sl"
+
         except asyncio.TimeoutError:
             logger.error(f"[RF-Engine] ⏱️ Contract #{contract_id} watch timed out")
             return None
         except Exception as e:
             logger.error(f"[RF-Engine] ❌ Contract watch error: {e}")
             return None
+
+    async def _sell_contract(
+        self, contract_id: str, min_price: float = 0
+    ) -> bool:
+        """
+        Sell (close) an open contract early.
+
+        Args:
+            contract_id: Contract to sell
+            min_price: Minimum acceptable sell price (0 = market)
+
+        Returns:
+            True if the sell request was accepted
+        """
+        sell_request = {
+            "sell": contract_id,
+            "price": min_price,
+        }
+
+        logger.info(f"[RF-Engine] 🏷️ Selling contract #{contract_id} @ min ${min_price:.2f}")
+
+        resp = await self._send(sell_request)
+        if not resp:
+            logger.error(f"[RF-Engine] ❌ Sell request failed (no response)")
+            return False
+
+        if "error" in resp:
+            err = resp["error"].get("message", str(resp["error"]))
+            logger.error(f"[RF-Engine] ❌ Sell rejected: {err}")
+            return False
+
+        if "sell" in resp:
+            sold_price = resp["sell"].get("sold_for", 0)
+            logger.info(f"[RF-Engine] ✅ Contract sold for ${sold_price}")
+            return True
+
+        return False
+
