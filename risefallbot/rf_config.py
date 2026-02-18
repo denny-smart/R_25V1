@@ -54,12 +54,12 @@ RF_DURATION_UNIT = "m"       # Duration unit: minutes
 RF_MAX_CONCURRENT_PER_SYMBOL = 1   # Max 1 trade per symbol at a time
 RF_MAX_CONCURRENT_TOTAL = 1        # Max 1 trade total across ALL symbols
 RF_COOLDOWN_SECONDS = 30           # Seconds between trades per symbol
-RF_MAX_TRADES_PER_DAY = 80         # Daily trade cap across all symbols
+RF_MAX_TRADES_PER_DAY = 30         # Daily trade cap across all symbols
 RF_MIN_BARS = 30                   # Minimum bars before trading (warm-up)
 
 # Consecutive loss protection
-RF_MAX_CONSECUTIVE_LOSSES = 5      # Pause after N consecutive losses
-RF_LOSS_COOLDOWN_SECONDS = 120     # Cooldown after hitting loss streak (2 min)
+RF_MAX_CONSECUTIVE_LOSSES = 3      # Pause after N consecutive losses
+RF_LOSS_COOLDOWN_SECONDS = 21600     # Cooldown after hitting loss streak (6 hours)
 
 # Take-profit: sell contract early when profit reaches this % of stake
 RF_TAKE_PROFIT_PCT = 0.50          # 50% — e.g. $1 stake → sell at $0.50 profit
@@ -70,6 +70,10 @@ RF_STOP_LOSS_PCT = 0.40            # 40% — e.g. $1 stake → sell at -$0.40 lo
 # ==================== LOGGING ====================
 RF_LOG_FILE = "risefall_bot.log"
 RF_LOG_LEVEL = "INFO"
+
+# ==================== DB WRITE RETRY ====================
+RF_DB_WRITE_MAX_RETRIES = 3        # Max attempts to write trade to DB
+RF_DB_WRITE_RETRY_DELAY = 2        # Seconds between retry attempts
 
 # ==================== WEBSOCKET ====================
 RF_WS_URL = "wss://ws.derivws.com/websockets/v3"

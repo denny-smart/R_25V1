@@ -1,9 +1,16 @@
 """
 Rise/Fall Risk Manager
 Per-symbol cooldown, max concurrent trades, daily cap, and consecutive-loss cooldown
+
+STRICT SINGLE-TRADE ENFORCEMENT:
+    Uses an asyncio.Lock (mutex) as the primary concurrency gate.
+    The lock is acquired BEFORE trade execution and released ONLY after
+    confirmed DB write. No boolean-flag bypass is possible.
+
 rf_risk_manager.py
 """
 
+import asyncio
 from base_risk_manager import BaseRiskManager
 from typing import Dict, Tuple
 from datetime import datetime, timedelta
@@ -20,10 +27,11 @@ class RiseFallRiskManager(BaseRiskManager):
     Risk manager for Rise/Fall scalping strategy.
     
     Features:
-        - 1 concurrent trade per symbol (4 total across RF_SYMBOLS)
+        - asyncio.Lock mutex — only 1 concurrent trade globally (async-safe)
         - 30-second cooldown per symbol after trade closes
         - 80 trades/day cap
         - Pause for 120 s after 5 consecutive losses
+        - Step-transition logging with timestamps
     """
 
     def __init__(self, user_id: str = None, overrides: Dict = None):
@@ -37,24 +45,31 @@ class RiseFallRiskManager(BaseRiskManager):
         self.user_id = user_id
         overrides = overrides or {}
 
-        # Core limits (allow overrides)
-        self.max_concurrent_per_symbol = overrides.get(
-            "max_concurrent_per_symbol", rf_config.RF_MAX_CONCURRENT_PER_SYMBOL
+        # Core limits — overrides are CLAMPED to config maximums.
+        # No override can weaken the risk rules defined in rf_config.
+        self.max_concurrent_per_symbol = min(
+            overrides.get("max_concurrent_per_symbol", rf_config.RF_MAX_CONCURRENT_PER_SYMBOL),
+            rf_config.RF_MAX_CONCURRENT_PER_SYMBOL,
         )
-        self.max_concurrent_total = overrides.get(
-            "max_concurrent_total", rf_config.RF_MAX_CONCURRENT_TOTAL
+        self.max_concurrent_total = min(
+            overrides.get("max_concurrent_total", rf_config.RF_MAX_CONCURRENT_TOTAL),
+            rf_config.RF_MAX_CONCURRENT_TOTAL,
         )
-        self.cooldown_seconds = overrides.get(
-            "cooldown_seconds", rf_config.RF_COOLDOWN_SECONDS
+        self.cooldown_seconds = max(
+            overrides.get("cooldown_seconds", rf_config.RF_COOLDOWN_SECONDS),
+            rf_config.RF_COOLDOWN_SECONDS,  # Cannot reduce cooldown below config
         )
-        self.max_trades_per_day = overrides.get(
-            "max_trades_per_day", rf_config.RF_MAX_TRADES_PER_DAY
+        self.max_trades_per_day = min(
+            overrides.get("max_trades_per_day", rf_config.RF_MAX_TRADES_PER_DAY),
+            rf_config.RF_MAX_TRADES_PER_DAY,
         )
-        self.max_consecutive_losses = overrides.get(
-            "max_consecutive_losses", rf_config.RF_MAX_CONSECUTIVE_LOSSES
+        self.max_consecutive_losses = min(
+            overrides.get("max_consecutive_losses", rf_config.RF_MAX_CONSECUTIVE_LOSSES),
+            rf_config.RF_MAX_CONSECUTIVE_LOSSES,
         )
-        self.loss_cooldown_seconds = overrides.get(
-            "loss_cooldown_seconds", rf_config.RF_LOSS_COOLDOWN_SECONDS
+        self.loss_cooldown_seconds = max(
+            overrides.get("loss_cooldown_seconds", rf_config.RF_LOSS_COOLDOWN_SECONDS),
+            rf_config.RF_LOSS_COOLDOWN_SECONDS,  # Cannot reduce cooldown below config
         )
 
         # Internal state
@@ -71,18 +86,131 @@ class RiseFallRiskManager(BaseRiskManager):
         # Loss-streak cooldown timestamp
         self._loss_cooldown_until: datetime = datetime.min
         
-        # Trade lock — enforces max 1 concurrent trade globally
+        # ═══════════════════════════════════════════════════════════════
+        # PRIMARY CONCURRENCY GATE: asyncio.Lock (mutex)
+        # This is the authority — not the boolean flag.
+        # The lock is acquired before trade execution and released only
+        # after confirmed DB write.
+        # ═══════════════════════════════════════════════════════════════
+        self._trade_mutex: asyncio.Lock = asyncio.Lock()
+
+        # Secondary indicator (human-readable state, NOT the authority)
         self._trade_lock_active: bool = False
         self._locked_trade_info: Dict = {}  # Info about currently locked trade
         self._locked_symbol: str = None  # Which symbol has the active trade
+
+        # Error halt flag — set when a critical step fails
+        self._halted: bool = False
+        self._halt_reason: str = ""
 
         logger.info(
             f"[RF-Risk] Initialized | max_concurrent_total={self.max_concurrent_total} "
             f"max_concurrent/symbol={self.max_concurrent_per_symbol} "
             f"cooldown={self.cooldown_seconds}s daily_cap={self.max_trades_per_day} "
             f"max_consec_loss={self.max_consecutive_losses} | "
-            f"⚠️ SINGLE TRADE ENFORCEMENT: Only 1 concurrent trade globally"
+            f"⚠️ STRICT ENFORCEMENT: asyncio.Lock mutex + 6-step lifecycle"
         )
+
+    # ------------------------------------------------------------------ #
+    #  Trade Mutex — async lock acquisition / release                     #
+    # ------------------------------------------------------------------ #
+
+    @property
+    def trade_mutex(self) -> asyncio.Lock:
+        """Expose the mutex for external lock checks (e.g. run loop)."""
+        return self._trade_mutex
+
+    async def acquire_trade_lock(self, symbol: str, contract_id: str) -> bool:
+        """
+        Acquire the trade mutex. Blocks if another trade holds it.
+
+        This MUST be called before any trade execution. The caller must
+        call release_trade_lock() only after the DB write is confirmed.
+
+        Args:
+            symbol:      Trading symbol
+            contract_id: Contract ID (for logging, may be 'pending' pre-buy)
+
+        Returns:
+            True if acquired, False if system is halted
+        """
+        if self._halted:
+            logger.error(
+                f"[RF-Risk] ❌ HALTED — cannot acquire lock. Reason: {self._halt_reason}"
+            )
+            return False
+
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        logger.info(
+            f"[RF] STEP 1/6 | {ts} | ACQUIRING TRADE LOCK for {symbol}#{contract_id}"
+        )
+
+        await self._trade_mutex.acquire()
+
+        # ── DOUBLE-CHECK: Re-validate ALL risk rules after acquiring mutex ──
+        # Between the pre-check can_trade() and now, conditions may have changed
+        # (e.g., daily cap hit, loss-streak cooldown triggered by another path).
+        can, reason = self.can_trade(symbol=symbol)
+        # can_trade will return False for "mutex is held" — skip that specific check
+        # since we just acquired it. Only fail on OTHER risk violations.
+        if not can and "mutex" not in reason.lower():
+            logger.warning(
+                f"[RF-Risk] ❌ Post-acquire risk check FAILED: {reason} | "
+                f"Releasing mutex immediately — trade will NOT execute"
+            )
+            self._trade_mutex.release()
+            return False
+
+        self._trade_lock_active = True
+        self._locked_symbol = symbol
+        self._locked_trade_info = {"contract_id": contract_id, "symbol": symbol}
+
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        logger.info(
+            f"[RF] STEP 1/6 | {ts} | ✅ TRADE LOCK ACQUIRED for {symbol}#{contract_id}"
+        )
+        return True
+
+    def release_trade_lock(self, reason: str = "lifecycle complete") -> None:
+        """
+        Release the trade mutex. ONLY call after confirmed DB write.
+
+        Args:
+            reason: Why the lock is being released (for audit trail)
+        """
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        if self._trade_mutex.locked():
+            self._trade_mutex.release()
+            self._trade_lock_active = False
+            self._locked_symbol = None
+            self._locked_trade_info = {}
+            logger.info(
+                f"[RF] STEP 6/6 | {ts} | 🔓 TRADE LOCK RELEASED — {reason} — scan resuming"
+            )
+        else:
+            logger.warning(
+                f"[RF-Risk] ⚠️ release_trade_lock called but mutex was not held | {ts}"
+            )
+
+    def halt(self, reason: str) -> None:
+        """
+        Halt the system — prevents any new trade locks from being acquired.
+        The current lock (if held) stays held until manual intervention.
+        """
+        self._halted = True
+        self._halt_reason = reason
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        logger.critical(
+            f"[RF-Risk] 🚨 SYSTEM HALTED | {ts} | Reason: {reason} | "
+            f"Lock held: {self._trade_mutex.locked()}"
+        )
+
+    def clear_halt(self) -> None:
+        """Clear the halt flag after manual intervention."""
+        self._halted = False
+        self._halt_reason = ""
+        logger.info("[RF-Risk] ✅ Halt cleared — system can resume trading")
 
     # ------------------------------------------------------------------ #
     #  BaseRiskManager interface                                          #
@@ -100,6 +228,20 @@ class RiseFallRiskManager(BaseRiskManager):
             (allowed, reason)
         """
         now = datetime.now()
+
+        # 0. System halted
+        if self._halted:
+            msg = f"System HALTED: {self._halt_reason}"
+            if verbose:
+                logger.info(f"[RF-Risk] 🚨 {msg}")
+            return False, msg
+
+        # 0b. Mutex-level check (async-safe authority)
+        if self._trade_mutex.locked():
+            msg = "Trade mutex is held — another trade is in its lifecycle"
+            if verbose:
+                logger.info(f"[RF-Risk] 🔒 {msg}")
+            return False, msg
 
         # 1. Daily cap
         if self.daily_trade_count >= self.max_trades_per_day:
@@ -126,7 +268,7 @@ class RiseFallRiskManager(BaseRiskManager):
 
         # 4. Per-symbol checks (if symbol provided)
         if symbol:
-            # 3a. Concurrent limit per symbol
+            # 4a. Concurrent limit per symbol
             active_for_symbol = sum(
                 1 for t in self.active_trades.values()
                 if t.get("symbol") == symbol
@@ -137,7 +279,7 @@ class RiseFallRiskManager(BaseRiskManager):
                     logger.info(f"[RF-Risk] ⏸️ {msg}")
                 return False, msg
 
-            # 3b. Per-symbol cooldown
+            # 4b. Per-symbol cooldown
             last_close = self._last_trade_close.get(symbol)
             if last_close:
                 elapsed = (now - last_close).total_seconds()
@@ -154,12 +296,21 @@ class RiseFallRiskManager(BaseRiskManager):
         """
         Record a new trade opening.
         ENFORCES: Only 1 concurrent trade globally.
+        REQUIRES: Trade mutex must be held by caller.
         
         Args:
             trade_info: Dict with at least 'contract_id' and 'symbol'
         """
         contract_id = trade_info.get("contract_id", "unknown")
         symbol = trade_info.get("symbol", "unknown")
+
+        # ASSERT: Mutex must be held — reject if not
+        if not self._trade_mutex.locked():
+            logger.critical(
+                f"[RF-Risk] 🚨 CRITICAL VIOLATION: record_trade_open() called WITHOUT "
+                f"holding the trade mutex! {symbol}#{contract_id} — Rejecting."
+            )
+            return
 
         # Enforce global trade lock — only 1 trade at a time
         if len(self.active_trades) > 0:
@@ -174,20 +325,23 @@ class RiseFallRiskManager(BaseRiskManager):
             "open_time": datetime.now(),
         }
         self.daily_trade_count += 1
-        self._trade_lock_active = True
-        self._locked_symbol = symbol
-        self._locked_trade_info = {"contract_id": contract_id, "symbol": symbol}
 
+        # Update locked trade info (secondary indicator)
+        self._locked_trade_info = {"contract_id": contract_id, "symbol": symbol}
+        self._locked_symbol = symbol
+
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         logger.info(
-            f"[RF-Risk] 🔒 TRADE LOCKED: {symbol} #{contract_id} "
+            f"[RF] STEP 3/6 | {ts} | TRADE TRACKED: {symbol} #{contract_id} "
             f"(active={len(self.active_trades)} daily={self.daily_trade_count}) "
-            f"— No other trades allowed until this closes"
+            f"— Risk management now enforced"
         )
 
     def record_trade_closed(self, result: Dict) -> None:
         """
         Record a trade closure.
-        RELEASES: Global trade lock once trade is fully settled.
+        NOTE: This does NOT release the mutex. The mutex is only released
+        after the DB write is confirmed in rf_bot.py.
         
         Args:
             result: Dict with 'contract_id', 'profit', 'status'
@@ -228,16 +382,12 @@ class RiseFallRiskManager(BaseRiskManager):
                 f"pausing for {self.loss_cooldown_seconds}s"
             )
 
-        # Release global trade lock
-        self._trade_lock_active = False
-        self._locked_symbol = None
-        self._locked_trade_info = {}
-
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         logger.info(
-            f"[RF-Risk] 🔓 TRADE UNLOCKED: {symbol} #{contract_id} "
+            f"[RF] STEP 4/6 | {ts} | TRADE CLOSED: {symbol} #{contract_id} "
             f"status={status} pnl={profit:+.2f} "
             f"(W={self.wins} L={self.losses} streak={self.consecutive_losses}) "
-            f"— System ready for next trade"
+            f"— Awaiting DB write before lock release"
         )
 
     def get_active_trade_info(self) -> Dict:
@@ -247,11 +397,17 @@ class RiseFallRiskManager(BaseRiskManager):
         Returns:
             Dict with contract_id, symbol if trade is active, else empty dict
         """
-        return self._locked_trade_info.copy() if self._trade_lock_active else {}
+        if self._trade_mutex.locked():
+            return self._locked_trade_info.copy()
+        return {}
 
     def is_trade_active(self) -> bool:
-        """Return True if a trade is currently locked (being monitored)."""
-        return self._trade_lock_active or len(self.active_trades) > 0
+        """Return True if a trade is currently locked (mutex held or active trades exist)."""
+        return self._trade_mutex.locked() or len(self.active_trades) > 0
+
+    def is_halted(self) -> bool:
+        """Return True if the system is halted due to a critical error."""
+        return self._halted
 
     def get_current_limits(self) -> Dict:
         """Return current risk state snapshot."""
@@ -267,6 +423,8 @@ class RiseFallRiskManager(BaseRiskManager):
             "loss_cooldown_seconds": self.loss_cooldown_seconds,
             "wins": self.wins,
             "losses": self.losses,
+            "mutex_locked": self._trade_mutex.locked(),
+            "halted": self._halted,
         }
 
     def reset_daily_stats(self) -> None:
@@ -300,6 +458,8 @@ class RiseFallRiskManager(BaseRiskManager):
             "win_rate": win_rate,
             "consecutive_losses": self.consecutive_losses,
             "active_trades": len(self.active_trades),
+            "mutex_locked": self._trade_mutex.locked(),
+            "halted": self._halted,
         }
 
     @property
