@@ -37,6 +37,7 @@ RF_DURATION_UNIT = "m"       # Duration unit: minutes
 
 # ==================== RISK MANAGEMENT ====================
 RF_MAX_CONCURRENT_PER_SYMBOL = 1   # Max 1 trade per symbol at a time
+RF_MAX_CONCURRENT_TOTAL = 1        # Max 1 trade total across ALL symbols
 RF_COOLDOWN_SECONDS = 30           # Seconds between trades per symbol
 RF_MAX_TRADES_PER_DAY = 80         # Daily trade cap across all symbols
 RF_MIN_BARS = 30                   # Minimum bars before trading (warm-up)

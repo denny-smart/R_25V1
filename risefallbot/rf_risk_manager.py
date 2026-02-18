@@ -41,6 +41,9 @@ class RiseFallRiskManager(BaseRiskManager):
         self.max_concurrent_per_symbol = overrides.get(
             "max_concurrent_per_symbol", rf_config.RF_MAX_CONCURRENT_PER_SYMBOL
         )
+        self.max_concurrent_total = overrides.get(
+            "max_concurrent_total", rf_config.RF_MAX_CONCURRENT_TOTAL
+        )
         self.cooldown_seconds = overrides.get(
             "cooldown_seconds", rf_config.RF_COOLDOWN_SECONDS
         )
@@ -69,7 +72,8 @@ class RiseFallRiskManager(BaseRiskManager):
         self._loss_cooldown_until: datetime = datetime.min
 
         logger.info(
-            f"[RF-Risk] Initialized | max_concurrent/symbol={self.max_concurrent_per_symbol} "
+            f"[RF-Risk] Initialized | max_concurrent_total={self.max_concurrent_total} "
+            f"max_concurrent/symbol={self.max_concurrent_per_symbol} "
             f"cooldown={self.cooldown_seconds}s daily_cap={self.max_trades_per_day} "
             f"max_consec_loss={self.max_consecutive_losses}"
         )
@@ -106,7 +110,15 @@ class RiseFallRiskManager(BaseRiskManager):
                 logger.info(f"[RF-Risk] ⏸️ {msg}")
             return False, msg
 
-        # 3. Per-symbol checks (if symbol provided)
+        # 3. Total concurrent limit (across all symbols)
+        total_active = len(self.active_trades)
+        if total_active >= self.max_concurrent_total:
+            msg = f"Max total concurrent trades reached ({total_active}/{self.max_concurrent_total})"
+            if verbose:
+                logger.info(f"[RF-Risk] ⏸️ {msg}")
+            return False, msg
+
+        # 4. Per-symbol checks (if symbol provided)
         if symbol:
             # 3a. Concurrent limit per symbol
             active_for_symbol = sum(

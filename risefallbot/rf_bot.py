@@ -366,6 +366,16 @@ async def _process_symbol(
     # 9. Persist trade to Supabase (same pattern as multiplier bot)
     if user_id:
         try:
+            # Convert duration to seconds (int) for DB
+            duration_sec = 0
+            if duration_unit == 'm':
+                duration_sec = int(duration * 60)
+            elif duration_unit == 'h':
+                duration_sec = int(duration * 3600)
+            elif duration_unit == 's':
+                duration_sec = int(duration)
+            # ticks 't' -> 0 or distinct handling (RF strategy uses minutes)
+
             trade_record = {
                 "contract_id": contract_id,
                 "symbol": symbol,
@@ -373,7 +383,7 @@ async def _process_symbol(
                 "stake": stake_val,
                 "profit": pnl,
                 "status": status,
-                "duration": f"{duration}{duration_unit}",
+                "duration": duration_sec,     # Store as integer seconds
                 "strategy_type": "RiseFall",
                 "timestamp": datetime.now().isoformat(),
                 "entry_price": result.get("buy_price"),
