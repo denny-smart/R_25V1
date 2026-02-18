@@ -181,12 +181,25 @@ async def run(stake: Optional[float] = None, api_token: Optional[str] = None,
     _running = True
     cycle = 0
 
-    # Broadcast bot_status → running
+    # Broadcast bot_status → running with account info
     await event_manager.broadcast({
         "type": "bot_status",
         "status": "running",
         "message": f"Rise/Fall bot started – scanning {len(rf_config.RF_SYMBOLS)} symbols",
         "symbols": rf_config.RF_SYMBOLS,
+        "account_id": user_id,
+        "balance": balance or 0.0,
+        "stake": stake,
+        "strategy": "RiseFall",
+    })
+
+    # Broadcast initial statistics
+    initial_stats = risk_manager.get_statistics()
+    await event_manager.broadcast({
+        "type": "statistics",
+        "stats": initial_stats,
+        "strategy": "RiseFall",
+        "timestamp": datetime.now().isoformat(),
         "account_id": user_id,
     })
 

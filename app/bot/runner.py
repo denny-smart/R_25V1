@@ -471,6 +471,16 @@ class BotRunner:
                 "symbols": self.symbols
             })
             
+            # Broadcast initial statistics
+            initial_stats = self.state.get_statistics()
+            await event_manager.broadcast({
+                "type": "statistics",
+                "stats": initial_stats,
+                "strategy": self.active_strategy,
+                "timestamp": datetime.now().isoformat(),
+                "account_id": self.account_id
+            })
+            
             # Main trading loop - MULTI-ASSET SEQUENTIAL SCANNER
             while self.is_running:
                 try:
