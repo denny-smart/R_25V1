@@ -1078,7 +1078,7 @@ class RiskManager:
                     
                     # Update BotState if linked
                     if self.bot_state:
-                        self.bot_state.add_trade(self.active_trade)
+                        self.bot_state.add_trade(active_trade)
                     return True
             
             logger.info(f"✅ No existing positions - ready for first signal")

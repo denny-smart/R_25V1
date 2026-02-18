@@ -10,7 +10,7 @@ class TradeResponse(BaseModel):
     """Schema for individual trade response"""
     contract_id: str  # ✅ Already correct as string
     symbol: str
-    direction: str = Field(alias='signal')
+    direction: str = Field(validation_alias=AliasChoices('direction', 'signal'))
     stake: Optional[float] = None
     entry_price: Optional[float] = None
     exit_price: Optional[float] = None
