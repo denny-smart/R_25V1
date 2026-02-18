@@ -23,36 +23,21 @@ class ScalpingRiskManager(BaseRiskManager):
     - Daily counter inheritance from database
     """
     
-    def __init__(self, user_id: str = None, overrides: Dict = None):
+    def __init__(self, user_id: str = None, **kwargs):
         """
         Initialize scalping risk manager.
         
         Args:
             user_id: User identifier
-            overrides: User-specific parameter overrides from strategy_configs table
         """
         self.user_id = user_id
         
-        # Apply overrides if provided
-        self.max_concurrent_trades = overrides.get('max_concurrent_trades') if overrides else None
-        if self.max_concurrent_trades is None:
-            self.max_concurrent_trades = scalping_config.SCALPING_MAX_CONCURRENT_TRADES
-        
-        self.cooldown_seconds = overrides.get('cooldown_seconds') if overrides else None
-        if self.cooldown_seconds is None:
-            self.cooldown_seconds = scalping_config.SCALPING_COOLDOWN_SECONDS
-        
-        self.max_trades_per_day = overrides.get('max_trades_per_day') if overrides else None
-        if self.max_trades_per_day is None:
-            self.max_trades_per_day = scalping_config.SCALPING_MAX_TRADES_PER_DAY
-        
-        self.max_consecutive_losses = overrides.get('max_consecutive_losses') if overrides else None
-        if self.max_consecutive_losses is None:
-            self.max_consecutive_losses = scalping_config.SCALPING_MAX_CONSECUTIVE_LOSSES
-        
-        self.daily_loss_multiplier = overrides.get('daily_loss_multiplier') if overrides else None
-        if self.daily_loss_multiplier is None:
-            self.daily_loss_multiplier = scalping_config.SCALPING_DAILY_LOSS_MULTIPLIER
+        # Load defaults from config
+        self.max_concurrent_trades = scalping_config.SCALPING_MAX_CONCURRENT_TRADES
+        self.cooldown_seconds = scalping_config.SCALPING_COOLDOWN_SECONDS
+        self.max_trades_per_day = scalping_config.SCALPING_MAX_TRADES_PER_DAY
+        self.max_consecutive_losses = scalping_config.SCALPING_MAX_CONSECUTIVE_LOSSES
+        self.daily_loss_multiplier = scalping_config.SCALPING_DAILY_LOSS_MULTIPLIER
         
         # State tracking
         self.active_trades: List[str] = []  # List of active contract IDs

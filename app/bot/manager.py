@@ -98,12 +98,9 @@ class BotManager:
             from strategy_registry import get_strategy
             strategy_class, risk_manager_class = get_strategy(active_strategy)
             
-            # Load user-specific overrides
-            overrides = await self._load_strategy_overrides(user_id, active_strategy)
-            
             # Instantiate strategy and risk manager
             strategy_instance = strategy_class()
-            risk_manager_instance = risk_manager_class(user_id=user_id, overrides=overrides)
+            risk_manager_instance = risk_manager_class(user_id=user_id)
             
             logger.info(f"✅ Loaded strategy for {user_id}: {active_strategy}")
             logger.info(f"📋 Strategy class: {strategy_class.__name__}, Risk Manager: {risk_manager_class.__name__}")
@@ -237,34 +234,6 @@ class BotManager:
             logger.warning(f"Failed to load user strategy for {user_id}: {e}")
             return 'Conservative'
     
-    async def _load_strategy_overrides(self, user_id: str, strategy_name: str) -> dict:
-        """
-        Load user-specific strategy parameter overrides from database.
-        
-        Args:
-            user_id: User identifier
-            strategy_name: Strategy name
-        
-        Returns:
-            Dict of overrides (empty dict if none found)
-        """
-        try:
-            from app.core.supabase import supabase
-            
-            result = supabase.table('strategy_configs') \
-                .select('*') \
-                .eq('user_id', user_id) \
-                .eq('strategy_type', strategy_name) \
-                .execute()
-            
-            if result.data:
-                return result.data[0]
-            
-            return {}
-        
-        except Exception as e:
-            logger.warning(f"Failed to load strategy overrides for {user_id}: {e}")
-            return {}
     
     # ------------------------------------------------------------------ #
     #  Rise/Fall helpers                                                   #

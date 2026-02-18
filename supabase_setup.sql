@@ -119,7 +119,7 @@ BEGIN
     -- Add check constraint
     ALTER TABLE public.trades
     ADD CONSTRAINT trades_strategy_type_check 
-    CHECK (strategy_type IN ('Conservative', 'Scalping'));
+    CHECK (strategy_type IN ('Conservative', 'Scalping', 'RiseFall'));
     
     RAISE NOTICE 'Added strategy_type column to trades table';
   END IF;
@@ -139,7 +139,7 @@ BEGIN
   ) THEN
     ALTER TABLE public.profiles
    ADD CONSTRAINT profiles_active_strategy_check
-    CHECK (active_strategy IN ('Conservative', 'Scalping'));
+    CHECK (active_strategy IN ('Conservative', 'Scalping', 'RiseFall'));
     
     RAISE NOTICE 'Added check constraint to profiles.active_strategy';
   END IF;
@@ -148,44 +148,7 @@ END $$;
 -- 4. Backfill profiles with invalid strategy values
 UPDATE public.profiles 
 SET active_strategy = 'Conservative' 
-WHERE active_strategy NOT IN ('Conservative', 'Scalping') 
+WHERE active_strategy NOT IN ('Conservative', 'Scalping', 'RiseFall') 
    OR active_strategy IS NULL;
 
--- 5. Create strategy_configs table
-CREATE TABLE IF NOT EXISTS public.strategy_configs (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
-  strategy_type TEXT NOT NULL CHECK (strategy_type IN ('Conservative', 'Scalping')),
-  max_concurrent_trades INTEGER,
-  cooldown_seconds INTEGER,
-  max_trades_per_day INTEGER,
-  max_consecutive_losses INTEGER,
-  daily_loss_multiplier NUMERIC,
-  custom_params JSONB,
-  updated_at TIMESTAMPTZ DEFAULT NOW(),
-  UNIQUE(user_id, strategy_type)
-);
 
--- Enable RLS on strategy_configs
-ALTER TABLE public.strategy_configs ENABLE ROW LEVEL SECURITY;
-
--- RLS Policies for strategy_configs
-DROP POLICY IF EXISTS "Users can view their own strategy configs" ON public.strategy_configs;
-CREATE POLICY "Users can view their own strategy configs"
-  ON public.strategy_configs FOR SELECT
-  USING ((SELECT auth.uid()) = user_id);
-
-DROP POLICY IF EXISTS "Users can insert their own strategy configs" ON public.strategy_configs;
-CREATE POLICY "Users can insert their own strategy configs"
-  ON public.strategy_configs FOR INSERT
-  WITH CHECK ((SELECT auth.uid()) = user_id);
-
-DROP POLICY IF EXISTS "Users can update their own strategy configs" ON public.strategy_configs;
-CREATE POLICY "Users can update their own strategy configs"
-  ON public.strategy_configs FOR UPDATE
-  USING ((SELECT auth.uid()) = user_id);
-
-DROP POLICY IF EXISTS "Users can delete their own strategy configs" ON public.strategy_configs;
-CREATE POLICY "Users can delete their own strategy configs"
-  ON public.strategy_configs FOR DELETE
-  USING ((SELECT auth.uid()) = user_id);
