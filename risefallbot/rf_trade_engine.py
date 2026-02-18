@@ -1,0 +1,320 @@
+"""
+Rise/Fall Trade Engine
+Independent WebSocket client for buying Rise/Fall contracts on Deriv
+rf_trade_engine.py
+"""
+
+import asyncio
+import websockets
+import json
+import logging
+from datetime import datetime
+from typing import Dict, Any, Optional
+
+from risefallbot import rf_config
+
+# Dedicated logger for Rise/Fall trade execution
+logger = logging.getLogger("risefallbot.engine")
+
+
+class RFTradeEngine:
+    """
+    Standalone Deriv WebSocket client for Rise/Fall contract execution.
+    
+    This engine owns its own WebSocket connection, completely independent
+    from the multiplier TradeEngine used by Conservative/Scalping strategies.
+    """
+
+    def __init__(self, api_token: str, app_id: str = None):
+        """
+        Initialize Rise/Fall trade engine.
+        
+        Args:
+            api_token: Deriv API token
+            app_id: Deriv app ID (defaults to rf_config.RF_APP_ID)
+        """
+        self.api_token = api_token
+        self.app_id = app_id or rf_config.RF_APP_ID
+        self.ws = None
+        self.ws_url = f"{rf_config.RF_WS_URL}?app_id={self.app_id}"
+        self.authorized = False
+        self._req_id = 0
+
+    # ------------------------------------------------------------------ #
+    #  Connection management                                              #
+    # ------------------------------------------------------------------ #
+
+    async def connect(self) -> bool:
+        """Connect to Deriv WebSocket API."""
+        try:
+            logger.info("[RF-Engine] 🔌 Connecting to Deriv API...")
+            self.ws = await websockets.connect(
+                self.ws_url,
+                ping_interval=30,
+                ping_timeout=10,
+                close_timeout=5,
+            )
+            logger.info("[RF-Engine] ✅ WebSocket connected")
+            return await self._authorize()
+        except Exception as e:
+            logger.error(f"[RF-Engine] ❌ Connection failed: {e}")
+            return False
+
+    async def _authorize(self) -> bool:
+        """Authorize the WebSocket connection."""
+        try:
+            resp = await self._send({"authorize": self.api_token})
+            if resp and "authorize" in resp:
+                self.authorized = True
+                balance = resp["authorize"].get("balance", "?")
+                logger.info(f"[RF-Engine] ✅ Authorized | balance=${balance}")
+                return True
+            else:
+                error = resp.get("error", {}).get("message", "Unknown")
+                logger.error(f"[RF-Engine] ❌ Authorization failed: {error}")
+                return False
+        except Exception as e:
+            logger.error(f"[RF-Engine] ❌ Authorization error: {e}")
+            return False
+
+    async def reconnect(self) -> bool:
+        """Attempt reconnection."""
+        logger.info("[RF-Engine] 🔄 Reconnecting...")
+        await self.disconnect()
+        await asyncio.sleep(2)
+        return await self.connect()
+
+    async def ensure_connected(self) -> bool:
+        """Ensure WebSocket is connected, reconnect if needed."""
+        if self.ws and self.ws.open:
+            return True
+        return await self.reconnect()
+
+    async def disconnect(self) -> None:
+        """Disconnect from WebSocket."""
+        if self.ws:
+            try:
+                await self.ws.close()
+            except Exception:
+                pass
+            self.ws = None
+            self.authorized = False
+        logger.info("[RF-Engine] 🔌 Disconnected")
+
+    # ------------------------------------------------------------------ #
+    #  Low-level send/receive                                             #
+    # ------------------------------------------------------------------ #
+
+    async def _send(self, request: Dict[str, Any]) -> Optional[Dict]:
+        """
+        Send a request and wait for the matching response.
+        
+        Args:
+            request: API request payload
+        
+        Returns:
+            Response dict or None on failure
+        """
+        if not self.ws or not self.ws.open:
+            logger.error("[RF-Engine] WebSocket not connected")
+            return None
+
+        self._req_id += 1
+        request["req_id"] = self._req_id
+
+        try:
+            await self.ws.send(json.dumps(request))
+            raw = await asyncio.wait_for(
+                self.ws.recv(), timeout=rf_config.RF_WS_TIMEOUT
+            )
+            resp = json.loads(raw)
+
+            if "error" in resp:
+                logger.error(
+                    f"[RF-Engine] API error: {resp['error'].get('message', resp['error'])}"
+                )
+            return resp
+        except asyncio.TimeoutError:
+            logger.error("[RF-Engine] ⏱️ Request timed out")
+            return None
+        except Exception as e:
+            logger.error(f"[RF-Engine] ❌ Send/recv error: {e}")
+            return None
+
+    # ------------------------------------------------------------------ #
+    #  Rise/Fall contract execution                                       #
+    # ------------------------------------------------------------------ #
+
+    async def buy_rise_fall(
+        self,
+        symbol: str,
+        direction: str,
+        stake: float,
+        duration: int = None,
+        duration_unit: str = None,
+    ) -> Optional[Dict]:
+        """
+        Buy a Rise/Fall contract.
+        
+        Args:
+            symbol: Trading symbol (e.g., 'R_10')
+            direction: 'CALL' (Rise) or 'PUT' (Fall)
+            stake: Stake amount in USD
+            duration: Contract duration (default from config)
+            duration_unit: Duration unit (default from config)
+            
+        Returns:
+            Dict with contract details on success, None on failure:
+            {
+                'contract_id': str,
+                'buy_price': float,
+                'payout': float,
+                'symbol': str,
+                'direction': str,
+            }
+        """
+        if not await self.ensure_connected():
+            return None
+
+        duration = duration or rf_config.RF_CONTRACT_DURATION
+        duration_unit = duration_unit or rf_config.RF_DURATION_UNIT
+
+        contract_type = direction.upper()  # CALL or PUT
+        if contract_type not in ("CALL", "PUT"):
+            logger.error(f"[RF-Engine] Invalid direction: {direction}")
+            return None
+
+        buy_request = {
+            "buy": 1,
+            "price": stake,
+            "parameters": {
+                "contract_type": contract_type,
+                "symbol": symbol,
+                "duration": duration,
+                "duration_unit": duration_unit,
+                "basis": "stake",
+                "amount": stake,
+                "currency": "USD",
+            },
+        }
+
+        logger.info(
+            f"[RF-Engine] 🛒 Buying {contract_type} on {symbol} | "
+            f"stake=${stake} duration={duration}{duration_unit}"
+        )
+
+        resp = await self._send(buy_request)
+        if not resp or "buy" not in resp:
+            error_msg = "Unknown error"
+            if resp and "error" in resp:
+                error_msg = resp["error"].get("message", str(resp["error"]))
+            logger.error(f"[RF-Engine] ❌ Buy failed: {error_msg}")
+            return None
+
+        buy_data = resp["buy"]
+        contract_id = str(buy_data.get("contract_id", ""))
+        buy_price = float(buy_data.get("buy_price", stake))
+        payout = float(buy_data.get("payout", 0))
+
+        logger.info(
+            f"[RF-Engine] ✅ Contract bought: #{contract_id} | "
+            f"buy_price=${buy_price:.2f} payout=${payout:.2f}"
+        )
+
+        return {
+            "contract_id": contract_id,
+            "buy_price": buy_price,
+            "payout": payout,
+            "symbol": symbol,
+            "direction": contract_type,
+        }
+
+    # ------------------------------------------------------------------ #
+    #  Contract outcome tracking                                          #
+    # ------------------------------------------------------------------ #
+
+    async def wait_for_result(self, contract_id: str) -> Optional[Dict]:
+        """
+        Subscribe to an open contract and wait until it settles.
+        
+        Args:
+            contract_id: The contract ID to track
+            
+        Returns:
+            Dict with settlement result:
+            {
+                'contract_id': str,
+                'profit': float,
+                'status': 'win' | 'loss',
+                'sell_price': float,
+            }
+        """
+        if not await self.ensure_connected():
+            return None
+
+        # Subscribe to the contract
+        sub_request = {
+            "proposal_open_contract": 1,
+            "contract_id": contract_id,
+            "subscribe": 1,
+        }
+
+        logger.info(f"[RF-Engine] 👁️ Watching contract #{contract_id}")
+
+        try:
+            await self.ws.send(json.dumps(sub_request))
+
+            while True:
+                raw = await asyncio.wait_for(
+                    self.ws.recv(), timeout=600  # 10-min max wait
+                )
+                data = json.loads(raw)
+
+                if "error" in data:
+                    logger.error(
+                        f"[RF-Engine] Contract watch error: "
+                        f"{data['error'].get('message', data['error'])}"
+                    )
+                    return None
+
+                poc = data.get("proposal_open_contract")
+                if not poc:
+                    continue
+
+                is_sold = poc.get("is_sold", 0)
+                is_expired = poc.get("is_expired", 0)
+
+                if is_sold or is_expired:
+                    sell_price = float(poc.get("sell_price", 0))
+                    buy_price = float(poc.get("buy_price", 0))
+                    profit = sell_price - buy_price
+                    status = "win" if profit > 0 else "loss"
+
+                    logger.info(
+                        f"[RF-Engine] 🏁 Contract #{contract_id} settled: "
+                        f"{status.upper()} pnl={profit:+.2f}"
+                    )
+
+                    # Unsubscribe
+                    try:
+                        unsub_id = data.get("subscription", {}).get("id")
+                        if unsub_id:
+                            await self.ws.send(
+                                json.dumps({"forget": unsub_id})
+                            )
+                    except Exception:
+                        pass
+
+                    return {
+                        "contract_id": contract_id,
+                        "profit": profit,
+                        "status": status,
+                        "sell_price": sell_price,
+                    }
+
+        except asyncio.TimeoutError:
+            logger.error(f"[RF-Engine] ⏱️ Contract #{contract_id} watch timed out")
+            return None
+        except Exception as e:
+            logger.error(f"[RF-Engine] ❌ Contract watch error: {e}")
+            return None

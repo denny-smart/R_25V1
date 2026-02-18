@@ -65,6 +65,30 @@ def calculate_rsi(df: pd.DataFrame, period: int = 14) -> pd.Series:
     
     return rsi
 
+def calculate_stochastic(df: pd.DataFrame, k_period: int = 14,
+                         d_period: int = 3) -> Tuple[pd.Series, pd.Series]:
+    """
+    Calculate Stochastic Oscillator (%K and %D)
+    
+    Args:
+        df: DataFrame with 'high', 'low', 'close' columns
+        k_period: Lookback period for %K (default 14)
+        d_period: Smoothing period for %D (default 3)
+    
+    Returns:
+        Tuple of (%K Series, %D Series) with values 0-100
+    """
+    low_min = df['low'].rolling(window=k_period).min()
+    high_max = df['high'].rolling(window=k_period).max()
+    
+    # %K = (Close - Lowest Low) / (Highest High - Lowest Low) * 100
+    stoch_k = 100 * (df['close'] - low_min) / (high_max - low_min)
+    
+    # %D = SMA of %K
+    stoch_d = stoch_k.rolling(window=d_period).mean()
+    
+    return stoch_k, stoch_d
+
 def calculate_adx(df: pd.DataFrame, period: int = 14) -> pd.Series:
     """
     Calculate Average Directional Index (ADX)

@@ -17,6 +17,8 @@ class BotManager:
         self._lock = asyncio.Lock()
         self._user_locks: Dict[str, asyncio.Lock] = {}  # NEW: Per-user locks
         self.max_concurrent_bots = max_concurrent_bots
+        # Rise/Fall tasks: user_id -> asyncio.Task
+        self._rf_tasks: Dict[str, asyncio.Task] = {}
         
     def _get_user_lock(self, user_id: str) -> asyncio.Lock:
         """Get or create a lock for a specific user (for concurrent start protection)"""
@@ -87,6 +89,11 @@ class BotManager:
             # Load strategy from user profile or use provided
             active_strategy = strategy_name or await self._get_user_strategy(user_id)
             
+            # --- Rise/Fall: independent task (not BotRunner) ---
+            if active_strategy == "RiseFall":
+                return await self._start_risefall_bot(user_id, api_token, stake)
+            
+            # --- Multiplier strategies: BotRunner ---
             # Load strategy classes from registry
             from strategy_registry import get_strategy
             strategy_class, risk_manager_class = get_strategy(active_strategy)
@@ -109,6 +116,10 @@ class BotManager:
         """
         Stop a specific user's bot.
         """
+        # Rise/Fall task?
+        if user_id in self._rf_tasks:
+            return await self._stop_risefall_bot(user_id)
+        
         if user_id in self._bots:
             return await self._bots[user_id].stop_bot()
         
@@ -137,6 +148,18 @@ class BotManager:
         """
         Get status for a specific user's bot.
         """
+        # Rise/Fall task?
+        if user_id in self._rf_tasks:
+            task = self._rf_tasks[user_id]
+            is_running = not task.done()
+            return {
+                "status": "running" if is_running else "stopped",
+                "is_running": is_running,
+                "uptime_seconds": None,
+                "message": "Rise/Fall bot running" if is_running else "Rise/Fall bot stopped",
+                "config": {"strategy": "RiseFall"}
+            }
+        
         if user_id in self._bots:
             return self._bots[user_id].get_status()
             
@@ -242,6 +265,59 @@ class BotManager:
         except Exception as e:
             logger.warning(f"Failed to load strategy overrides for {user_id}: {e}")
             return {}
+    
+    # ------------------------------------------------------------------ #
+    #  Rise/Fall helpers                                                   #
+    # ------------------------------------------------------------------ #
+
+    async def _start_risefall_bot(self, user_id: str, api_token: str, stake: float) -> dict:
+        """Launch rf_bot.run() as a managed asyncio task for this user."""
+        # Already running?
+        if user_id in self._rf_tasks and not self._rf_tasks[user_id].done():
+            return {
+                "success": False,
+                "message": "Rise/Fall bot is already running",
+                "status": "running"
+            }
+
+        from risefallbot.rf_bot import run as rf_run
+
+        task = asyncio.create_task(rf_run(stake=stake, api_token=api_token))
+        self._rf_tasks[user_id] = task
+
+        logger.info(f"✅ Rise/Fall bot started for user {user_id} | stake=${stake}")
+        return {
+            "success": True,
+            "message": f"Rise/Fall bot started (stake=${stake})",
+            "status": "running"
+        }
+
+    async def _stop_risefall_bot(self, user_id: str) -> dict:
+        """Stop the Rise/Fall asyncio task for this user."""
+        task = self._rf_tasks.get(user_id)
+        if not task or task.done():
+            self._rf_tasks.pop(user_id, None)
+            return {
+                "success": False,
+                "message": "Rise/Fall bot is not running",
+                "status": "stopped"
+            }
+
+        from risefallbot import rf_bot
+        rf_bot.stop()       # signal the while-loop to exit
+        task.cancel()        # cancel the asyncio task
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        del self._rf_tasks[user_id]
+        logger.info(f"🛑 Rise/Fall bot stopped for user {user_id}")
+        return {
+            "success": True,
+            "message": "Rise/Fall bot stopped",
+            "status": "stopped"
+        }
         
     async def stop_all(self):
         """
@@ -252,6 +328,14 @@ class BotManager:
         for user_id, bot in self._bots.items():
             if bot.is_running:
                 tasks.append(bot.stop_bot())
+        
+        # Also stop Rise/Fall tasks
+        for user_id, task in list(self._rf_tasks.items()):
+            if not task.done():
+                from risefallbot import rf_bot
+                rf_bot.stop()
+                task.cancel()
+            del self._rf_tasks[user_id]
         
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)

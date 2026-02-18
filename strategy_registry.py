@@ -13,12 +13,14 @@ from conservative_strategy import ConservativeStrategy
 from conservative_risk_manager import ConservativeRiskManager
 from scalping_strategy import ScalpingStrategy
 from scalping_risk_manager import ScalpingRiskManager
+from risefallbot import RiseFallStrategy, RiseFallRiskManager
 
 
 # Strategy registry mapping name -> (Strategy class, RiskManager class)
 STRATEGY_REGISTRY = {
     "Conservative": (ConservativeStrategy, ConservativeRiskManager),
     "Scalping": (ScalpingStrategy, ScalpingRiskManager),
+    "RiseFall": (RiseFallStrategy, RiseFallRiskManager),
 }
 
 
@@ -41,6 +43,12 @@ def get_strategy(strategy_name: str = "Conservative"):
         scalping_enabled = os.getenv("SCALPING_BOT_ENABLED", "false").lower() == "true"
         if not scalping_enabled:
             logger.warning(f"⚠️ Scalping bot is disabled (SCALPING_BOT_ENABLED=false), falling back to Conservative")
+            return STRATEGY_REGISTRY["Conservative"]
+    
+    if strategy_name == "RiseFall":
+        rf_enabled = os.getenv("RISE_FALL_BOT_ENABLED", "false").lower() == "true"
+        if not rf_enabled:
+            logger.warning(f"⚠️ Rise/Fall bot is disabled (RISE_FALL_BOT_ENABLED=false), falling back to Conservative")
             return STRATEGY_REGISTRY["Conservative"]
     
     # Look up strategy
@@ -67,5 +75,10 @@ def get_available_strategies():
     scalping_enabled = os.getenv("SCALPING_BOT_ENABLED", "false").lower() == "true"
     if not scalping_enabled and "Scalping" in strategies:
         strategies.remove("Scalping")
+    
+    # Filter out RiseFall if not enabled
+    rf_enabled = os.getenv("RISE_FALL_BOT_ENABLED", "false").lower() == "true"
+    if not rf_enabled and "RiseFall" in strategies:
+        strategies.remove("RiseFall")
     
     return strategies
