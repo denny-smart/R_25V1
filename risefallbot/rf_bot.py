@@ -16,6 +16,13 @@ from risefallbot.rf_strategy import RiseFallStrategy
 from risefallbot.rf_risk_manager import RiseFallRiskManager
 from risefallbot.rf_trade_engine import RFTradeEngine
 
+# Try to import telegram notifier
+try:
+    from telegram_notifier import notifier
+    TELEGRAM_ENABLED = True
+except ImportError:
+    TELEGRAM_ENABLED = False
+
 # Dedicated logger for Rise/Fall bot orchestration — writes to its own file
 logger = logging.getLogger("risefallbot")
 
@@ -142,6 +149,16 @@ async def run(stake: Optional[float] = None, api_token: Optional[str] = None,
         await data_fetcher.disconnect()
         return
 
+    # Get account balance for notification
+    balance = await data_fetcher.get_balance()
+    if balance:
+        logger.info(f"💰 Account Balance: ${balance:.2f}")
+        if TELEGRAM_ENABLED:
+            try:
+                await notifier.notify_bot_started(balance, stake, "Rise/Fall Scalping")
+            except Exception as e:
+                logger.error(f"❌ Telegram notification failed: {e}")
+
     logger.info(f"📊 Symbols: {rf_config.RF_SYMBOLS}")
     logger.info(f"⏱️ Scan interval: {rf_config.RF_SCAN_INTERVAL}s")
     logger.info(f"💵 Stake: ${stake}")
@@ -215,6 +232,14 @@ async def run(stake: Optional[float] = None, api_token: Optional[str] = None,
         await trade_engine.disconnect()
         logger.info("🛑 Rise/Fall bot stopped")
 
+        # Send final statistics via Telegram
+        if TELEGRAM_ENABLED:
+            try:
+                stats = risk_manager.get_statistics()
+                await notifier.notify_bot_stopped(stats)
+            except Exception as e:
+                logger.error(f"❌ Telegram notification failed: {e}")
+
         # Broadcast bot_status → stopped
         await event_manager.broadcast({
             "type": "bot_status",
@@ -265,7 +290,7 @@ async def _process_symbol(
     if signal is None:
         return  # No triple-confirmation — already logged by strategy
 
-    # 4. Broadcast signal event
+    # 4. Broadcast signal event + Telegram notification
     timestamp = datetime.now().isoformat()
     direction = signal["direction"]
 
@@ -277,6 +302,19 @@ async def _process_symbol(
         "timestamp": timestamp,
         "account_id": user_id,
     })
+
+    # Notify via Telegram
+    if TELEGRAM_ENABLED:
+        try:
+            signal_info = {
+                "signal": direction,
+                "symbol": symbol,
+                "score": signal.get("confidence", 0),
+                "details": {"rsi": 0, "adx": 0},  # RF strategy doesn't use these
+            }
+            await notifier.notify_signal(signal_info)
+        except Exception as e:
+            logger.error(f"❌ Telegram notification failed: {e}")
 
     # 5. Execute trade
     stake_val = signal["stake"]
@@ -317,6 +355,21 @@ async def _process_symbol(
         "account_id": user_id,
     })
 
+    # Notify via Telegram
+    if TELEGRAM_ENABLED:
+        try:
+            trade_info = {
+                "contract_id": contract_id,
+                "symbol": symbol,
+                "direction": direction,
+                "stake": stake_val,
+                "entry_price": result.get("buy_price", 0),
+                "multiplier": 1,  # Rise/Fall has fixed multiplier
+            }
+            await notifier.notify_trade_opened(trade_info, strategy_type="RiseFall")
+        except Exception as e:
+            logger.error(f"❌ Telegram notification failed: {e}")
+
     # 7. Wait for contract settlement (async — blocks only this symbol)
     settlement = await trade_engine.wait_for_result(contract_id, stake=stake_val)
 
@@ -352,6 +405,25 @@ async def _process_symbol(
         "timestamp": datetime.now().isoformat(),
         "account_id": user_id,
     })
+
+    # Notify via Telegram
+    if TELEGRAM_ENABLED:
+        try:
+            result_info = {
+                "status": status,
+                "profit": pnl,
+                "contract_id": contract_id,
+                "current_price": settlement.get("sell_price", 0) if settlement else 0,
+                "duration": signal.get("duration", 0),
+            }
+            await notifier.notify_trade_closed(result_info, {
+                "symbol": symbol,
+                "direction": direction,
+                "stake": stake_val,
+                "duration": signal.get("duration", 0),
+            }, strategy_type="RiseFall")
+        except Exception as e:
+            logger.error(f"❌ Telegram notification failed: {e}")
 
     notification_type = "success" if pnl > 0 else "error" if pnl < 0 else "info"
     await event_manager.broadcast({
