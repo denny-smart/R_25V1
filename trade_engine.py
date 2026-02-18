@@ -397,6 +397,41 @@ class TradeEngine:
             logger.error(f"❌ TP/SL_APPLY_EXCEPTION | Contract: {contract_id} | TP: ${tp_amount:.2f} | SL: ${sl_amount:.2f} | Error: {type(e).__name__}: {e}", exc_info=True)
             return False
     
+    async def remove_take_profit(self, contract_id: str) -> bool:
+        """
+        Remove the server-side Take Profit from an open contract.
+        
+        Used by the trailing profit feature: once trailing activates,
+        we cancel Deriv's fixed TP so the monitoring loop handles exit instead.
+        The Stop Loss remains intact.
+        """
+        try:
+            # Deriv API: pass null/0 to cancel take_profit
+            cancel_tp_request = {
+                "contract_update": 1,
+                "contract_id": int(contract_id),
+                "limit_order": {
+                    "take_profit": None  # Cancel TP
+                }
+            }
+            
+            logger.info(f"📈 Removing server-side TP for contract {contract_id} (trailing profit takeover)")
+            response = await self.send_request(cancel_tp_request)
+            
+            if "error" in response:
+                logger.error(f"❌ Failed to remove TP: {response['error']['message']}")
+                return False
+            
+            if "contract_update" in response:
+                logger.info(f"✅ Server-side TP removed for {contract_id} — trailing profit now controls exit")
+                return True
+            else:
+                logger.warning(f"⚠️ Unexpected response when removing TP: {response}")
+                return False
+        except Exception as e:
+            logger.error(f"❌ Error removing TP: {e}")
+            return False
+    
     async def open_trade(self, direction: str, stake: float, symbol: str,
                         tp_price: Optional[float] = None,
                         sl_price: Optional[float] = None,

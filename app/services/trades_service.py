@@ -48,7 +48,8 @@ class UserTradesService:
                 "profit": trade_data.get("profit"),
                 "status": trade_data.get("status"),
                 "timestamp": timestamp,
-                "duration": trade_data.get("duration")
+                "duration": trade_data.get("duration"),
+                "strategy_type": trade_data.get("strategy_type", "Conservative")
             }
 
 

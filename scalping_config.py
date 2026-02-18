@@ -34,4 +34,16 @@ SCALPING_RUNAWAY_TRADE_COUNT = 10
 
 # ==================== STAGNATION EXIT ====================
 SCALPING_STAGNATION_EXIT_TIME = 120  # seconds (2 minutes)
-SCALPING_STAGNATION_LOSS_PCT = 15.0  # percentage of stake
+SCALPING_STAGNATION_LOSS_PCT = 7.0  # percentage of stake
+
+# ==================== TRAILING PROFIT ====================
+SCALPING_TRAIL_ACTIVATION_PCT = 8.0   # Trail activates at 8% profit of stake
+
+# Dynamic trailing distance tiers: (min_profit_pct, trail_distance_pct)
+# As profit grows, the trail widens to give big winners room to breathe.
+# Tiers are checked from highest to lowest; first match wins.
+SCALPING_TRAIL_TIERS = [
+    (25.0, 7.0),   # 25%+ profit → 7% trail distance
+    (15.0, 5.0),   # 15-25% profit → 5% trail distance
+    (8.0,  3.0),   # 8-15% profit → 3% trail distance (default)
+]

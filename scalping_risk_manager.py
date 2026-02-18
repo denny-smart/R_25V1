@@ -62,6 +62,12 @@ class ScalpingRiskManager(BaseRiskManager):
         self.last_trade_time = None
         self.stake = 50.0  # Default, will be updated
         
+        # Per-trade metadata (stake, symbol, open_time) keyed by contract_id
+        self._trade_metadata: Dict[str, Dict] = {}
+        
+        # Per-trade trailing profit state keyed by contract_id
+        self._trailing_state: Dict[str, Dict] = {}
+        
         # Runaway trade protection
         self.recent_trade_timestamps: List[datetime] = []  # Rolling window of last 10 trades
         
@@ -188,11 +194,19 @@ class ScalpingRiskManager(BaseRiskManager):
         return True, "OK"
         
     def get_active_trade_info(self):
-        """Return info about first active trade for monitoring (compatibility)"""
+        """Return info about first active trade for monitoring, including metadata."""
         if not self.active_trades:
             return None
-        # Return a dummy dict with contract_id of first trade
-        return {'contract_id': self.active_trades[0], 'symbol': 'MULTI', 'strategy': 'Scalping'}
+        contract_id = self.active_trades[0]
+        info = {
+            'contract_id': contract_id,
+            'symbol': 'MULTI',
+            'strategy': 'Scalping'
+        }
+        # Merge stored metadata (stake, symbol, open_time) if available
+        meta = self._trade_metadata.get(contract_id, {})
+        info.update(meta)
+        return info
 
     def get_cooldown_remaining(self) -> int:
         """Get remaining cooldown in seconds"""
@@ -229,6 +243,15 @@ class ScalpingRiskManager(BaseRiskManager):
         
         if contract_id:
             self.active_trades.append(contract_id)
+            # Store per-trade metadata for monitoring
+            self._trade_metadata[contract_id] = {
+                'stake': stake,
+                'symbol': trade_info.get('symbol', 'UNKNOWN'),
+                'open_time': datetime.now(),
+                'direction': trade_info.get('direction'),
+                'entry_price': trade_info.get('entry_price'),
+                'multiplier': trade_info.get('multiplier'),
+            }
         
         self.daily_trade_count += 1
         self.last_trade_time = datetime.now()
@@ -272,6 +295,10 @@ class ScalpingRiskManager(BaseRiskManager):
         elif isinstance(result, str): # Handle legacy case where just ID passed (rare)
              if result in self.active_trades:
                  self.active_trades.remove(result)
+
+        # Clean up per-trade state
+        self._trade_metadata.pop(contract_id, None)
+        self._trailing_state.pop(contract_id, None)
 
         # Update P&L
         self.daily_pnl += profit
@@ -418,6 +445,88 @@ class ScalpingRiskManager(BaseRiskManager):
             return True, 'stagnation_exit'
         
         return False, ''
+
+    def check_trailing_profit(self, trade_info: Dict, current_pnl: float) -> Tuple[bool, str, bool]:
+        """
+        Check if a scalping trade should be closed via trailing profit.
+        
+        Once profit reaches SCALPING_TRAIL_ACTIVATION_PCT of stake, trailing activates.
+        The trail follows SCALPING_TRAIL_DISTANCE_PCT behind the highest recorded profit.
+        If profit drops below (highest - distance), the trade is closed to lock in gains.
+        
+        Args:
+            trade_info: Dict with at least 'contract_id' and 'stake'
+            current_pnl: Current unrealized profit/loss
+            
+        Returns:
+            Tuple of (should_close: bool, reason: str, just_activated: bool)
+            just_activated is True only on the first call that crosses the activation
+            threshold — the caller should remove the server-side TP at this point.
+        """
+        contract_id = trade_info.get('contract_id')
+        stake = trade_info.get('stake', self.stake)
+        symbol = trade_info.get('symbol', 'UNKNOWN')
+        
+        if not contract_id or stake <= 0:
+            return False, '', False
+        
+        # Calculate current profit as percentage of stake
+        profit_pct = (current_pnl / stake) * 100
+        
+        # Not yet at activation threshold
+        if profit_pct < scalping_config.SCALPING_TRAIL_ACTIVATION_PCT:
+            return False, '', False
+        
+        # Get or initialize trailing state for this contract
+        state = self._trailing_state.get(contract_id)
+        
+        if state is None:
+            # First time reaching activation — initialize trailing
+            trail_distance = self._get_trail_distance(profit_pct)
+            trail_floor = profit_pct - trail_distance
+            self._trailing_state[contract_id] = {
+                'highest_profit_pct': profit_pct,
+                'trailing_active': True,
+            }
+            logger.info(
+                f"[SCALP] 📈 Trailing profit activated at {profit_pct:.1f}%, "
+                f"trail distance {trail_distance:.1f}%, floor at {trail_floor:.1f}%"
+            )
+            return False, '', True  # just_activated=True → caller should remove server-side TP
+        
+        # Trailing is active — update highest profit (ratchet up only)
+        if profit_pct > state['highest_profit_pct']:
+            state['highest_profit_pct'] = profit_pct
+        
+        # Calculate the trailing floor using tiered distance based on PEAK profit
+        trail_distance = self._get_trail_distance(state['highest_profit_pct'])
+        trail_floor = state['highest_profit_pct'] - trail_distance
+        
+        # Check if profit dropped below the trailing floor
+        if profit_pct < trail_floor:
+            logger.warning(
+                f"[SCALP] 🔒 Trailing profit EXIT: {symbol} profit dropped to {profit_pct:.1f}% "
+                f"(peak {state['highest_profit_pct']:.1f}%, distance {trail_distance:.1f}%, floor {trail_floor:.1f}%)"
+            )
+            return True, 'trailing_profit_exit', False
+        
+        # Still above floor — continue trailing
+        logger.debug(
+            f"[SCALP] 📈 Trailing: {symbol} profit {profit_pct:.1f}% "
+            f"(peak {state['highest_profit_pct']:.1f}%, distance {trail_distance:.1f}%, floor {trail_floor:.1f}%)"
+        )
+        return False, '', False
+    
+    def _get_trail_distance(self, profit_pct: float) -> float:
+        """
+        Get the trailing distance for a given profit percentage using tiered config.
+        Higher profit → wider trail to give big winners room to breathe.
+        """
+        for min_pct, distance in scalping_config.SCALPING_TRAIL_TIERS:
+            if profit_pct >= min_pct:
+                return distance
+        # Fallback (shouldn't reach here since activation is already checked)
+        return scalping_config.SCALPING_TRAIL_TIERS[-1][1]
     
     def reset_daily_stats(self) -> None:
         """

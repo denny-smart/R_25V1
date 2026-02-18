@@ -936,10 +936,67 @@ class BotRunner:
                         'multiplier': active_info.get('multiplier')
                     }
                     
+                    # CHECK 1: Trailing profit exit (when trade is in profit)
+                    should_trail_exit, trail_reason, just_activated = self.risk_manager.check_trailing_profit(trade_info, current_pnl)
+                    
+                    # On first activation, remove server-side TP so trailing controls exit
+                    if just_activated:
+                        try:
+                            await self.trade_engine.remove_take_profit(contract_id)
+                        except Exception as e:
+                            logger.error(f"❌ Failed to remove server-side TP: {e}")
+                    
+                    if should_trail_exit:
+                        logger.warning(f"📈 {symbol} trailing profit exit triggered - locking gains")
+                        
+                        try:
+                            sell_result = await self.trade_engine.close_trade(contract_id)
+                            
+                            if sell_result:
+                                pnl = sell_result.get('profit', current_pnl)
+                                status = 'won' if pnl > 0 else ('lost' if pnl < 0 else 'break_even')
+                                
+                                # Record closure
+                                self.risk_manager.record_trade_close(contract_id, pnl, status)
+                                self.state.update_trade(contract_id, sell_result)
+                                
+                                logger.info(f"🔒 {symbol} trade closed (trailing profit) - system unlocked")
+                                logger.info(f"💰 P&L: ${pnl:.2f}")
+                                
+                                # Persist to DB
+                                try:
+                                    result_for_db = sell_result.copy()
+                                    result_for_db.update(active_info)
+                                    result_for_db['strategy_type'] = self.strategy.get_strategy_name()
+                                    result_for_db['exit_reason'] = trail_reason
+                                    saved = UserTradesService.save_trade(self.account_id, result_for_db)
+                                    if saved:
+                                        logger.info(f"✅ Trailing profit trade persisted to DB: {contract_id}")
+                                except Exception as e:
+                                    logger.error(f"❌ DB save failed for trailing profit trade: {e}")
+                                
+                                # Notify Telegram
+                                try:
+                                    result_for_notify = sell_result.copy()
+                                    result_for_notify.update(active_info)
+                                    result_for_notify['exit_reason'] = trail_reason
+                                    
+                                    await self.telegram_bridge.notify_trade_closed(
+                                        result_for_notify, pnl, status,
+                                        strategy_type=self.strategy.get_strategy_name()
+                                    )
+                                except:
+                                    pass
+                                
+                                return  # Exit monitoring after closing
+                        except Exception as e:
+                            logger.error(f"❌ Failed to close trailing profit trade: {e}")
+                    
+                    # CHECK 2: Stagnation exit (when trade is open too long and losing)
                     should_exit, exit_reason = self.risk_manager.check_stagnation_exit(trade_info, current_pnl)
                     
                     if should_exit:
-                        logger.warning(f"? {symbol} stagnation exit triggered - closing trade")
+                        logger.warning(f"⏰ {symbol} stagnation exit triggered - closing trade")
                         
                         # Close the trade immediately
                         try:
@@ -953,8 +1010,8 @@ class BotRunner:
                                 self.risk_manager.record_trade_close(contract_id, pnl, status)
                                 self.state.update_trade(contract_id, sell_result)
                                 
-                                logger.info(f"?? {symbol} trade closed (stagnation) - system unlocked")
-                                logger.info(f"?? P&L: ${pnl:.2f}")
+                                logger.info(f"🔓 {symbol} trade closed (stagnation) - system unlocked")
+                                logger.info(f"💰 P&L: ${pnl:.2f}")
                                 
                                 # Notify Telegram with stagnation exit reason
                                 try:
@@ -971,7 +1028,7 @@ class BotRunner:
                                 
                                 return  # Exit monitoring after closing
                         except Exception as e:
-                            logger.error(f"? Failed to close stagnant trade: {e}")
+                            logger.error(f"❌ Failed to close stagnant trade: {e}")
             
             if trade_status and trade_status.get('is_sold'):
                 # Trade closed externally or by TP/SL
