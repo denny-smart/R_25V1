@@ -690,6 +690,53 @@ async def _process_symbol(
                 "symbol": symbol,
             })
 
+        # ── STEP 5: DB write with retry — lock stays held until confirmed ──
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        logger.info(
+            f"[RF] STEP 5/6 | {ts} | WRITING TRADE TO DB | contract={contract_id} "
+            f"pnl={pnl:+.2f} status={status} closure={closure_reason}"
+        )
+
+        db_write_success = False
+        if user_id:
+            db_write_success = await _write_trade_to_db_with_retry(
+                user_id=user_id,
+                contract_id=contract_id,
+                symbol=symbol,
+                direction=direction,
+                stake_val=stake_val,
+                pnl=pnl,
+                status=status,
+                closure_reason=closure_reason,
+                duration=duration,
+                duration_unit=duration_unit,
+                result=result,
+                settlement=settlement,
+                UserTradesService=UserTradesService,
+            )
+        else:
+            logger.warning("[RF] ⚠️ No user_id — skipping DB write (trade lock will release)")
+            db_write_success = True  # No user context — allow lock release
+
+        if not db_write_success:
+            # DB write failed after all retries — HALT the system
+            risk_manager.halt(
+                f"DB write failed for contract {contract_id} after "
+                f"{rf_config.RF_DB_WRITE_MAX_RETRIES} retries"
+            )
+            await event_manager.broadcast({
+                "type": "error",
+                "message": (
+                    f"🚨 SYSTEM HALTED: DB write failed for {symbol}#{contract_id}. "
+                    f"Trade lock held. Manual intervention required."
+                ),
+                "timestamp": datetime.now().isoformat(),
+                "account_id": user_id,
+            })
+            # Lock stays held — do NOT release! The finally block handles cleanup.
+            return
+
+        # ── DB write succeeded — now broadcast notifications ──
         # Broadcast trade_closed + unlock notification
         await event_manager.broadcast({
             "type": "trade_closed",
@@ -745,52 +792,6 @@ async def _process_symbol(
             "timestamp": datetime.now().isoformat(),
             "account_id": user_id,
         })
-
-        # ── STEP 5: DB write with retry — lock stays held until confirmed ──
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        logger.info(
-            f"[RF] STEP 5/6 | {ts} | WRITING TRADE TO DB | contract={contract_id} "
-            f"pnl={pnl:+.2f} status={status} closure={closure_reason}"
-        )
-
-        db_write_success = False
-        if user_id:
-            db_write_success = await _write_trade_to_db_with_retry(
-                user_id=user_id,
-                contract_id=contract_id,
-                symbol=symbol,
-                direction=direction,
-                stake_val=stake_val,
-                pnl=pnl,
-                status=status,
-                closure_reason=closure_reason,
-                duration=duration,
-                duration_unit=duration_unit,
-                result=result,
-                settlement=settlement,
-                UserTradesService=UserTradesService,
-            )
-        else:
-            logger.warning("[RF] ⚠️ No user_id — skipping DB write (trade lock will release)")
-            db_write_success = True  # No user context — allow lock release
-
-        if not db_write_success:
-            # DB write failed after all retries — HALT the system
-            risk_manager.halt(
-                f"DB write failed for contract {contract_id} after "
-                f"{rf_config.RF_DB_WRITE_MAX_RETRIES} retries"
-            )
-            await event_manager.broadcast({
-                "type": "error",
-                "message": (
-                    f"🚨 SYSTEM HALTED: DB write failed for {symbol}#{contract_id}. "
-                    f"Trade lock held. Manual intervention required."
-                ),
-                "timestamp": datetime.now().isoformat(),
-                "account_id": user_id,
-            })
-            # Lock stays held — do NOT release! The finally block handles cleanup.
-            return
 
     except Exception as e:
         # Unexpected error during lifecycle — halt

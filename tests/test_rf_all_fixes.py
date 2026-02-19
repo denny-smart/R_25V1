@@ -262,6 +262,7 @@ async def test_05_manual_close_returns_closure_type():
             "sell_price": 1.40,
             "buy_price": 1.00,
             "bid_price": 1.40,
+            "profit": 0.40,  # Deriv provides actual profit field
         },
         "subscription": {"id": "sub_123"},
     })

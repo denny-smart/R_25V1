@@ -302,10 +302,13 @@ class RFTradeEngine:
 
                 # --- Contract has settled (naturally or after our sell) ---
                 if is_sold or is_expired:
+                    # 🚨 FIX: Use Deriv's actual profit field, not manual calculation
+                    # The profit field accounts for buy_price, sell_price, payout, and all fees
+                    # Manual calculation (sell_price - buy_price) can be wrong due to Deriv's payout structure
+                    profit = float(poc.get("profit", 0))
                     sell_price = float(poc.get("sell_price", 0))
                     buy_price = float(poc.get("buy_price", 0))
-                    profit = sell_price - buy_price
-                    status = "win" if profit > 0 else "loss"
+                    status = "win" if profit > 0 else "loss" if profit < 0 else "breakeven"
 
                     # Determine closure tag and type
                     if sell_reason == "tp":
