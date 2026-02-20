@@ -419,8 +419,9 @@ async def test_09_consecutive_loss_cooldown(risk_manager):
             "symbol": "R_10",
         })
         risk_manager.release_trade_lock(reason="test loss")
-        # Clear per-symbol cooldown for next iteration
+        # Clear cooldowns for next iteration (simulating rapid consecutive losses)
         risk_manager._last_trade_close.clear()
+        risk_manager._last_trade_close_global = datetime.min
 
     # Should now be in loss cooldown
     assert risk_manager.consecutive_losses == rf_config.RF_MAX_CONSECUTIVE_LOSSES
@@ -482,7 +483,7 @@ async def test_config_values():
     assert rf_config.RF_MAX_CONCURRENT_PER_SYMBOL == 1
     assert rf_config.RF_PENDING_TIMEOUT_SECONDS == 60
     assert rf_config.RF_SCAN_INTERVAL == 10
-    assert rf_config.RF_MAX_CONSECUTIVE_LOSSES == 3
+    assert rf_config.RF_MAX_CONSECUTIVE_LOSSES == 2  # Block after 2 losses to prevent 3rd
     assert rf_config.RF_LOSS_COOLDOWN_SECONDS == 21600
     assert rf_config.RF_TP_SL_MAX_RETRIES == 10
     assert rf_config.RF_TP_SL_RETRY_DELAY == 0.5

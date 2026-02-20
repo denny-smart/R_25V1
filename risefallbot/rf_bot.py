@@ -308,6 +308,9 @@ async def run(stake: Optional[float] = None, api_token: Optional[str] = None,
                 f"{'='*60}"
             )
 
+            # Daily stats reset at midnight
+            risk_manager.ensure_daily_reset_if_needed()
+
             # ─────────────────────────────────────────────────────────────────────
             # WATCHDOG: Detect ghost mutex — held with no real active trades
             # Runs every cycle so it fires even when no new trade is being acquired
@@ -514,8 +517,8 @@ async def _process_symbol(
     At NO POINT can two trades exist simultaneously.
     If any step fails, the system halts rather than proceeding.
     """
-    # ── Pre-check: Risk gate (daily cap, cooldown, etc.) ──
-    can_trade, reason = risk_manager.can_trade(symbol=symbol)
+    # ── Pre-check: Risk gate (daily cap, cooldown, daily loss, etc.) ──
+    can_trade, reason = risk_manager.can_trade(symbol=symbol, stake=stake)
     if not can_trade:
         logger.info(f"[RF][{symbol}] ⏸️ Cannot trade: {reason}")
         return
@@ -547,8 +550,14 @@ async def _process_symbol(
     duration = signal["duration"]
     duration_unit = signal["duration_unit"]
 
+    # ── Pre-check: Stake validation (use actual signal stake) ──
+    max_stake = getattr(rf_config, "RF_MAX_STAKE", 100.0)
+    if stake_val > max_stake:
+        logger.warning(f"[RF][{symbol}] ⏸️ Stake ${stake_val} exceeds max ${max_stake} — rejecting")
+        return
+
     # ── STEP 1: Acquire trade lock ──
-    lock_acquired = await risk_manager.acquire_trade_lock(symbol, "pending")
+    lock_acquired = await risk_manager.acquire_trade_lock(symbol, "pending", stake=stake_val)
     if not lock_acquired:
         logger.error(f"[RF][{symbol}] ❌ Could not acquire trade lock — system may be halted")
         return
@@ -581,6 +590,14 @@ async def _process_symbol(
                 logger.error(f"❌ Telegram notification failed: {e}")
 
         # ── STEP 2: Execute trade ──
+        # Defensive: never buy if active_trades non-empty (should never happen with mutex)
+        if len(risk_manager.active_trades) > 0:
+            logger.critical(
+                f"[RF][{symbol}] 🚨 DEFENSIVE BLOCK: active_trades={len(risk_manager.active_trades)} "
+                f"before buy — rejecting to prevent multiple trades"
+            )
+            return  # finally block will release lock
+
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         logger.info(
             f"[RF] STEP 2/6 | {ts} | EXECUTING TRADE {symbol} {direction} ${stake_val}"

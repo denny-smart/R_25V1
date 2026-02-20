@@ -477,7 +477,7 @@ async def test_overrides_cannot_bypass_config_limits():
         "max_concurrent_total": 100,        # Config says 1
         "cooldown_seconds": 0,             # Config says 30
         "max_trades_per_day": 999,          # Config says 30
-        "max_consecutive_losses": 999,      # Config says 3
+        "max_consecutive_losses": 999,      # Config says 2
         "loss_cooldown_seconds": 0,        # Config says 21600
     })
 

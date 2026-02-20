@@ -1,11 +1,13 @@
 """
 Rise/Fall Risk Manager
-Per-symbol cooldown, max concurrent trades, daily cap, and consecutive-loss cooldown
+Enforces Trading System Rules: single trade, TP/SL, no 3 consecutive losses
 
-STRICT SINGLE-TRADE ENFORCEMENT:
-    Uses an asyncio.Lock (mutex) as the primary concurrency gate.
-    The lock is acquired BEFORE trade execution and released ONLY after
-    confirmed DB write. No boolean-flag bypass is possible.
+Rules enforced:
+  1. Only one open trade at a time — mutex + active_trades check
+  2. No new trade until current is fully closed — mutex blocks scan
+  3. TP/SL applied by RFTradeEngine.wait_for_result (rf_trade_engine.py)
+  4. New trade only after TP/SL hit — lifecycle blocks until settlement
+  5. Block after 2 consecutive losses — RF_MAX_CONSECUTIVE_LOSSES=2 + cooldown
 
 rf_risk_manager.py
 """
@@ -59,6 +61,14 @@ class RiseFallRiskManager(BaseRiskManager):
             overrides.get("cooldown_seconds", rf_config.RF_COOLDOWN_SECONDS),
             rf_config.RF_COOLDOWN_SECONDS,  # Cannot reduce cooldown below config
         )
+        self.global_cooldown_seconds = max(
+            overrides.get("global_cooldown_seconds", getattr(rf_config, "RF_GLOBAL_COOLDOWN_SECONDS", 30)),
+            getattr(rf_config, "RF_GLOBAL_COOLDOWN_SECONDS", 30),
+        )
+        self.daily_loss_limit_mult = min(
+            overrides.get("daily_loss_limit_mult", getattr(rf_config, "RF_DAILY_LOSS_LIMIT_MULTIPLIER", 3.0)),
+            getattr(rf_config, "RF_DAILY_LOSS_LIMIT_MULTIPLIER", 3.0),
+        )
         self.max_trades_per_day = min(
             overrides.get("max_trades_per_day", rf_config.RF_MAX_TRADES_PER_DAY),
             rf_config.RF_MAX_TRADES_PER_DAY,
@@ -82,6 +92,8 @@ class RiseFallRiskManager(BaseRiskManager):
 
         # Per-symbol timestamps of last trade close
         self._last_trade_close: Dict[str, datetime] = {}
+        # Global last trade close (for RF_GLOBAL_COOLDOWN_SECONDS)
+        self._last_trade_close_global: datetime = datetime.min
 
         # Loss-streak cooldown timestamp
         self._loss_cooldown_until: datetime = datetime.min
@@ -106,7 +118,10 @@ class RiseFallRiskManager(BaseRiskManager):
 
         # Watchdog state for pending entries
         self._pending_entry_timestamp: datetime = datetime.min
-        
+
+        # Daily reset tracking (for midnight rollover)
+        self._last_daily_reset_date: datetime = datetime.min.date()
+
         # Watchdog timeout (seconds) — if a 'pending' entry is older than this
         # with no matching live contract, forcibly release the lock
         self._pending_timeout_seconds = rf_config.RF_PENDING_TIMEOUT_SECONDS
@@ -114,7 +129,8 @@ class RiseFallRiskManager(BaseRiskManager):
         logger.info(
             f"[RF-Risk] Initialized | max_concurrent_total={self.max_concurrent_total} "
             f"max_concurrent/symbol={self.max_concurrent_per_symbol} "
-            f"cooldown={self.cooldown_seconds}s daily_cap={self.max_trades_per_day} "
+            f"cooldown={self.cooldown_seconds}s global_cooldown={self.global_cooldown_seconds}s "
+            f"daily_cap={self.max_trades_per_day} daily_loss_limit={self.daily_loss_limit_mult}x stake | "
             f"max_consec_loss={self.max_consecutive_losses} | "
             f"pending_timeout={self._pending_timeout_seconds}s | "
             f"⚠️ STRICT ENFORCEMENT: asyncio.Lock mutex + 6-step lifecycle + watchdog"
@@ -129,7 +145,7 @@ class RiseFallRiskManager(BaseRiskManager):
         """Expose the mutex for external lock checks (e.g. run loop)."""
         return self._trade_mutex
 
-    async def acquire_trade_lock(self, symbol: str, contract_id: str) -> bool:
+    async def acquire_trade_lock(self, symbol: str, contract_id: str, stake: float = None) -> bool:
         """
         Acquire the trade mutex. Blocks if another trade holds it.
 
@@ -139,6 +155,7 @@ class RiseFallRiskManager(BaseRiskManager):
         Args:
             symbol:      Trading symbol
             contract_id: Contract ID (for logging, may be 'pending' pre-buy)
+            stake:       Reference stake for risk checks (daily loss limit)
 
         Returns:
             True if acquired, False if system is halted
@@ -193,7 +210,7 @@ class RiseFallRiskManager(BaseRiskManager):
         # ── DOUBLE-CHECK: Re-validate ALL risk rules after acquiring mutex ──
         # Between the pre-check can_trade() and now, conditions may have changed
         # (e.g., daily cap hit, loss-streak cooldown triggered by another path).
-        can, reason = self.can_trade(symbol=symbol)
+        can, reason = self.can_trade(symbol=symbol, stake=stake)
         # can_trade will return False for "mutex is held" — skip that specific check
         # since we just acquired it. Only fail on OTHER risk violations.
         if not can and "mutex" not in reason.lower():
@@ -279,18 +296,20 @@ class RiseFallRiskManager(BaseRiskManager):
     #  BaseRiskManager interface                                          #
     # ------------------------------------------------------------------ #
 
-    def can_trade(self, symbol: str = None, verbose: bool = False) -> Tuple[bool, str]:
+    def can_trade(self, symbol: str = None, verbose: bool = False, stake: float = None) -> Tuple[bool, str]:
         """
         Check if a new trade is allowed.
         
         Args:
             symbol: Trading symbol to check (per-symbol cooldown + concurrency)
             verbose: If True, log detailed reasons
+            stake: Reference stake for daily loss limit (uses RF_DEFAULT_STAKE if None)
             
         Returns:
             (allowed, reason)
         """
         now = datetime.now()
+        ref_stake = stake if stake is not None and stake > 0 else rf_config.RF_DEFAULT_STAKE
 
         # 0. System halted
         if self._halted:
@@ -313,7 +332,15 @@ class RiseFallRiskManager(BaseRiskManager):
                 logger.info(f"[RF-Risk] ❌ {msg}")
             return False, msg
 
-        # 2. Consecutive-loss cooldown
+        # 2. Daily loss limit
+        daily_loss_limit = ref_stake * self.daily_loss_limit_mult
+        if self.daily_pnl <= -daily_loss_limit:
+            msg = f"Daily loss limit reached (pnl={self.daily_pnl:+.2f} <= -{daily_loss_limit:.2f})"
+            if verbose:
+                logger.info(f"[RF-Risk] ❌ {msg}")
+            return False, msg
+
+        # 3. Consecutive-loss cooldown
         if now < self._loss_cooldown_until:
             remaining = (self._loss_cooldown_until - now).total_seconds()
             msg = f"Loss-streak cooldown ({remaining:.0f}s remaining)"
@@ -321,7 +348,7 @@ class RiseFallRiskManager(BaseRiskManager):
                 logger.info(f"[RF-Risk] ⏸️ {msg}")
             return False, msg
 
-        # 3. Total concurrent limit (across all symbols)
+        # 4. Total concurrent limit (across all symbols)
         total_active = len(self.active_trades)
         if total_active >= self.max_concurrent_total:
             msg = f"Max total concurrent trades reached ({total_active}/{self.max_concurrent_total})"
@@ -329,9 +356,19 @@ class RiseFallRiskManager(BaseRiskManager):
                 logger.info(f"[RF-Risk] ⏸️ {msg}")
             return False, msg
 
-        # 4. Per-symbol checks (if symbol provided)
+        # 5. Global cooldown (after any trade)
+        if self._last_trade_close_global and self._last_trade_close_global != datetime.min:
+            elapsed = (now - self._last_trade_close_global).total_seconds()
+            if elapsed < self.global_cooldown_seconds:
+                remaining = self.global_cooldown_seconds - elapsed
+                msg = f"Global cooldown ({remaining:.0f}s remaining)"
+                if verbose:
+                    logger.info(f"[RF-Risk] ⏸️ {msg}")
+                return False, msg
+
+        # 6. Per-symbol checks (if symbol provided)
         if symbol:
-            # 4a. Concurrent limit per symbol
+            # 6a. Concurrent limit per symbol
             active_for_symbol = sum(
                 1 for t in self.active_trades.values()
                 if t.get("symbol") == symbol
@@ -342,7 +379,7 @@ class RiseFallRiskManager(BaseRiskManager):
                     logger.info(f"[RF-Risk] ⏸️ {msg}")
                 return False, msg
 
-            # 4b. Per-symbol cooldown
+            # 6b. Per-symbol cooldown
             last_close = self._last_trade_close.get(symbol)
             if last_close:
                 elapsed = (now - last_close).total_seconds()
@@ -354,6 +391,13 @@ class RiseFallRiskManager(BaseRiskManager):
                     return False, msg
 
         return True, "OK"
+
+    def ensure_daily_reset_if_needed(self) -> None:
+        """Call at start of each cycle: reset daily stats if we crossed midnight."""
+        today = datetime.now().date()
+        if self._last_daily_reset_date != today:
+            self.reset_daily_stats()
+            self._last_daily_reset_date = today
 
     def record_trade_open(self, trade_info: Dict) -> None:
         """
@@ -448,6 +492,8 @@ class RiseFallRiskManager(BaseRiskManager):
 
         # Per-symbol cooldown starts now
         self._last_trade_close[symbol] = datetime.now()
+        # Global cooldown starts now
+        self._last_trade_close_global = datetime.now()
 
         # Consecutive-loss cooldown
         if self.consecutive_losses >= self.max_consecutive_losses:
@@ -516,6 +562,7 @@ class RiseFallRiskManager(BaseRiskManager):
         self.losses = 0
         self.consecutive_losses = 0
         self._last_trade_close.clear()
+        self._last_trade_close_global = datetime.min
         self._loss_cooldown_until = datetime.min
 
     # ------------------------------------------------------------------ #
