@@ -237,15 +237,12 @@ class RFTradeEngine:
         self, contract_id: str, stake: float = 0.0
     ) -> Optional[Dict]:
         """
-        Subscribe to an open contract and monitor until settlement OR
-        early take-profit.
-
-        If the unrealised profit reaches RF_TAKE_PROFIT_PCT × stake,
-        the contract is sold early to lock in gains.
+        Subscribe to an open contract and monitor until settlement.
+        Contracts expire naturally without early exit.
 
         Args:
             contract_id: The contract ID to track
-            stake: Original stake (used to compute TP threshold)
+            stake: Original stake (for logging only)
 
         Returns:
             Dict with settlement result:
@@ -254,15 +251,11 @@ class RFTradeEngine:
                 'profit': float,
                 'status': 'win' | 'loss',
                 'sell_price': float,
+                'closure_type': str,
             }
         """
         if not await self.ensure_connected():
             return None
-
-        tp_threshold = stake * rf_config.RF_TAKE_PROFIT_PCT if stake > 0 else 0
-        sl_threshold = stake * rf_config.RF_STOP_LOSS_PCT if stake > 0 else 0
-        already_sold = False
-        sell_reason = None  # "tp" or "sl"
 
         # Subscribe to the contract
         sub_request = {
@@ -272,9 +265,7 @@ class RFTradeEngine:
         }
 
         logger.info(
-            f"[RF-Engine] 👁️ Watching contract #{contract_id} "
-            f"| TP: +${tp_threshold:.2f} ({rf_config.RF_TAKE_PROFIT_PCT*100:.0f}%) "
-            f"| SL: -${sl_threshold:.2f} ({rf_config.RF_STOP_LOSS_PCT*100:.0f}%)"
+            f"[RF-Engine] 👁️ Watching contract #{contract_id} (will expire naturally)"
         )
 
         try:
@@ -311,16 +302,10 @@ class RFTradeEngine:
                     status = "win" if profit > 0 else "loss" if profit < 0 else "breakeven"
 
                     # Determine closure tag and type
-                    if sell_reason == "tp":
-                        tag = "🎯 TP-SOLD"
-                        closure_type = "take_profit"
-                    elif sell_reason == "sl":
-                        tag = "🛑 SL-SOLD"
-                        closure_type = "stop_loss"
-                    elif is_expired:
+                    if is_expired:
                         tag = "🏁 EXPIRED"
                         closure_type = "expiry"
-                    elif is_sold and not already_sold:
+                    elif is_sold:
                         # Sold externally — manual close on Deriv platform
                         tag = "🖐️ MANUAL-CLOSE"
                         closure_type = "manual"
@@ -356,52 +341,7 @@ class RFTradeEngine:
                         "closure_type": closure_type,
                     }
 
-                # --- Still open: check for take-profit / stop-loss ---
-                if not already_sold:
-                    bid_price = float(poc.get("bid_price", 0))
-                    buy_price = float(poc.get("buy_price", 0))
-                    unrealised_pnl = bid_price - buy_price
-
-                    # Take-profit check
-                    if tp_threshold > 0 and unrealised_pnl >= tp_threshold:
-                        logger.info(
-                            f"[RF-Engine] 💰 TP hit! Unrealised +${unrealised_pnl:.2f} "
-                            f">= threshold ${tp_threshold:.2f} — selling early"
-                        )
-                        sold = await self._sell_with_retry(
-                            contract_id, bid_price, "TP",
-                            max_attempts=rf_config.RF_TP_SL_MAX_RETRIES,
-                            retry_delay=rf_config.RF_TP_SL_RETRY_DELAY,
-                        )
-                        if sold:
-                            already_sold = True
-                            sell_reason = "tp"
-                        else:
-                            logger.warning(
-                                f"[RF-Engine] ⚠️ TP sell failed all retries for #{contract_id} — "
-                                f"continuing to monitor. Will retry on next tick."
-                            )
-
-                    # Stop-loss check
-                    elif sl_threshold > 0 and unrealised_pnl <= -sl_threshold:
-                        logger.info(
-                            f"[RF-Engine] 🛑 SL hit! Unrealised ${unrealised_pnl:.2f} "
-                            f"<= threshold -${sl_threshold:.2f} — cutting loss"
-                        )
-                        sold = await self._sell_with_retry(
-                            contract_id, bid_price, "SL",
-                            max_attempts=rf_config.RF_TP_SL_MAX_RETRIES,
-                            retry_delay=rf_config.RF_TP_SL_RETRY_DELAY,
-                        )
-                        if sold:
-                            already_sold = True
-                            sell_reason = "sl"
-                        else:
-                            logger.warning(
-                                f"[RF-Engine] ⚠️ SL sell failed all retries for #{contract_id} — "
-                                f"continuing to monitor. Will retry on next tick."
-                            )
-
+                # Contract is still open, continue monitoring
         except asyncio.TimeoutError:
             logger.critical(
                 f"[RF-Engine] 🚨 Contract #{contract_id} watch TIMED OUT after 600s — "
@@ -411,96 +351,4 @@ class RFTradeEngine:
         except Exception as e:
             logger.error(f"[RF-Engine] ❌ Contract watch error: {e}")
             return None
-
-    async def _sell_with_retry(
-        self,
-        contract_id: str,
-        min_price: float,
-        reason: str,
-        max_attempts: int = 3,
-        retry_delay: float = 1.0,
-    ) -> bool:
-        """
-        Attempt to sell a contract with retries.
-        
-        TP/SL enforcement MUST NOT be silently skipped. If the first sell
-        attempt fails, retry up to max_attempts times before giving up.
-        On retries, uses market price (0) instead of the original bid to
-        avoid stale-price rejections from Deriv.
-
-        Args:
-            contract_id: Contract to sell
-            min_price: Minimum acceptable sell price (used on first attempt)
-            reason: 'TP' or 'SL' (for logging)
-            max_attempts: Number of sell attempts
-            retry_delay: Seconds between retry attempts
-
-        Returns:
-            True if sold successfully, False if all attempts failed
-        """
-        for attempt in range(1, max_attempts + 1):
-            # First attempt: use exact bid price
-            # Subsequent attempts: accept market price (0) to avoid stale price rejection
-            price_to_use = min_price if attempt == 1 else 0.0
-            if attempt > 1:
-                logger.info(
-                    f"[RF-Engine] 🔄 {reason} retry {attempt}/{max_attempts} — "
-                    f"using market price (original bid ${min_price:.2f} may be stale)"
-                )
-            sold = await self._sell_contract(contract_id, price_to_use)
-            if sold:
-                logger.info(
-                    f"[RF-Engine] ✅ {reason} sell confirmed for #{contract_id} "
-                    f"(attempt {attempt}/{max_attempts})"
-                )
-                return True
-            if attempt < max_attempts:
-                logger.warning(
-                    f"[RF-Engine] ⚠️ {reason} sell attempt {attempt}/{max_attempts} failed "
-                    f"for #{contract_id} — retrying in {retry_delay}s..."
-                )
-                await asyncio.sleep(retry_delay)
-        
-        logger.critical(
-            f"[RF-Engine] 🚨 {reason} SELL FAILED after {max_attempts} attempts "
-            f"for #{contract_id} — contract remains open!"
-        )
-        return False
-
-    async def _sell_contract(
-        self, contract_id: str, min_price: float = 0
-    ) -> bool:
-        """
-        Sell (close) an open contract early.
-
-        Args:
-            contract_id: Contract to sell
-            min_price: Minimum acceptable sell price (0 = market)
-
-        Returns:
-            True if the sell request was accepted
-        """
-        sell_request = {
-            "sell": contract_id,
-            "price": min_price,
-        }
-
-        logger.info(f"[RF-Engine] 🏷️ Selling contract #{contract_id} @ min ${min_price:.2f}")
-
-        resp = await self._send(sell_request)
-        if not resp:
-            logger.error(f"[RF-Engine] ❌ Sell request failed (no response)")
-            return False
-
-        if "error" in resp:
-            err = resp["error"].get("message", str(resp["error"]))
-            logger.error(f"[RF-Engine] ❌ Sell rejected: {err}")
-            return False
-
-        if "sell" in resp:
-            sold_price = resp["sell"].get("sold_for", 0)
-            logger.info(f"[RF-Engine] ✅ Contract sold for ${sold_price}")
-            return True
-
-        return False
 

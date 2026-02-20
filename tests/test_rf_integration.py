@@ -340,6 +340,14 @@ async def test_db_failure_halts_and_keeps_lock():
     rm.release_trade_lock(reason="manual intervention after DB fix")
     assert not rm.trade_mutex.locked()
 
+    # Clear any cooldown gates before re-checking can_trade
+    from datetime import datetime
+    rm._last_trade_close_global = datetime.min
+    if hasattr(rm, "_last_trade_close"):
+        rm._last_trade_close.clear()
+    if hasattr(rm, "_loss_cooldown_until"):
+        rm._loss_cooldown_until = datetime.min
+
     # Should be able to trade again
     can2, reason2 = rm.can_trade(symbol="R_10")
     assert can2 is True

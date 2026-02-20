@@ -1,12 +1,12 @@
 """
 Rise/Fall Risk Manager
-Enforces Trading System Rules: single trade, TP/SL, no 3 consecutive losses
+Enforces Trading System Rules: single trade, no 3 consecutive losses
 
 Rules enforced:
   1. Only one open trade at a time — mutex + active_trades check
   2. No new trade until current is fully closed — mutex blocks scan
-  3. TP/SL applied by RFTradeEngine.wait_for_result (rf_trade_engine.py)
-  4. New trade only after TP/SL hit — lifecycle blocks until settlement
+  3. Contracts expire naturally (no early TP/SL exits)
+  4. New trade only after current contract settles — lifecycle blocks until settlement
   5. Block after 2 consecutive losses — RF_MAX_CONSECUTIVE_LOSSES=2 + cooldown
 
 rf_risk_manager.py
