@@ -120,9 +120,82 @@ class BotRunner:
         
         # Logging control
         self.last_status_log: Dict[str, Dict] = {} # {symbol: {'msg': str, 'time': datetime}}
+        # Structured decision event throttling cache
+        self._decision_log_state: Dict[str, Dict] = {}
         
         # Telegram bridge
         self.telegram_bridge = telegram_bridge
+
+    def _get_strategy_name(self) -> str:
+        """Resolve strategy name safely for structured decision events."""
+        try:
+            if self.strategy and hasattr(self.strategy, "get_strategy_name"):
+                return self.strategy.get_strategy_name()
+        except Exception:
+            pass
+        return self.active_strategy or "Unknown"
+
+    def _should_emit_decision(
+        self, key: str, fingerprint: str, min_interval_seconds: int = 20
+    ) -> bool:
+        """Throttle repeated decision events for cleaner frontend timelines."""
+        now = datetime.now()
+        last = self._decision_log_state.get(key)
+        if not last:
+            self._decision_log_state[key] = {"fingerprint": fingerprint, "time": now}
+            return True
+
+        last_fingerprint = last.get("fingerprint")
+        last_time = last.get("time", datetime.min)
+        elapsed = (now - last_time).total_seconds()
+
+        if fingerprint != last_fingerprint or elapsed >= min_interval_seconds:
+            self._decision_log_state[key] = {"fingerprint": fingerprint, "time": now}
+            return True
+
+        return False
+
+    async def _broadcast_decision(
+        self,
+        symbol: str,
+        phase: str,
+        decision: str,
+        reason: Optional[str] = None,
+        details: Optional[Dict] = None,
+        severity: str = "info",
+        throttle_key: Optional[str] = None,
+        min_interval_seconds: int = 20,
+    ) -> None:
+        """
+        Broadcast structured bot decision events for frontend consumption.
+        """
+        fingerprint = f"{phase}|{decision}|{reason or ''}"
+        if throttle_key and not self._should_emit_decision(
+            throttle_key, fingerprint, min_interval_seconds=min_interval_seconds
+        ):
+            return
+
+        payload = {
+            "type": "bot_decision",
+            "bot": "multiplier",
+            "strategy": self._get_strategy_name(),
+            "symbol": symbol,
+            "phase": phase,
+            "decision": decision,
+            "severity": severity,
+            "message": reason or decision.replace("_", " "),
+            "timestamp": datetime.now().isoformat(),
+            "account_id": self.account_id,
+        }
+        if reason:
+            payload["reason"] = reason
+        if details:
+            payload["details"] = details
+
+        try:
+            await event_manager.broadcast(payload)
+        except Exception as e:
+            logger.debug(f"Decision event broadcast skipped due to error: {e}")
     
     @with_user_context
     async def start_bot(self, api_token: Optional[str] = None, stake: Optional[float] = None, strategy_name: Optional[str] = None) -> dict:
@@ -577,11 +650,28 @@ class BotRunner:
         # If we have an active trade, monitor it instead of scanning
         if self.risk_manager.active_trades:
             logger.debug(f"?? Monitoring {len(self.risk_manager.active_trades)} active trades")
+            await self._broadcast_decision(
+                symbol="SYSTEM",
+                phase="scan",
+                decision="no_trade",
+                reason="Active trade is being monitored",
+                details={"active_trades": len(self.risk_manager.active_trades)},
+                throttle_key="scan:active_trade",
+            )
             await self._monitor_active_trade()
             return
         
         if not can_trade_global:
             logger.debug(f"?? Global trading paused: {reason}")
+            await self._broadcast_decision(
+                symbol="SYSTEM",
+                phase="risk",
+                decision="no_trade",
+                reason=reason,
+                details={"scope": "global_gate"},
+                severity="warning",
+                throttle_key="scan:global_gate",
+            )
             return
         
         # Step 2: Sequential symbol scanning (First-Come-First-Served)
@@ -643,7 +733,17 @@ class BotRunner:
             # Validate we have all required timeframes
             required_timeframes = ['1m', '5m', '1h', '4h', '1d', '1w']  # Full Top-Down requirement
             if not all(tf in market_data for tf in required_timeframes):
+                missing_tfs = [tf for tf in required_timeframes if tf not in market_data]
                 logger.warning(f"?? {symbol} - Missing required timeframes")
+                await self._broadcast_decision(
+                    symbol=symbol,
+                    phase="data",
+                    decision="no_trade",
+                    reason="Missing required timeframes",
+                    details={"missing_timeframes": missing_tfs},
+                    severity="warning",
+                    throttle_key=f"{symbol}:missing_timeframes",
+                )
                 return False
             
         except Exception as e:
@@ -701,6 +801,14 @@ class BotRunner:
             if should_log:
                 logger.info(f"? {symbol} - Skipped: {full_reason}")
                 self.last_status_log[symbol] = {'msg': full_reason, 'time': now}
+                await self._broadcast_decision(
+                    symbol=symbol,
+                    phase="signal",
+                    decision="no_trade",
+                    reason=full_reason,
+                    details={"passed_checks": passed_checks},
+                    throttle_key=f"{symbol}:signal_skip",
+                )
             else:
                 # Debug only for spammy updates
                 logger.debug(f"?? {symbol} - No signal: {full_reason}")
@@ -711,6 +819,19 @@ class BotRunner:
         checks_passed = ", ".join(signal.get('details', {}).get('passed_checks', []))
         logger.info(f"?? {symbol} - SIGNAL: {signal['signal']} | Score: {signal.get('score', 0):.2f} | Conf: {signal.get('confidence', 0):.0f}%")
         logger.debug(f"   Checks: {checks_passed}")
+        await self._broadcast_decision(
+            symbol=symbol,
+            phase="signal",
+            decision="opportunity_detected",
+            reason="All strategy checks aligned",
+            details={
+                "direction": signal.get("signal"),
+                "score": signal.get("score", 0),
+                "confidence": signal.get("confidence", 0),
+                "checks_passed": signal.get("details", {}).get("passed_checks", []),
+            },
+            min_interval_seconds=0,
+        )
         
         # Track signal
         self.signals_by_symbol[symbol] = self.signals_by_symbol.get(symbol, 0) + 1
@@ -739,6 +860,14 @@ class BotRunner:
         
         if not multiplier:
             logger.error(f"? {symbol} - Critical: Missing multiplier in asset_config")
+            await self._broadcast_decision(
+                symbol=symbol,
+                phase="risk",
+                decision="no_trade",
+                reason="Missing multiplier configuration",
+                severity="error",
+                throttle_key=f"{symbol}:missing_multiplier",
+            )
             return False
 
         # Determine Stake (User Preference)
@@ -746,6 +875,14 @@ class BotRunner:
         if base_stake is None:
              # Should not happen due to start_bot check, but safety first
              logger.error(f"? {symbol} - Critical: User stake is None during analysis")
+             await self._broadcast_decision(
+                 symbol=symbol,
+                 phase="risk",
+                 decision="no_trade",
+                 reason="Stake not configured",
+                 severity="error",
+                 throttle_key=f"{symbol}:stake_missing",
+             )
              return False
              
         # CRITICAL FIX: Do NOT multiply by multiplier. 
@@ -771,6 +908,15 @@ class BotRunner:
         
         if not can_open:
             logger.warning(f"? {symbol} - Trade blocked: {validation_msg}")
+            await self._broadcast_decision(
+                symbol=symbol,
+                phase="risk",
+                decision="no_trade",
+                reason=validation_msg,
+                details={"gate": "can_open_trade"},
+                severity="warning",
+                throttle_key=f"{symbol}:trade_blocked",
+            )
             return False
             
         # Notify Telegram about signal (Moved here to ensure all checks passed)
@@ -784,6 +930,18 @@ class BotRunner:
         # Execute trade!
         logger.info(f"?? {symbol} - Executing {signal['signal']} trade...")
         logger.info(f"   Stake: ${stake:.2f} (multiplier: {multiplier}x)")
+        await self._broadcast_decision(
+            symbol=symbol,
+            phase="execution",
+            decision="opportunity_taken",
+            reason="Risk checks passed, executing trade",
+            details={
+                "direction": signal.get("signal"),
+                "stake": stake,
+                "multiplier": multiplier,
+            },
+            min_interval_seconds=0,
+        )
         
         try:
             # Add symbol to signal data
@@ -908,10 +1066,26 @@ class BotRunner:
                 return True  # Trade executed
             else:
                 logger.error(f"? {symbol} - Trade execution failed")
+                await self._broadcast_decision(
+                    symbol=symbol,
+                    phase="execution",
+                    decision="opportunity_failed",
+                    reason="Trade engine returned no result",
+                    severity="error",
+                    min_interval_seconds=0,
+                )
                 return False
                 
         except Exception as e:
             logger.error(f"? TRADE_EXECUTION_FAILED | Symbol: {symbol} | Error: {type(e).__name__}: {e}", exc_info=True)
+            await self._broadcast_decision(
+                symbol=symbol,
+                phase="execution",
+                decision="opportunity_failed",
+                reason=f"{type(e).__name__}: {e}",
+                severity="error",
+                min_interval_seconds=0,
+            )
             
             try:
                 await self.telegram_bridge.notify_error(f"{symbol} trade failed: {e}")
