@@ -17,6 +17,76 @@ from app.schemas.common import PerformanceResponse
 
 router = APIRouter()
 
+
+def _safe_user_component(user_id: str) -> str:
+    text = str(user_id) if user_id is not None else "anonymous"
+    cleaned = re.sub(r"[^A-Za-z0-9._-]", "_", text).strip("._")
+    return cleaned or "anonymous"
+
+
+def _resolve_active_strategy(status: dict) -> str | None:
+    """Resolve active strategy from bot status payload."""
+    active = status.get("active_strategy")
+    if active:
+        return active
+    cfg = status.get("config")
+    if isinstance(cfg, dict):
+        return cfg.get("strategy")
+    return None
+
+
+def _resolve_log_files(active_strategy: str, user_id: str) -> list[str]:
+    """Return candidate log files for a strategy (new path first, legacy fallback last)."""
+    user_key = _safe_user_component(user_id)
+    if active_strategy == "Conservative":
+        return [
+            f"logs/conservative/{user_key}.log",
+            "logs/conservative/conservative_bot.log",
+            "trading_bot.log",
+        ]
+    if active_strategy == "Scalping":
+        return [
+            f"logs/scalping/{user_key}.log",
+            "logs/scalping/scalping_bot.log",
+            "trading_bot.log",
+        ]
+    if active_strategy == "RiseFall":
+        try:
+            from risefallbot.rf_config import RF_LOG_FILE
+
+            return [f"logs/risefall/{user_key}.log", RF_LOG_FILE, "risefall_bot.log"]
+        except Exception:
+            return [
+                f"logs/risefall/{user_key}.log",
+                "logs/risefall/risefall_bot.log",
+                "risefall_bot.log",
+            ]
+    return []
+
+
+def _select_log_file(active_strategy: str, user_id: str) -> str | None:
+    """Select first existing log file for the active strategy."""
+    for candidate in _resolve_log_files(active_strategy, user_id):
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
+def _should_include_log_line(line: str, user_id: str, active_strategy: str) -> bool:
+    """
+    Determine whether a log line should be included for the requesting user.
+    For legacy Rise/Fall logs without [user_id], include the line because file is bot-isolated.
+    """
+    if f"[{user_id}]" in line or "[None]" in line:
+        return True
+    if active_strategy == "RiseFall":
+        # Legacy RF log format may omit user_id context in message prefix.
+        return True
+    # Backward compatibility for older multiplier lines with no metadata tags.
+    if "[" not in line:
+        return True
+    return False
+
 def _is_decorative_log_line(line: str) -> bool:
     """Return True for visual separators like ======= to keep UI logs clean."""
     if not line:
@@ -74,9 +144,10 @@ async def get_recent_logs(
         total_lines = 0
 
         status = bot_manager.get_status(user_id)
+        active_strategy = _resolve_active_strategy(status)
         running_bot = None
         if status.get("is_running"):
-            running_bot = "risefall" if status.get("active_strategy") == "RiseFall" else "multiplier"
+            running_bot = "risefall" if active_strategy == "RiseFall" else "multiplier"
 
         if not running_bot:
             return prepare_response(
@@ -85,51 +156,26 @@ async def get_recent_logs(
                     "total_lines": 0,
                     "showing": 0,
                     "running_bot": None,
+                    "active_strategy": None,
                     "message": "No bot is currently running",
                 }
             )
 
-        if running_bot == "multiplier":
-            log_file = "trading_bot.log"
-            if os.path.exists(log_file):
-                with open(log_file, "r", encoding="utf-8") as f:
-                    all_lines = f.readlines()
-                    total_lines += len(all_lines)
-                    for line in all_lines:
-                        stripped = line.strip()
-                        if not stripped:
-                            continue
-                        if _is_decorative_log_line(stripped):
-                            continue
-                        if f"[{user_id}]" in stripped or "[None]" in stripped or "[" not in stripped:
-                            filtered_logs.append(stripped)
+        log_file = _select_log_file(active_strategy, user_id)
+        if log_file:
+            with open(log_file, "r", encoding="utf-8") as f:
+                log_lines = f.readlines()
+                total_lines += len(log_lines)
+                for line in log_lines:
+                    stripped = line.strip()
+                    if not stripped:
+                        continue
+                    if _is_decorative_log_line(stripped):
+                        continue
+                    if not _should_include_log_line(stripped, user_id, active_strategy):
+                        continue
+                    filtered_logs.append(stripped)
 
-        if running_bot == "risefall":
-            rf_log_file = "risefall_bot.log"
-            if os.path.exists(rf_log_file):
-                with open(rf_log_file, "r", encoding="utf-8") as f:
-                    rf_lines = f.readlines()
-                    total_lines += len(rf_lines)
-                    for line in rf_lines:
-                        stripped = line.strip()
-                        if not stripped:
-                            continue
-
-                        rf_match = re.match(
-                            r"^(.+?)\s*\|\s*risefallbot(?:\.\S+)?\s*\|\s*([A-Z]+)\s*\|\s*(.+)$",
-                            stripped,
-                        )
-                        if rf_match:
-                            ts, level, msg = rf_match.groups()
-                            if f"[{user_id}]" in msg or "[None]" in msg or "[" not in msg:
-                                stripped = f"{ts} | {level} | [RF] {msg}"
-                            else:
-                                continue
-                        if _is_decorative_log_line(stripped):
-                            continue
-                        filtered_logs.append(stripped)
-
-        filtered_logs.sort()
         filtered_logs = filtered_logs[-lines:]
 
         return prepare_response(
@@ -138,6 +184,7 @@ async def get_recent_logs(
                 "total_lines": total_lines,
                 "showing": len(filtered_logs),
                 "running_bot": running_bot,
+                "active_strategy": active_strategy,
             }
         )
     except Exception as e:

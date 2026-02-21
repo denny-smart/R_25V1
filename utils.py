@@ -7,6 +7,8 @@ utils.py - COMPLETE FIXED VERSION
 import logging
 import json
 import sys
+import re
+import threading
 from datetime import datetime
 from typing import Dict, Any, Optional
 from pathlib import Path
@@ -39,6 +41,13 @@ class BotTypeFilter(logging.Filter):
         return False
 
 
+def _safe_log_component(value: Optional[str]) -> str:
+    """Sanitize dynamic log path components for safe filenames."""
+    text = str(value) if value is not None else "anonymous"
+    cleaned = re.sub(r"[^A-Za-z0-9._-]", "_", text).strip("._")
+    return cleaned or "anonymous"
+
+
 def _build_file_handler(log_file: str, formatter: logging.Formatter, level: int) -> logging.Handler:
     path = Path(log_file)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -46,6 +55,56 @@ def _build_file_handler(log_file: str, formatter: logging.Formatter, level: int)
     file_handler.setLevel(level)
     file_handler.setFormatter(formatter)
     return file_handler
+
+
+class StrategyUserFileRouterHandler(logging.Handler):
+    """
+    Route each strategy log record to a per-user file.
+    This prevents cross-user log mixing when multiple users trade concurrently.
+    """
+
+    def __init__(self, formatter: logging.Formatter, level: int = logging.DEBUG):
+        super().__init__(level)
+        self._formatter = formatter
+        self._level = level
+        self._handlers: Dict[str, logging.Handler] = {}
+        self._lock = threading.Lock()
+
+    def _resolve_log_path(self, record: logging.LogRecord) -> str:
+        bot_type = getattr(record, "bot_type", "system")
+        user_key = _safe_log_component(getattr(record, "user_id", None))
+        if bot_type == "conservative":
+            return str(Path("logs") / "conservative" / f"{user_key}.log")
+        if bot_type == "scalping":
+            return str(Path("logs") / "scalping" / f"{user_key}.log")
+        if bot_type == "risefall":
+            return str(Path("logs") / "risefall" / f"{user_key}.log")
+        return str(Path("logs") / "system" / "multiplier_system.log")
+
+    def _get_file_handler(self, path: str) -> logging.Handler:
+        with self._lock:
+            handler = self._handlers.get(path)
+            if handler is None:
+                handler = _build_file_handler(path, self._formatter, self._level)
+                self._handlers[path] = handler
+            return handler
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            path = self._resolve_log_path(record)
+            self._get_file_handler(path).emit(record)
+        except Exception:
+            self.handleError(record)
+
+    def close(self) -> None:
+        with self._lock:
+            for handler in self._handlers.values():
+                try:
+                    handler.close()
+                except Exception:
+                    pass
+            self._handlers.clear()
+        super().close()
 
 
 def setup_logger(
@@ -103,30 +162,7 @@ def setup_logger(
     # Dedicated file handlers for multiplier strategies to enforce isolation.
     # Rise/Fall remains fully independent in risefallbot/*.
     if log_file == "trading_bot.log":
-        conservative_handler = _build_file_handler(
-            "logs/conservative/conservative_bot.log",
-            detailed_formatter,
-            logging.DEBUG,
-        )
-        conservative_handler.addFilter(BotTypeFilter("conservative"))
-
-        scalping_handler = _build_file_handler(
-            "logs/scalping/scalping_bot.log",
-            detailed_formatter,
-            logging.DEBUG,
-        )
-        scalping_handler.addFilter(BotTypeFilter("scalping"))
-
-        system_handler = _build_file_handler(
-            "logs/system/multiplier_system.log",
-            detailed_formatter,
-            logging.DEBUG,
-        )
-        system_handler.addFilter(BotTypeFilter(include_untyped=True))
-
-        logger.addHandler(conservative_handler)
-        logger.addHandler(scalping_handler)
-        logger.addHandler(system_handler)
+        logger.addHandler(StrategyUserFileRouterHandler(detailed_formatter, logging.DEBUG))
     else:
         file_handler = _build_file_handler(log_file, detailed_formatter, logging.DEBUG)
         logger.addHandler(file_handler)

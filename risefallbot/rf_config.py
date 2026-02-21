@@ -73,7 +73,7 @@ RF_GLOBAL_COOLDOWN_SECONDS = 30   # After any trade closes, wait before next tra
 RF_MAX_STAKE = 100.0   # Maximum stake per trade (USD)
 
 # ==================== LOGGING ====================
-RF_LOG_FILE = "risefall_bot.log"
+RF_LOG_FILE = "logs/risefall/risefall_bot.log"
 RF_LOG_LEVEL = "INFO"
 
 # ==================== DB WRITE RETRY ====================
