@@ -13,7 +13,7 @@ rf_bot.py
 import asyncio
 import os
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from data_fetcher import DataFetcher
@@ -147,6 +147,44 @@ async def _acquire_session_lock(user_id: str) -> bool:
 
     try:
         from app.core.supabase import supabase
+
+        ttl_seconds = max(1, int(getattr(rf_config, "RF_DB_LOCK_TTL_SECONDS", 900)))
+        existing = (
+            supabase.table("rf_bot_sessions")
+            .select("user_id, started_at, process_id")
+            .eq("user_id", user_id)
+            .limit(1)
+            .execute()
+        )
+
+        if existing.data:
+            row = existing.data[0]
+            started_at = row.get("started_at")
+            should_reclaim = False
+
+            if not started_at:
+                should_reclaim = True
+            else:
+                try:
+                    started_dt = datetime.fromisoformat(
+                        str(started_at).replace("Z", "+00:00")
+                    )
+                    if started_dt.tzinfo is None:
+                        started_dt = started_dt.replace(tzinfo=timezone.utc)
+                    age = datetime.now(timezone.utc) - started_dt
+                    should_reclaim = age > timedelta(seconds=ttl_seconds)
+                except Exception:
+                    should_reclaim = True
+
+            if should_reclaim:
+                supabase.table("rf_bot_sessions").delete().eq(
+                    "user_id", user_id
+                ).execute()
+                logger.warning(
+                    f"[RF] ♻️ Reclaimed stale DB session lock for user={user_id} "
+                    f"(ttl={ttl_seconds}s)"
+                )
+
         supabase.table("rf_bot_sessions").insert({
             "user_id": user_id,
             "started_at": datetime.now().isoformat(),

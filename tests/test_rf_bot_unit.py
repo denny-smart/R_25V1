@@ -2,6 +2,7 @@ import pytest
 import asyncio
 from unittest.mock import patch, AsyncMock, MagicMock
 from datetime import datetime
+from types import SimpleNamespace
 import risefallbot.rf_bot as rf_bot
 from risefallbot.rf_risk_manager import RiseFallRiskManager
 
@@ -67,6 +68,46 @@ async def test_acquire_session_lock_duplicate():
          patch("risefallbot.rf_bot.rf_config.RF_ENFORCE_DB_LOCK", True):
         success = await rf_bot._acquire_session_lock("user123")
         assert success is False
+
+@pytest.mark.asyncio
+async def test_acquire_session_lock_reclaims_stale_row():
+    mock_supabase = MagicMock()
+    stale_started_at = "2000-01-01T00:00:00+00:00"
+    table = mock_supabase.table.return_value
+    select_query = MagicMock()
+    table.select.return_value = select_query
+    select_query.eq.return_value.limit.return_value.execute.return_value = SimpleNamespace(
+        data=[{"user_id": "user123", "started_at": stale_started_at, "process_id": 42}]
+    )
+    table.insert.return_value.execute.return_value.data = [{"id": 1}]
+
+    with patch("app.core.supabase.supabase", mock_supabase), \
+         patch("risefallbot.rf_bot.rf_config.RF_ENFORCE_DB_LOCK", True), \
+         patch("risefallbot.rf_bot.rf_config.RF_DB_LOCK_TTL_SECONDS", 60):
+        success = await rf_bot._acquire_session_lock("user123")
+        assert success is True
+
+    assert table.delete.return_value.eq.return_value.execute.called
+
+@pytest.mark.asyncio
+async def test_acquire_session_lock_keeps_fresh_row():
+    mock_supabase = MagicMock()
+    fresh_started_at = datetime.now().isoformat()
+    table = mock_supabase.table.return_value
+    select_query = MagicMock()
+    table.select.return_value = select_query
+    select_query.eq.return_value.limit.return_value.execute.return_value = SimpleNamespace(
+        data=[{"user_id": "user123", "started_at": fresh_started_at, "process_id": 42}]
+    )
+    table.insert.return_value.execute.side_effect = Exception("duplicate key")
+
+    with patch("app.core.supabase.supabase", mock_supabase), \
+         patch("risefallbot.rf_bot.rf_config.RF_ENFORCE_DB_LOCK", True), \
+         patch("risefallbot.rf_bot.rf_config.RF_DB_LOCK_TTL_SECONDS", 3600):
+        success = await rf_bot._acquire_session_lock("user123")
+        assert success is False
+
+    assert not table.delete.return_value.eq.return_value.execute.called
 
 @pytest.mark.asyncio
 async def test_write_trade_to_db_retry_success():

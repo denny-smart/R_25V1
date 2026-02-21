@@ -93,6 +93,7 @@ RF_SCAN_INTERVAL = 10  # Seconds between scan cycles
 # (Supabase) before launching the task. A second worker that tries to
 # insert will fail, preventing duplicate instances across processes.
 RF_ENFORCE_DB_LOCK = True
+RF_DB_LOCK_TTL_SECONDS = 900  # Reclaim lock rows older than 15 minutes
 
 # Graceful shutdown: seconds to wait for an in-progress lifecycle to
 # finish before hard-cancelling the asyncio task on restart.
