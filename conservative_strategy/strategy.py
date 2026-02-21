@@ -260,8 +260,8 @@ class TradingStrategy:
         
         # Identify Targets (TP) and Structure Points (SL)
         target_level, sl_level = self._identify_tp_sl_levels(
-            structure_levels, current_price, signal_direction, 
-            data_1d, data_4h, data_1h, data_5m
+            structure_levels, current_price, signal_direction,
+            data_1d, data_4h, data_1h, data_5m, symbol=symbol
         )
 
         if not target_level:
@@ -540,12 +540,13 @@ class TradingStrategy:
     # Helper Methods - Targets & SL
     # --------------------------------------------------------------------------
 
-    def _identify_tp_sl_levels(self, levels: List[Dict], current_price: float, 
-                               direction: str, 
+    def _identify_tp_sl_levels(self, levels: List[Dict], current_price: float,
+                               direction: str,
                                daily_data: pd.DataFrame,
                                data_4h: pd.DataFrame,
                                data_1h: pd.DataFrame,
-                               data_5m: pd.DataFrame) -> Tuple[Optional[float], Optional[float]]:
+                               data_5m: pd.DataFrame,
+                               symbol: Optional[str] = None) -> Tuple[Optional[float], Optional[float]]:
         """
         TP: Nearest Structure Level (Tested or Untested).
         SL: Price behind last Swing Point (Prioritize 1H -> 4H -> Daily).
