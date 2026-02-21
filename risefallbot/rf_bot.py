@@ -229,6 +229,24 @@ async def _release_session_lock(user_id: str) -> None:
         logger.error(f"[RF] ❌ Failed to release DB session lock for user={user_id}: {e}")
 
 
+async def _refresh_session_lock(user_id: str) -> None:
+    """
+    Refresh started_at for an existing rf_bot_sessions row so active bots
+    do not appear stale to other processes.
+    """
+    if not rf_config.RF_ENFORCE_DB_LOCK or not user_id:
+        return
+
+    try:
+        from app.core.supabase import supabase
+        supabase.table("rf_bot_sessions").update({
+            "started_at": datetime.now().isoformat(),
+            "process_id": os.getpid(),
+        }).eq("user_id", user_id).execute()
+    except Exception as e:
+        logger.warning(f"[RF] ⚠️ Failed to refresh DB session lock for user={user_id}: {e}")
+
+
 async def run(stake: Optional[float] = None, api_token: Optional[str] = None,
               user_id: Optional[str] = None):
     """
@@ -400,11 +418,10 @@ async def run(stake: Optional[float] = None, api_token: Optional[str] = None,
     try:
         while _running:
             cycle += 1
-            logger.info(
-                f"\n{'='*60}\n"
-                f"[RF] CYCLE #{cycle} | {datetime.now().strftime('%H:%M:%S')}\n"
-                f"{'='*60}"
-            )
+            await _refresh_session_lock(user_id)
+            logger.info("=" * 60)
+            logger.info(f"[RF] CYCLE #{cycle} | {datetime.now().strftime('%H:%M:%S')}")
+            logger.info("=" * 60)
 
             # Daily stats reset at midnight
             risk_manager.ensure_daily_reset_if_needed()

@@ -163,16 +163,42 @@ class RFTradeEngine:
 
         try:
             await self.ws.send(json.dumps(request))
-            raw = await asyncio.wait_for(
-                self.ws.recv(), timeout=rf_config.RF_WS_TIMEOUT
-            )
-            resp = json.loads(raw)
+            expected_req_id = request["req_id"]
+            timeout_seconds = rf_config.RF_WS_TIMEOUT
+            deadline = asyncio.get_running_loop().time() + timeout_seconds
 
-            if "error" in resp:
-                logger.error(
-                    f"[RF-Engine] API error: {resp['error'].get('message', resp['error'])}"
-                )
-            return resp
+            while True:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    logger.error(
+                        f"[RF-Engine] ⏱️ Request timed out waiting for matching "
+                        f"response (req_id={expected_req_id})"
+                    )
+                    return None
+
+                raw = await asyncio.wait_for(self.ws.recv(), timeout=remaining)
+                try:
+                    resp = json.loads(raw)
+                except Exception:
+                    logger.warning("[RF-Engine] Ignoring non-JSON websocket frame")
+                    continue
+
+                resp_req_id = resp.get("req_id")
+                if resp_req_id is None:
+                    resp_req_id = resp.get("echo_req", {}).get("req_id")
+
+                if resp_req_id is not None and int(resp_req_id) != int(expected_req_id):
+                    logger.debug(
+                        f"[RF-Engine] Ignoring unrelated response req_id={resp_req_id} "
+                        f"(expected={expected_req_id})"
+                    )
+                    continue
+
+                if "error" in resp:
+                    logger.error(
+                        f"[RF-Engine] API error: {resp['error'].get('message', resp['error'])}"
+                    )
+                return resp
         except asyncio.TimeoutError:
             logger.error("[RF-Engine] ⏱️ Request timed out")
             return None

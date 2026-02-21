@@ -148,3 +148,30 @@ async def test_contract_id_validation(engine):
         assert result["profit"] == 0.95
         assert result["status"] == "win"
         logger.info(f"✅ Successfully ignored message for #{wrong_cid} and waited for #{target_cid}")
+
+
+@pytest.mark.asyncio
+async def test_send_waits_for_matching_req_id(engine):
+    """
+    Regression guard:
+    _send() must ignore unrelated websocket messages and wait for the
+    matching req_id response, otherwise buy responses can be missed.
+    """
+    ws = AsyncMock()
+    ws.open = True
+    ws.send = AsyncMock()
+
+    frames = [
+        json.dumps({"msg_type": "proposal_open_contract", "req_id": 999, "proposal_open_contract": {"contract_id": "old"}}),
+        json.dumps({"msg_type": "buy", "req_id": 1, "buy": {"contract_id": "new_1"}}),
+    ]
+
+    async def recv_side_effect():
+        return frames.pop(0)
+
+    ws.recv = recv_side_effect
+    engine.ws = ws
+
+    resp = await engine._send({"buy": 1})
+    assert resp is not None
+    assert resp.get("buy", {}).get("contract_id") == "new_1"
