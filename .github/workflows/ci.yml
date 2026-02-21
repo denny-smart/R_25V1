@@ -1,6 +1,12 @@
-name: CI (manual temporarily)
+name: CI/CD
 
 on:
+  push:
+    branches:
+      - '**'
+  pull_request:
+    branches:
+      - '**'
   workflow_dispatch:
 
 permissions:
@@ -19,11 +25,12 @@ jobs:
     name: pytest
     runs-on: ubuntu-latest
     timeout-minutes: 20
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Python ${{ env.PYTHON_VERSION }}
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
@@ -35,18 +42,19 @@ jobs:
           pip install -r requirements-dev.txt
 
       - name: Run pytest
-        run: |
-          pytest -v
+        run: pytest -v
+
 
   coverage:
     name: coverage
     runs-on: ubuntu-latest
     timeout-minutes: 20
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Python ${{ env.PYTHON_VERSION }}
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
@@ -59,7 +67,11 @@ jobs:
 
       - name: Run pytest with coverage
         run: |
-          pytest --cov=. --cov-report=term-missing --cov-report=xml --cov-fail-under=${{ env.COVERAGE_FAIL_UNDER }}
+          pytest \
+            --cov=. \
+            --cov-report=term-missing \
+            --cov-report=xml \
+            --cov-fail-under=${{ env.COVERAGE_FAIL_UNDER }}
 
       - name: Upload coverage XML artifact
         if: always()
@@ -68,15 +80,17 @@ jobs:
           name: coverage-xml
           path: coverage.xml
 
+
   lint:
     name: lint
     runs-on: ubuntu-latest
     timeout-minutes: 20
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Python ${{ env.PYTHON_VERSION }}
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
@@ -87,17 +101,18 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
 
-      - name: Run Black and Flake8
+      - name: Run Black and Flake8 (advisory)
         continue-on-error: true
         run: |
-          echo "Running advisory lint (non-blocking for legacy codebase)..."
+          echo "Running advisory lint (non-blocking)..."
           black --check . || true
           flake8 . || true
 
       - name: Lint status note
         run: |
-          echo "Lint is currently advisory and non-blocking."
-          echo "Tests and coverage remain strict and blocking."
+          echo "Lint is advisory."
+          echo "Tests and coverage remain blocking."
+
 
   ci_run_tests:
     name: CI - Run Tests
@@ -107,14 +122,47 @@ jobs:
       - coverage
       - lint
     if: always()
+
     steps:
       - name: Gate overall CI result
         run: |
           echo "pytest=${{ needs.pytest.result }}"
           echo "coverage=${{ needs.coverage.result }}"
           echo "lint=${{ needs.lint.result }}"
-          if [ "${{ needs.pytest.result }}" != "success" ] || [ "${{ needs.coverage.result }}" != "success" ] || [ "${{ needs.lint.result }}" != "success" ]; then
+
+          if [ "${{ needs.pytest.result }}" != "success" ] || \
+             [ "${{ needs.coverage.result }}" != "success" ] || \
+             [ "${{ needs.lint.result }}" != "success" ]; then
             echo "One or more required checks failed."
             exit 1
           fi
+
           echo "All required checks passed."
+
+
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    needs: ci_run_tests
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - name: Trigger deployments if configured
+        env:
+          RENDER_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+          RAILWAY_HOOK: ${{ secrets.RAILWAY_DEPLOY_HOOK_URL }}
+        run: |
+          if [ -n "$RENDER_HOOK" ]; then
+            echo "Triggering Render deploy..."
+            curl -fsSL -X POST "$RENDER_HOOK"
+          fi
+
+          if [ -n "$RAILWAY_HOOK" ]; then
+            echo "Triggering Railway deploy..."
+            curl -fsSL -X POST "$RAILWAY_HOOK"
+          fi
+
+          if [ -z "$RENDER_HOOK" ] && [ -z "$RAILWAY_HOOK" ]; then
+            echo "No deploy hook secret configured."
+            echo "Set RENDER_DEPLOY_HOOK_URL or RAILWAY_DEPLOY_HOOK_URL in repository secrets to enable CD."
+          fi

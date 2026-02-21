@@ -102,12 +102,12 @@ class ScalpingStrategy(BaseStrategy):
         logger.info(f"[SCALPING] ✅ CHECK 2 PASSED: ADX {adx_1m:.2f} >= {scalping_config.SCALPING_ADX_THRESHOLD}")
         
         # CHECK 3 & 4: RSI Range validation
-        if direction == "BULLISH":
+        if direction == "UP":
             if not (scalping_config.SCALPING_RSI_UP_MIN <= rsi_1m <= scalping_config.SCALPING_RSI_UP_MAX):
                 logger.info(f"[SCALPING] ❌ CHECK 3 FAILED: RSI {rsi_1m:.2f} not in UP range [{scalping_config.SCALPING_RSI_UP_MIN}-{scalping_config.SCALPING_RSI_UP_MAX}]")
                 return {'can_trade': False, 'details': {'reason': f'RSI {rsi_1m:.1f} not in UP range'}}
             logger.info(f"[SCALPING] ✅ CHECK 3 PASSED: RSI {rsi_1m:.2f} in UP range")
-        else:  # BEARISH
+        else:  # DOWN
             if not (scalping_config.SCALPING_RSI_DOWN_MIN <= rsi_1m <= scalping_config.SCALPING_RSI_DOWN_MAX):
                 logger.info(f"[SCALPING] ❌ CHECK 4 FAILED: RSI {rsi_1m:.2f} not in DOWN range [{scalping_config.SCALPING_RSI_DOWN_MIN}-{scalping_config.SCALPING_RSI_DOWN_MAX}]")
                 return {'can_trade': False, 'details': {'reason': f'RSI {rsi_1m:.1f} not in DOWN range'}}
@@ -156,10 +156,10 @@ class ScalpingStrategy(BaseStrategy):
         sl_distance = atr_1m * scalping_config.SCALPING_SL_ATR_MULTIPLIER
         tp_distance = atr_1m * scalping_config.SCALPING_TP_ATR_MULTIPLIER
         
-        if direction == "BULLISH":
+        if direction == "UP":
             sl_price = current_price - sl_distance
             tp_price = current_price + tp_distance
-        else:  # BEARISH
+        else:  # DOWN
             sl_price = current_price + sl_distance
             tp_price = current_price - tp_distance
         
@@ -185,7 +185,7 @@ class ScalpingStrategy(BaseStrategy):
         # =================================================================
         # All checks passed - return signal
         # =================================================================
-        signal_direction = "UP" if direction == "BULLISH" else "DOWN"
+        signal_direction = direction
         
         signal = {
             'can_trade': True,
@@ -239,13 +239,11 @@ class ScalpingStrategy(BaseStrategy):
         
         # Bullish: Fast EMA > Slow EMA
         if current_fast > current_slow:
-            # Strength check: separation increasing or maintaining?
-            # Optional: Add ADX check here, but we do that separately
-            return "BULLISH"
+            return "UP"
         
         # Bearish: Fast EMA < Slow EMA
         if current_fast < current_slow:
-            return "BEARISH"
+            return "DOWN"
         
         return None
 

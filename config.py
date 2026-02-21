@@ -95,6 +95,11 @@ COOLDOWN_SECONDS = 300             # 5 minutes between trades
 MAX_TRADES_PER_DAY = 30            # Maximum trades per day
 MAX_DAILY_LOSS = None               # DYNAMIC (Multiplied by DAILY_LOSS_MULTIPLIER)
 
+# Backward-compatible optional globals. Some notifier/engine paths may still
+# reference these names when strategy-specific TP/SL is not in use.
+TAKE_PROFIT_PERCENT = None
+STOP_LOSS_PERCENT = None
+
 # Valid multipliers for all assets
 VALID_MULTIPLIERS = [40, 50, 80, 100, 160, 200, 400, 800, 1200, 1600]
 

@@ -109,6 +109,7 @@ class DataFetcher:
         """Disconnect from WebSocket"""
         if self.ws:
             await self.ws.close()
+            self.ws = None
             self.is_connected = False
             logger.info("[DISCONNECTED] From Deriv API")
     
@@ -219,7 +220,7 @@ class DataFetcher:
             response = await self.send_request(request)
             
             if "error" in response:
-                logger.error(f"❌ CANDLE_FETCH_FAILED | Symbol: {symbol} | Interval: {interval} | Count: {count} | Reason: {response['error']['message']}")
+                logger.error(f"❌ CANDLE_FETCH_FAILED | Symbol: {symbol} | Granularity: {granularity} | Count: {count} | Reason: {response['error']['message']}")
                 return None
             
             if "candles" not in response:
@@ -244,7 +245,7 @@ class DataFetcher:
             return df
             
         except Exception as e:
-            logger.error(f"❌ CANDLE_FETCH_EXCEPTION | Symbol: {symbol} | Interval: {interval} | Count: {count} | Error: {type(e).__name__}: {e}", exc_info=True)
+            logger.error(f"❌ CANDLE_FETCH_EXCEPTION | Symbol: {symbol} | Granularity: {granularity} | Count: {count} | Error: {type(e).__name__}: {e}", exc_info=True)
             return None
     
     async def fetch_tick(self, symbol: str) -> Optional[float]:

@@ -437,7 +437,7 @@ class ScalpingRiskManager(BaseRiskManager):
         Check if a scalping trade should be closed via trailing profit.
         
         Once profit reaches SCALPING_TRAIL_ACTIVATION_PCT of stake, trailing activates.
-        The trail follows SCALPING_TRAIL_DISTANCE_PCT behind the highest recorded profit.
+        The trail follows a tiered distance behind the highest recorded profit.
         If profit drops below (highest - distance), the trade is closed to lock in gains.
         
         Args:
@@ -459,36 +459,41 @@ class ScalpingRiskManager(BaseRiskManager):
         # Calculate current profit as percentage of stake
         profit_pct = (current_pnl / stake) * 100
         
-        # Not yet at activation threshold
-        if profit_pct < scalping_config.SCALPING_TRAIL_ACTIVATION_PCT:
-            return False, '', False
-        
-        # Get or initialize trailing state for this contract
+        # Get trailing state for this contract
         state = self._trailing_state.get(contract_id)
         
-        if state is None:
-            # First time reaching activation — initialize trailing
-            trail_distance = self._get_trail_distance(profit_pct)
-            trail_floor = profit_pct - trail_distance
-            self._trailing_state[contract_id] = {
-                'highest_profit_pct': profit_pct,
-                'trailing_active': True,
-            }
-            logger.info(
-                f"[SCALP] 📈 Trailing profit activated at {profit_pct:.1f}%, "
-                f"trail distance {trail_distance:.1f}%, floor at {trail_floor:.1f}%"
-            )
-            return False, '', True  # just_activated=True → caller should remove server-side TP
+        # ACTIVATION CHECK: Threshold is reached (using >= per requirements)
+        if profit_pct >= scalping_config.SCALPING_TRAIL_ACTIVATION_PCT:
+            if state is None:
+                # First time reaching activation — initialize trailing state
+                self._trailing_state[contract_id] = {
+                    'highest_profit_pct': profit_pct,
+                    'trailing_active': True,
+                }
+                
+                # Calculate floor for logging only
+                trail_distance = self._get_trail_distance(profit_pct)
+                trail_floor = profit_pct - trail_distance
+                
+                logger.info(
+                    f"[SCALP] 📈 Trailing profit activated at {profit_pct:.1f}%, "
+                    f"trail distance {trail_distance:.1f}%, floor at {trail_floor:.1f}%"
+                )
+                return False, '', True  # just_activated=True only on initialization
         
-        # Trailing is active — update highest profit (ratchet up only)
+        # If trailing is not active and threshold not reached, exit
+        if state is None:
+            return False, '', False
+            
+        # PEAK UPDATE: Update peak before floor calculation
         if profit_pct > state['highest_profit_pct']:
             state['highest_profit_pct'] = profit_pct
         
-        # Calculate the trailing floor using tiered distance based on PEAK profit
+        # TIERED DISTANCE: Calculate based on PEAK profit
         trail_distance = self._get_trail_distance(state['highest_profit_pct'])
         trail_floor = state['highest_profit_pct'] - trail_distance
         
-        # Check if profit dropped below the trailing floor
+        # EXIT CONDITION: Strictly less than floor
         if profit_pct < trail_floor:
             logger.warning(
                 f"[SCALP] 🔒 Trailing profit EXIT: {symbol} profit dropped to {profit_pct:.1f}% "
