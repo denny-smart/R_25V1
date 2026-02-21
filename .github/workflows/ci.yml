@@ -1,6 +1,12 @@
-name: CI (manual temporarily)
+name: CI/CD
 
 on:
+  push:
+    branches:
+      - '**'
+  pull_request:
+    branches:
+      - '**'
   workflow_dispatch:
 
 permissions:
@@ -118,3 +124,23 @@ jobs:
             exit 1
           fi
           echo "All required checks passed."
+
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    needs: ci_run_tests
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - name: Trigger Render deploy hook
+        if: ${{ secrets.RENDER_DEPLOY_HOOK_URL != '' }}
+        run: curl -fsSL -X POST "${{ secrets.RENDER_DEPLOY_HOOK_URL }}"
+
+      - name: Trigger Railway deploy hook
+        if: ${{ secrets.RAILWAY_DEPLOY_HOOK_URL != '' }}
+        run: curl -fsSL -X POST "${{ secrets.RAILWAY_DEPLOY_HOOK_URL }}"
+
+      - name: Deployment guard
+        if: ${{ secrets.RENDER_DEPLOY_HOOK_URL == '' && secrets.RAILWAY_DEPLOY_HOOK_URL == '' }}
+        run: |
+          echo "No deploy hook secret configured."
+          echo "Set RENDER_DEPLOY_HOOK_URL or RAILWAY_DEPLOY_HOOK_URL in repository secrets to enable CD."

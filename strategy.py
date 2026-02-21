@@ -206,8 +206,8 @@ class TradingStrategy:
         daily_trend = self._determine_trend(data_1d, "Daily")
 
         # Bias Confirmation
-        if weekly_trend == "BULLISH" and daily_trend == "BULLISH":
-            bias = "BULLISH"
+        if weekly_trend == "UP" and daily_trend == "UP":
+            bias = "UP"
             signal_direction = "UP"
             passed_checks.append("Trend Alignment (Bullish)")
             
@@ -225,8 +225,8 @@ class TradingStrategy:
             
             passed_checks.append("RSI Momentum (UP)")
             
-        elif weekly_trend == "BEARISH" and daily_trend == "BEARISH":
-            bias = "BEARISH"
+        elif weekly_trend == "DOWN" and daily_trend == "DOWN":
+            bias = "DOWN"
             signal_direction = "DOWN"
             passed_checks.append("Trend Alignment (Bearish)")
             
@@ -441,9 +441,9 @@ class TradingStrategy:
         prev_low = lows[-2]
 
         if last_high > prev_high and last_low > prev_low:
-            return "BULLISH"
+            return "UP"
         elif last_high < prev_high and last_low < prev_low:
-            return "BEARISH"
+            return "DOWN"
         
         return "NEUTRAL"
 

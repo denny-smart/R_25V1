@@ -43,7 +43,7 @@ class RiskManager:
         
         # Trade tracking - GLOBAL across all assets
         self.trades_today: List[Dict] = []
-        self.last_trade_time: Optional[datetime] = None
+        self.last_trade_time: datetime = datetime.now() - timedelta(days=1)
         self.daily_pnl: float = 0.0
         self.current_date = datetime.now().date()
         
@@ -219,7 +219,7 @@ class RiskManager:
             return False, reason
         
         # GLOBAL daily loss limit
-        if self.daily_pnl <= -self.max_daily_loss:
+        if self.max_daily_loss is not None and self.daily_pnl <= -self.max_daily_loss:
             reason = f"GLOBAL daily loss limit reached ({format_currency(self.daily_pnl)})"
             logger.warning(f"⚠️ {reason}")
             

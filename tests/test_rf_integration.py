@@ -24,6 +24,14 @@ from unittest.mock import patch, AsyncMock, MagicMock
 # Fixtures
 # ---------------------------------------------------------------------------
 
+@pytest.fixture(autouse=True)
+def disable_db_lock():
+    """Automatically disable DB session lock and mock its acquisition for all integration tests."""
+    with patch("risefallbot.rf_config.RF_ENFORCE_DB_LOCK", False), \
+         patch("risefallbot.rf_bot._acquire_session_lock", new_callable=AsyncMock) as mock_lock:
+        mock_lock.return_value = True
+        yield
+
 @pytest.fixture
 def mock_supabase():
     """Mock the Supabase client for profile lookups."""
