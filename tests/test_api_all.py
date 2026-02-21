@@ -208,15 +208,30 @@ def test_monitor_performance(mock_auth):
 
 def test_monitor_logs(mock_auth):
     with patch("app.api.monitor.os.path.exists", return_value=True), \
-         patch("builtins.open") as mock_open:
+         patch("builtins.open") as mock_open, \
+         patch("app.api.monitor.bot_manager") as mock_manager:
         
         mock_file = MagicMock()
         mock_file.__enter__.return_value.readlines.return_value = [
             "2026-02-20 20:00:00 | INFO | [u123] Test log line\n"
         ]
         mock_open.return_value = mock_file
+        mock_manager.get_status.return_value = {
+            "is_running": True,
+            "active_strategy": "Conservative"
+        }
         
         response = client.get("/api/v1/monitor/logs?lines=10")
         assert response.status_code == 200
+        assert response.json()["running_bot"] == "multiplier"
         assert len(response.json()["logs"]) > 0
         assert "Test log line" in response.json()["logs"][0]
+
+
+def test_monitor_logs_no_running_bot_returns_empty(mock_auth):
+    with patch("app.api.monitor.bot_manager") as mock_manager:
+        mock_manager.get_status.return_value = {"is_running": False}
+        response = client.get("/api/v1/monitor/logs?lines=10")
+        assert response.status_code == 200
+        assert response.json()["running_bot"] is None
+        assert response.json()["logs"] == []

@@ -112,6 +112,68 @@ async def test_multi_asset_scan_cycle_global_pause(runner):
         await runner._multi_asset_scan_cycle()
         assert not mock_analyze.called
 
+
+@pytest.mark.asyncio
+async def test_analyze_symbol_emits_structured_decision_events(runner, monkeypatch):
+    ev = MagicMock()
+    ev.broadcast = AsyncMock()
+    monkeypatch.setattr("app.bot.runner.event_manager", ev)
+
+    runner.data_fetcher = MagicMock()
+    runner.data_fetcher.fetch_all_timeframes = AsyncMock(return_value={
+        "1m": [{}], "5m": [{}], "1h": [{}], "4h": [{}], "1d": [{}], "1w": [{}]
+    })
+    runner.user_stake = 1.0
+    runner.asset_config = {"R_25": {"multiplier": 10}}
+    runner.telegram_bridge = MagicMock()
+    runner.telegram_bridge.notify_signal = AsyncMock()
+    runner.telegram_bridge.notify_error = AsyncMock()
+
+    # no-trade branch
+    runner.strategy = MagicMock()
+    runner.strategy.get_required_timeframes.return_value = ["1m"]
+    runner.strategy.analyze.return_value = {
+        "can_trade": False,
+        "details": {"reason": "No setup", "passed_checks": ["Trend"]},
+    }
+    assert await runner._analyze_symbol("R_25") is False
+
+    # opportunity branch
+    runner.strategy.analyze.return_value = {
+        "can_trade": True,
+        "signal": "UP",
+        "score": 9.5,
+        "confidence": 88,
+        "take_profit": 101.0,
+        "stop_loss": 99.0,
+        "details": {"passed_checks": ["Trend", "Momentum"]},
+    }
+    runner.risk_manager = MagicMock()
+    runner.risk_manager.can_open_trade.return_value = (True, "OK")
+    runner.trade_engine = MagicMock()
+    runner.trade_engine.execute_trade = AsyncMock(return_value=None)
+    assert await runner._analyze_symbol("R_25") is False
+
+    payloads = [c.args[0] for c in ev.broadcast.await_args_list if c.args]
+    assert any(
+        p.get("type") == "bot_decision"
+        and p.get("decision") == "no_trade"
+        and p.get("phase") == "signal"
+        for p in payloads
+    )
+    assert any(
+        p.get("type") == "bot_decision"
+        and p.get("decision") == "opportunity_detected"
+        and p.get("phase") == "signal"
+        for p in payloads
+    )
+    assert any(
+        p.get("type") == "bot_decision"
+        and p.get("decision") == "opportunity_taken"
+        and p.get("phase") == "execution"
+        for p in payloads
+    )
+
 @pytest.mark.asyncio
 async def test_run_bot_no_token(runner):
     runner.account_id = "user_no_token"

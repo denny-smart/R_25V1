@@ -14,7 +14,7 @@ import asyncio
 import os
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Optional, Dict, Any
 
 from data_fetcher import DataFetcher
 from risefallbot import rf_config
@@ -35,6 +35,7 @@ logger = logging.getLogger("risefallbot")
 # Module-level sentinel for clean stop and duplicate prevention
 _running = False
 _bot_task: Optional[asyncio.Task] = None
+_decision_emit_state: Dict[str, Dict[str, Any]] = {}
 
 
 def _setup_rf_logger():
@@ -654,6 +655,79 @@ def stop():
     logger.info("🛑 Rise/Fall bot stop requested")
 
 
+def _should_emit_rf_decision(
+    user_id: Optional[str],
+    symbol: str,
+    phase: str,
+    decision: str,
+    reason: str,
+    min_interval_seconds: int,
+) -> bool:
+    """Throttle repeated RF decision events for cleaner frontend timelines."""
+    if min_interval_seconds <= 0:
+        return True
+
+    now = datetime.now()
+    state_key = f"{user_id or 'anon'}:{symbol}:{phase}:{decision}"
+    fingerprint = f"{reason or ''}"
+    last = _decision_emit_state.get(state_key)
+    if not last:
+        _decision_emit_state[state_key] = {"fingerprint": fingerprint, "time": now}
+        return True
+
+    elapsed = (now - last.get("time", datetime.min)).total_seconds()
+    if last.get("fingerprint") != fingerprint or elapsed >= min_interval_seconds:
+        _decision_emit_state[state_key] = {"fingerprint": fingerprint, "time": now}
+        return True
+
+    return False
+
+
+async def _broadcast_rf_decision(
+    event_manager,
+    user_id: Optional[str],
+    symbol: str,
+    phase: str,
+    decision: str,
+    reason: Optional[str] = None,
+    details: Optional[Dict[str, Any]] = None,
+    severity: str = "info",
+    min_interval_seconds: int = 20,
+) -> None:
+    """Emit structured Rise/Fall decision events for frontend compatibility."""
+    if not _should_emit_rf_decision(
+        user_id=user_id,
+        symbol=symbol,
+        phase=phase,
+        decision=decision,
+        reason=reason or "",
+        min_interval_seconds=min_interval_seconds,
+    ):
+        return
+
+    payload = {
+        "type": "bot_decision",
+        "bot": "risefall",
+        "strategy": "RiseFall",
+        "symbol": symbol,
+        "phase": phase,
+        "decision": decision,
+        "severity": severity,
+        "message": reason or decision.replace("_", " "),
+        "timestamp": datetime.now().isoformat(),
+        "account_id": user_id,
+    }
+    if reason:
+        payload["reason"] = reason
+    if details:
+        payload["details"] = details
+
+    try:
+        await event_manager.broadcast(payload)
+    except Exception as e:
+        logger.debug(f"[RF] Decision event broadcast skipped due to error: {e}")
+
+
 async def _process_symbol(
     symbol: str,
     strategy: RiseFallStrategy,
@@ -683,6 +757,16 @@ async def _process_symbol(
     can_trade, reason = risk_manager.can_trade(symbol=symbol, stake=stake)
     if not can_trade:
         logger.info(f"[RF][{symbol}] ⏸️ Cannot trade: {reason}")
+        await _broadcast_rf_decision(
+            event_manager=event_manager,
+            user_id=user_id,
+            symbol=symbol,
+            phase="risk",
+            decision="no_trade",
+            reason=reason,
+            details={"gate": "can_trade"},
+            severity="warning",
+        )
         return
 
     # ── Pre-check: Fetch data and check for signal BEFORE acquiring lock ──
@@ -695,11 +779,30 @@ async def _process_symbol(
     )
     if df is None or df.empty:
         logger.warning(f"[RF][{symbol}] No data returned")
+        await _broadcast_rf_decision(
+            event_manager=event_manager,
+            user_id=user_id,
+            symbol=symbol,
+            phase="data",
+            decision="no_trade",
+            reason="No market data returned",
+            details={"timeframe": rf_config.RF_TIMEFRAME},
+            severity="warning",
+        )
         return
 
     # Strategy analysis
     signal = strategy.analyze(data_1m=df, symbol=symbol, stake=stake)
     if signal is None:
+        await _broadcast_rf_decision(
+            event_manager=event_manager,
+            user_id=user_id,
+            symbol=symbol,
+            phase="signal",
+            decision="no_trade",
+            reason="Strategy conditions not met",
+            details={"mode": "triple_confirmation"},
+        )
         return  # No triple-confirmation — already logged by strategy
 
     # ══════════════════════════════════════════════════════════════════════
@@ -716,12 +819,49 @@ async def _process_symbol(
     max_stake = getattr(rf_config, "RF_MAX_STAKE", 100.0)
     if stake_val > max_stake:
         logger.warning(f"[RF][{symbol}] ⏸️ Stake ${stake_val} exceeds max ${max_stake} — rejecting")
+        await _broadcast_rf_decision(
+            event_manager=event_manager,
+            user_id=user_id,
+            symbol=symbol,
+            phase="risk",
+            decision="no_trade",
+            reason=f"Stake ${stake_val:.2f} exceeds max ${max_stake:.2f}",
+            details={"stake": stake_val, "max_stake": max_stake},
+            severity="warning",
+        )
         return
+
+    await _broadcast_rf_decision(
+        event_manager=event_manager,
+        user_id=user_id,
+        symbol=symbol,
+        phase="signal",
+        decision="opportunity_detected",
+        reason="All Rise/Fall strategy checks aligned",
+        details={
+            "direction": direction,
+            "stake": stake_val,
+            "confidence": signal.get("confidence"),
+            "rsi": signal.get("rsi"),
+            "stoch": signal.get("stoch"),
+        },
+        min_interval_seconds=0,
+    )
 
     # ── STEP 1: Acquire trade lock ──
     lock_acquired = await risk_manager.acquire_trade_lock(symbol, "pending", stake=stake_val)
     if not lock_acquired:
         logger.error(f"[RF][{symbol}] ❌ Could not acquire trade lock — system may be halted")
+        await _broadcast_rf_decision(
+            event_manager=event_manager,
+            user_id=user_id,
+            symbol=symbol,
+            phase="risk",
+            decision="no_trade",
+            reason="Trade lock not acquired",
+            details={"gate": "trade_lock"},
+            severity="warning",
+        )
         return
 
     try:
@@ -764,6 +904,16 @@ async def _process_symbol(
         logger.info(
             f"[RF] STEP 2/6 | {ts} | EXECUTING TRADE {symbol} {direction} ${stake_val}"
         )
+        await _broadcast_rf_decision(
+            event_manager=event_manager,
+            user_id=user_id,
+            symbol=symbol,
+            phase="execution",
+            decision="opportunity_taken",
+            reason="Lock acquired and execution started",
+            details={"direction": direction, "stake": stake_val},
+            min_interval_seconds=0,
+        )
 
         result = await trade_engine.buy_rise_fall(
             symbol=symbol,
@@ -775,6 +925,16 @@ async def _process_symbol(
 
         if not result:
             logger.error(f"[RF][{symbol}] ❌ Trade execution FAILED at Step 2")
+            await _broadcast_rf_decision(
+                event_manager=event_manager,
+                user_id=user_id,
+                symbol=symbol,
+                phase="execution",
+                decision="opportunity_failed",
+                reason="Trade engine buy request failed",
+                severity="error",
+                min_interval_seconds=0,
+            )
             # HALT: Trade execution failed — release lock and halt
             risk_manager.halt(f"Trade execution failed for {symbol} {direction}")
             await event_manager.broadcast({
@@ -974,6 +1134,16 @@ async def _process_symbol(
     except Exception as e:
         # Unexpected error during lifecycle — halt
         logger.error(f"[RF][{symbol}] ❌ Lifecycle error: {e}")
+        await _broadcast_rf_decision(
+            event_manager=event_manager,
+            user_id=user_id,
+            symbol=symbol,
+            phase="execution",
+            decision="opportunity_failed",
+            reason=f"Lifecycle error: {e}",
+            severity="error",
+            min_interval_seconds=0,
+        )
         risk_manager.halt(f"Unexpected lifecycle error: {e}")
         await event_manager.broadcast({
             "type": "error",

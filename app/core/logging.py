@@ -1,6 +1,7 @@
 import logging
 import sys
 import asyncio
+import time
 from typing import Optional
 
 from app.core.context import user_id_var
@@ -18,10 +19,56 @@ class WebSocketLoggingHandler(logging.Handler):
     """
     Broadcasts logs to the specific user via WebSocket.
     """
+    def __init__(self, status_cache_ttl_seconds: float = 1.0):
+        super().__init__()
+        self._status_cache_ttl = status_cache_ttl_seconds
+        self._status_cache = {}
+
+    @staticmethod
+    def _classify_bot_from_logger(logger_name: str) -> str:
+        """Map logger namespace to bot type."""
+        if str(logger_name).startswith("risefallbot"):
+            return "risefall"
+        return "multiplier"
+
+    def _get_running_bot_type(self, user_id: str) -> Optional[str]:
+        """
+        Return the currently running bot type for a user:
+        - 'risefall'
+        - 'multiplier'
+        - None (no bot running / unknown)
+        """
+        now = time.time()
+        cached = self._status_cache.get(user_id)
+        if cached and (now - cached["ts"] <= self._status_cache_ttl):
+            return cached["bot_type"]
+
+        bot_type = None
+        try:
+            from app.bot.manager import bot_manager
+
+            status = bot_manager.get_status(user_id)
+            if status.get("is_running"):
+                active_strategy = status.get("active_strategy")
+                bot_type = "risefall" if active_strategy == "RiseFall" else "multiplier"
+        except Exception:
+            bot_type = None
+
+        self._status_cache[user_id] = {"bot_type": bot_type, "ts": now}
+        return bot_type
+
     def emit(self, record):
         try:
             user_id = getattr(record, 'user_id', None)
             if not user_id:
+                return
+
+            record_bot = self._classify_bot_from_logger(record.name)
+            running_bot = self._get_running_bot_type(user_id)
+
+            # Strict isolation: only stream logs that belong to the bot
+            # currently running for this user.
+            if not running_bot or record_bot != running_bot:
                 return
 
             msg = self.format(record)
@@ -33,6 +80,7 @@ class WebSocketLoggingHandler(logging.Handler):
                 if loop.is_running():
                     payload = {
                         "type": "log",
+                        "bot": record_bot,
                         "level": record.levelname,
                         "message": msg,
                         "timestamp": record.created,

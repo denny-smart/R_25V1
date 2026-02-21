@@ -10,12 +10,14 @@ from risefallbot.rf_risk_manager import RiseFallRiskManager
 def reset_globals():
     rf_bot._running = False
     rf_bot._bot_task = None
+    rf_bot._decision_emit_state = {}
     rf_bot._locked_symbol = None
     if hasattr(rf_bot, "_lock_active"):
         rf_bot._lock_active = False
     yield
     rf_bot._running = False
     rf_bot._bot_task = None
+    rf_bot._decision_emit_state = {}
 
 @pytest.mark.asyncio
 async def test_fetch_user_config_supabase():
@@ -139,8 +141,14 @@ async def test_process_symbol_lifecycle_failure():
         "direction": "CALL", "stake": 1.0, "duration": 5, "duration_unit": "m"
     }
     
-    # Trigger exception inside try block, but allow subsequent broadcasts (error, unlock) to succeed
-    mock_em.broadcast.side_effect = [Exception("Lifecycle crash"), None, None, None]
+    # Trigger one lifecycle broadcast failure, allow all later broadcasts
+    calls = {"n": 0}
+    async def _broadcast_side_effect(*_args, **_kwargs):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise Exception("Lifecycle crash")
+        return None
+    mock_em.broadcast.side_effect = _broadcast_side_effect
     mock_te = AsyncMock()
     
     with patch("risefallbot.rf_bot.logger") as mock_logger:
@@ -181,6 +189,15 @@ async def test_process_symbol_no_signal():
     mock_df.fetch_timeframe.return_value = MagicMock(empty=False)
     mock_strategy = MagicMock()
     mock_strategy.analyze.return_value = None
+    mock_em = AsyncMock()
+    mock_em.broadcast = AsyncMock()
     
-    await rf_bot._process_symbol("R_25", mock_strategy, rm, mock_df, AsyncMock(), 1.0, "user123", AsyncMock(), MagicMock())
+    await rf_bot._process_symbol("R_25", mock_strategy, rm, mock_df, AsyncMock(), 1.0, "user123", mock_em, MagicMock())
+    payloads = [c.args[0] for c in mock_em.broadcast.await_args_list if c.args]
+    assert any(
+        p.get("type") == "bot_decision"
+        and p.get("decision") == "no_trade"
+        and p.get("phase") == "signal"
+        for p in payloads
+    )
     assert not rm.is_halted()
