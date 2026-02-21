@@ -85,7 +85,7 @@ class BotManager:
                             f"[BotManager] Cancelling orphaned RF task during strategy switch for {user_id}"
                         )
                         from risefallbot import rf_bot
-                        rf_bot.stop()
+                        rf_bot.stop(user_id)
                         self._rf_tasks[user_id].cancel()
                         try:
                             await self._rf_tasks[user_id]
@@ -314,7 +314,7 @@ class BotManager:
                     f"[BotManager] ⚠️ RF task already exists for {user_id} — "
                     f"requesting graceful stop (timeout={timeout}s)"
                 )
-                rf_bot.stop()  # signal _running = False
+                rf_bot.stop(user_id)  # signal this user's loop to stop
 
                 # Wait for the task to finish naturally
                 try:
@@ -401,7 +401,7 @@ class BotManager:
 
         # Graceful stop: signal loop to exit, then wait before hard-cancel
         timeout = getattr(rf_config, "RF_GRACEFUL_SHUTDOWN_TIMEOUT", 15)
-        rf_bot.stop()       # signal the while-loop to exit
+        rf_bot.stop(user_id)       # signal this user's while-loop to exit
 
         try:
             await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
@@ -454,7 +454,7 @@ class BotManager:
         for user_id, task in list(self._rf_tasks.items()):
             if not task.done():
                 from risefallbot import rf_bot
-                rf_bot.stop()
+                rf_bot.stop(user_id)
                 task.cancel()
             del self._rf_tasks[user_id]
         

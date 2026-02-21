@@ -10,6 +10,10 @@ from risefallbot.rf_risk_manager import RiseFallRiskManager
 def reset_globals():
     rf_bot._running = False
     rf_bot._bot_task = None
+    if hasattr(rf_bot, "_running_by_user"):
+        rf_bot._running_by_user.clear()
+    if hasattr(rf_bot, "_bot_task_by_user"):
+        rf_bot._bot_task_by_user.clear()
     rf_bot._decision_emit_state = {}
     rf_bot._locked_symbol = None
     if hasattr(rf_bot, "_lock_active"):
@@ -17,6 +21,10 @@ def reset_globals():
     yield
     rf_bot._running = False
     rf_bot._bot_task = None
+    if hasattr(rf_bot, "_running_by_user"):
+        rf_bot._running_by_user.clear()
+    if hasattr(rf_bot, "_bot_task_by_user"):
+        rf_bot._bot_task_by_user.clear()
     rf_bot._decision_emit_state = {}
 
 @pytest.mark.asyncio
@@ -31,6 +39,21 @@ async def test_fetch_user_config_supabase():
         config_data = await rf_bot._fetch_user_config()
         assert config_data["api_token"] == "MOCK_KEY"
         assert config_data["stake"] == 5.0
+
+
+@pytest.mark.asyncio
+async def test_fetch_user_config_specific_user():
+    mock_supabase = MagicMock()
+    mock_supabase.table.return_value.select.return_value.eq.return_value.single.return_value.execute.return_value.data = {
+        "deriv_api_key": "USER_KEY",
+        "stake_amount": 7.5,
+    }
+
+    with patch("app.core.supabase.supabase", mock_supabase), \
+         patch("risefallbot.rf_bot.os.getenv", return_value=None):
+        config_data = await rf_bot._fetch_user_config(user_id="user-abc")
+        assert config_data["api_token"] == "USER_KEY"
+        assert config_data["stake"] == 7.5
 
 @pytest.mark.asyncio
 async def test_fetch_user_config_env():
@@ -172,6 +195,16 @@ async def test_bot_stop():
     rf_bot._running = True
     rf_bot.stop()
     assert rf_bot._running is False
+
+
+def test_bot_stop_specific_user_does_not_stop_other_users():
+    rf_bot._running_by_user["u1"] = True
+    rf_bot._running_by_user["u2"] = True
+
+    rf_bot.stop("u1")
+
+    assert not rf_bot._running_by_user.get("u1", False)
+    assert rf_bot._running_by_user.get("u2") is True
 
 @pytest.mark.asyncio
 async def test_process_symbol_no_data():

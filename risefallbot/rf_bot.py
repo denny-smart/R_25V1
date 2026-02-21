@@ -13,8 +13,11 @@ rf_bot.py
 import asyncio
 import os
 import logging
+import re
+import threading
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any
+from pathlib import Path
 
 from data_fetcher import DataFetcher
 from risefallbot import rf_config
@@ -32,10 +35,113 @@ except ImportError:
 # Dedicated logger for Rise/Fall bot orchestration — writes to its own file
 logger = logging.getLogger("risefallbot")
 
-# Module-level sentinel for clean stop and duplicate prevention
+# Legacy global sentinel (kept for backward compatibility with older tests)
 _running = False
 _bot_task: Optional[asyncio.Task] = None
+# Per-user runtime state (enables concurrent RF bot instances across users)
+_running_by_user: Dict[str, bool] = {}
+_bot_task_by_user: Dict[str, asyncio.Task] = {}
 _decision_emit_state: Dict[str, Dict[str, Any]] = {}
+
+
+def _state_key(user_id: Optional[str]) -> str:
+    return str(user_id) if user_id else "__legacy__"
+
+
+def _get_task_for_user(user_id: Optional[str]) -> Optional[asyncio.Task]:
+    key = _state_key(user_id)
+    if key == "__legacy__":
+        return _bot_task
+    return _bot_task_by_user.get(key)
+
+
+def _set_task_for_user(user_id: Optional[str], task: asyncio.Task) -> None:
+    global _bot_task
+    key = _state_key(user_id)
+    if key == "__legacy__":
+        _bot_task = task
+    else:
+        _bot_task_by_user[key] = task
+
+
+def _clear_task_for_user(user_id: Optional[str], task: Optional[asyncio.Task] = None) -> None:
+    global _bot_task
+    key = _state_key(user_id)
+    if key == "__legacy__":
+        if task is None or _bot_task is task or (_bot_task and _bot_task.done()):
+            _bot_task = None
+        return
+
+    existing = _bot_task_by_user.get(key)
+    if task is None or existing is task or (existing and existing.done()):
+        _bot_task_by_user.pop(key, None)
+
+
+def _is_running_for_user(user_id: Optional[str]) -> bool:
+    key = _state_key(user_id)
+    if key == "__legacy__":
+        return _running
+    return _running_by_user.get(key, False)
+
+
+def _set_running_for_user(user_id: Optional[str], running: bool) -> None:
+    global _running
+    key = _state_key(user_id)
+    if key == "__legacy__":
+        _running = running
+        return
+    if running:
+        _running_by_user[key] = True
+    else:
+        _running_by_user.pop(key, None)
+
+
+def _safe_user_component(user_id: Optional[str]) -> str:
+    text = str(user_id) if user_id is not None else "anonymous"
+    cleaned = re.sub(r"[^A-Za-z0-9._-]", "_", text).strip("._")
+    return cleaned or "anonymous"
+
+
+class _RFPerUserFileHandler(logging.Handler):
+    """Route risefallbot logger records into per-user files."""
+
+    def __init__(self, formatter: logging.Formatter):
+        super().__init__(logging.DEBUG)
+        self._formatter = formatter
+        self._handlers: Dict[str, logging.Handler] = {}
+        self._lock = threading.Lock()
+
+    def _resolve_path(self, record: logging.LogRecord) -> str:
+        user_key = _safe_user_component(getattr(record, "user_id", None))
+        return str(Path("logs") / "risefall" / f"{user_key}.log")
+
+    def _get_handler(self, path: str) -> logging.Handler:
+        with self._lock:
+            handler = self._handlers.get(path)
+            if handler is None:
+                target = Path(path)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                handler = logging.FileHandler(target, encoding="utf-8")
+                handler.setLevel(logging.DEBUG)
+                handler.setFormatter(self._formatter)
+                self._handlers[path] = handler
+            return handler
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self._get_handler(self._resolve_path(record)).emit(record)
+        except Exception:
+            self.handleError(record)
+
+    def close(self) -> None:
+        with self._lock:
+            for handler in self._handlers.values():
+                try:
+                    handler.close()
+                except Exception:
+                    pass
+            self._handlers.clear()
+        super().close()
 
 
 def _setup_rf_logger():
@@ -59,17 +165,21 @@ def _setup_rf_logger():
         from app.core.logging import ContextInjectingFilter
         rf_root.addFilter(ContextInjectingFilter())
     except Exception:
-        pass
+        class _DefaultUserFilter(logging.Filter):
+            def filter(self, record):
+                if not hasattr(record, "user_id"):
+                    record.user_id = None
+                return True
+
+        rf_root.addFilter(_DefaultUserFilter())
 
     formatter = logging.Formatter(
-        "%(asctime)s | %(name)s | %(levelname)s | %(message)s",
+        "%(asctime)s | %(name)s | %(levelname)s | [%(user_id)s] %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    # File handler
-    fh = logging.FileHandler(rf_config.RF_LOG_FILE, encoding="utf-8")
-    fh.setFormatter(formatter)
-    rf_root.addHandler(fh)
+    # Per-user file handler to prevent cross-user log mixing.
+    rf_root.addHandler(_RFPerUserFileHandler(formatter))
 
     # Console handler (optional — useful during development)
     ch = logging.StreamHandler()
@@ -91,10 +201,11 @@ def _setup_rf_logger():
 _setup_rf_logger()
 
 
-async def _fetch_user_config() -> dict:
+async def _fetch_user_config(user_id: Optional[str] = None) -> dict:
     """
-    Fetch deriv_api_key and stake_amount from Supabase profiles table
-    for the first user who has active_strategy = 'RiseFall'.
+    Fetch deriv_api_key and stake_amount from Supabase profiles table.
+    When user_id is provided, reads that exact profile.
+    Otherwise, falls back to the first user with active_strategy = 'RiseFall'.
     Falls back to env-var token and config default stake.
     """
     result_config = {
@@ -104,15 +215,15 @@ async def _fetch_user_config() -> dict:
 
     try:
         from app.core.supabase import supabase
-        result = (
-            supabase.table("profiles")
-            .select("deriv_api_key, stake_amount")
-            .eq("active_strategy", "RiseFall")
-            .limit(1)
-            .execute()
-        )
-        if result.data:
-            row = result.data[0]
+        base_query = supabase.table("profiles").select("deriv_api_key, stake_amount")
+        if user_id:
+            result = base_query.eq("id", user_id).single().execute()
+            row = result.data if isinstance(result.data, dict) else None
+        else:
+            result = base_query.eq("active_strategy", "RiseFall").limit(1).execute()
+            row = result.data[0] if result.data else None
+
+        if row:
             if row.get("deriv_api_key"):
                 result_config["api_token"] = row["deriv_api_key"]
                 logger.info("🔑 API token loaded from user profile")
@@ -262,30 +373,32 @@ async def run(stake: Optional[float] = None, api_token: Optional[str] = None,
     - Creates its own RFTradeEngine (independent WS connection)
     - Loops: fetch 1m candles → analyse → risk check → execute (strict 6-step lifecycle)
     
-    CRITICAL: Prevents duplicate instances via module-level task guard.
-    If a bot is already running, returns immediately without starting a second instance.
+    CRITICAL: Prevents duplicate instances per user/task key.
+    Different users can run concurrently; same user is guarded.
     """
+    # Set logging context first so all startup logs route to the correct user file.
+    from app.core.context import user_id_var, bot_type_var
+    user_id_var.set(user_id)
+    bot_type_var.set("risefall")
+
     # ───────────────────────────────────────────────────────────────────────
-    # DUPLICATE INSTANCE PREVENTION (PRIORITY 1)
+    # DUPLICATE INSTANCE PREVENTION (PER USER)
     # asyncio.Lock is per-instance. Two separate run() calls would have two
     # separate RiseFallRiskManager instances with independent mutexes.
-    # This guard ensures only ONE global instance runs at a time.
+    # This guard ensures one active instance per user.
     # ───────────────────────────────────────────────────────────────────────
-    global _bot_task
-    
-    if _bot_task and not _bot_task.done():
+    existing_task = _get_task_for_user(user_id)
+    if existing_task and not existing_task.done():
         logger.warning(
-            f"[RF] ⚠️ Duplicate start ignored — bot already running. "
-            f"Task: {_bot_task} | Current: {asyncio.current_task()}"
+            f"[RF] ⚠️ Duplicate start ignored — bot already running for user={user_id}. "
+            f"Task: {existing_task} | Current: {asyncio.current_task()}"
         )
         return
-    
-    _bot_task = asyncio.current_task()
-    logger.info(f"[RF] ✅ Registered bot task as singleton: {_bot_task}")
-    
-    # Set user_id in context for logging handlers to access
-    from app.core.context import user_id_var
-    user_id_var.set(user_id)
+
+    current_task = asyncio.current_task()
+    if current_task:
+        _set_task_for_user(user_id, current_task)
+    logger.info(f"[RF] ✅ Registered bot task for user={user_id}: {current_task}")
     
     # Lazy import to avoid circular imports at module level
     from app.bot.events import event_manager
@@ -295,7 +408,7 @@ async def run(stake: Optional[float] = None, api_token: Optional[str] = None,
     logger.info("[RF] 🔒 Strict single-trade enforcement enabled (asyncio.Lock mutex)")
 
     # Resolve user config: explicit params > Supabase profile > env vars
-    user_cfg = await _fetch_user_config()
+    user_cfg = await _fetch_user_config(user_id=user_id)
     if stake is None:
         stake = user_cfg["stake"]
     if api_token is None:
@@ -316,6 +429,7 @@ async def run(stake: Optional[float] = None, api_token: Optional[str] = None,
             "timestamp": datetime.now().isoformat(),
             "account_id": user_id,
         })
+        _clear_task_for_user(user_id, current_task)
         return
 
     # --- Instantiate components ---
@@ -340,6 +454,7 @@ async def run(stake: Optional[float] = None, api_token: Optional[str] = None,
             "timestamp": datetime.now().isoformat(),
             "account_id": user_id,
         })
+        _clear_task_for_user(user_id, current_task)
         return
     if not await trade_engine.connect():
         logger.error("❌ RFTradeEngine connection failed — aborting")
@@ -357,6 +472,7 @@ async def run(stake: Optional[float] = None, api_token: Optional[str] = None,
             "timestamp": datetime.now().isoformat(),
             "account_id": user_id,
         })
+        _clear_task_for_user(user_id, current_task)
         return
 
     # Get account balance for notification
@@ -388,7 +504,7 @@ async def run(stake: Optional[float] = None, api_token: Optional[str] = None,
     # loop begins — otherwise a stale False value could cause the loop to
     # exit immediately on the first iteration (especially after hard cancel).
     # ────────────────────────────────────────────────────────────────────────
-    _running = True  # Explicit reset — clear stale state from any previous run
+    _set_running_for_user(user_id, True)
     cycle = 0
     _start_time = datetime.now()
     _current_balance = balance or 0.0
@@ -454,7 +570,7 @@ async def run(stake: Optional[float] = None, api_token: Optional[str] = None,
     })
 
     try:
-        while _running:
+        while _is_running_for_user(user_id):
             cycle += 1
             await _refresh_session_lock(user_id)
             logger.debug(f"[RF] Cycle #{cycle} | {datetime.now().strftime('%H:%M:%S')}")
@@ -660,7 +776,8 @@ async def run(stake: Optional[float] = None, api_token: Optional[str] = None,
             "account_id": user_id,
         })
     finally:
-        _running = False
+        _set_running_for_user(user_id, False)
+        _clear_task_for_user(user_id, asyncio.current_task())
 
         # ─────────────────────────────────────────────────────────────────
         # EMERGENCY RECORD: If the bot was cancelled while a trade
@@ -739,11 +856,21 @@ async def run(stake: Optional[float] = None, api_token: Optional[str] = None,
         })
 
 
-def stop():
-    """Signal the Rise/Fall bot loop to stop."""
+def stop(user_id: Optional[str] = None):
+    """
+    Signal Rise/Fall loop(s) to stop.
+    - If user_id is provided: stop only that user's loop.
+    - If omitted: stop legacy/default loop and all user loops.
+    """
     global _running
-    _running = False
-    logger.info("🛑 Rise/Fall bot stop requested")
+    _running = False  # backward compatibility for legacy tests/mocks
+    if user_id is None:
+        for key in list(_running_by_user.keys()):
+            _running_by_user[key] = False
+        logger.info("Rise/Fall bot stop requested for all users")
+        return
+    _set_running_for_user(user_id, False)
+    logger.info(f"Rise/Fall bot stop requested for user={user_id}")
 
 
 def _should_emit_rf_decision(

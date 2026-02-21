@@ -8,6 +8,7 @@ import pytest
 
 from utils import (
     setup_logger,
+    StrategyUserFileRouterHandler,
     format_price,
     format_currency,
     format_percentage,
@@ -158,6 +159,32 @@ def test_setup_logger_reuse_and_filter(monkeypatch):
         assert captured["msg"] == "hello"
     finally:
         user_id_var.reset(token)
+
+
+def test_strategy_user_file_router_handler_resolves_per_user_paths():
+    fmt = logging.Formatter("%(message)s")
+    handler = StrategyUserFileRouterHandler(fmt)
+
+    rec_conservative = logging.LogRecord("x", logging.INFO, __file__, 1, "m", args=(), exc_info=None)
+    rec_conservative.user_id = "user-a"
+    rec_conservative.bot_type = "conservative"
+
+    rec_scalping = logging.LogRecord("x", logging.INFO, __file__, 1, "m", args=(), exc_info=None)
+    rec_scalping.user_id = "user_b"
+    rec_scalping.bot_type = "scalping"
+
+    rec_risefall = logging.LogRecord("x", logging.INFO, __file__, 1, "m", args=(), exc_info=None)
+    rec_risefall.user_id = "user.c"
+    rec_risefall.bot_type = "risefall"
+
+    rec_system = logging.LogRecord("x", logging.INFO, __file__, 1, "m", args=(), exc_info=None)
+    rec_system.user_id = "user-z"
+    rec_system.bot_type = "system"
+
+    assert handler._resolve_log_path(rec_conservative).replace("\\", "/") == "logs/conservative/user-a.log"
+    assert handler._resolve_log_path(rec_scalping).replace("\\", "/") == "logs/scalping/user_b.log"
+    assert handler._resolve_log_path(rec_risefall).replace("\\", "/") == "logs/risefall/user.c.log"
+    assert handler._resolve_log_path(rec_system).replace("\\", "/") == "logs/system/multiplier_system.log"
 
 
 # -----------------------------

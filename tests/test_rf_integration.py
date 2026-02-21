@@ -151,6 +151,44 @@ async def test_risefall_double_start_rejected(bot_manager):
         await bot_manager.stop_bot(user_id)
 
 
+@pytest.mark.asyncio
+async def test_risefall_two_users_run_concurrently(bot_manager):
+    """Two different users should run independent Rise/Fall instances concurrently."""
+    user_a = "rf-user-a"
+    user_b = "rf-user-b"
+
+    async def fake_rf_run(stake=None, api_token=None, user_id=None):
+        import risefallbot.rf_bot as bot_mod
+        key = str(user_id)
+        bot_mod._running_by_user[key] = True
+        while bot_mod._running_by_user.get(key, False):
+            await asyncio.sleep(0.1)
+
+    with patch("risefallbot.rf_bot.run", side_effect=fake_rf_run):
+        r1 = await bot_manager.start_bot(
+            user_id=user_a, api_token="T1", stake=1.0, strategy_name="RiseFall"
+        )
+        r2 = await bot_manager.start_bot(
+            user_id=user_b, api_token="T2", stake=1.5, strategy_name="RiseFall"
+        )
+
+        assert r1["success"] is True
+        assert r2["success"] is True
+
+        await asyncio.sleep(0.2)
+        assert bot_manager.get_status(user_a)["is_running"] is True
+        assert bot_manager.get_status(user_b)["is_running"] is True
+
+        stop_a = await bot_manager.stop_bot(user_a)
+        assert stop_a["success"] is True
+        await asyncio.sleep(0.2)
+        assert bot_manager.get_status(user_a)["is_running"] is False
+        assert bot_manager.get_status(user_b)["is_running"] is True
+
+        stop_b = await bot_manager.stop_bot(user_b)
+        assert stop_b["success"] is True
+
+
 # ---------------------------------------------------------------------------
 # Test 3: Stop when not running
 # ---------------------------------------------------------------------------
