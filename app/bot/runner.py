@@ -180,6 +180,19 @@ class BotRunner:
         self.signals_by_symbol = {symbol: self.signals_by_symbol.get(symbol, 0) for symbol in self.symbols}
         self.errors_by_symbol = {symbol: self.errors_by_symbol.get(symbol, 0) for symbol in self.symbols}
 
+    def _init_risk_manager_for_strategy(self):
+        """Instantiate default risk manager matching the active strategy."""
+        strategy_name = (self._get_strategy_name() or "Conservative").strip().lower()
+        if strategy_name == "scalping":
+            from scalping_risk_manager import ScalpingRiskManager
+
+            return ScalpingRiskManager(user_id=self.account_id)
+
+        # Multiplier default remains conservative.
+        from conservative_risk_manager import ConservativeRiskManager
+
+        return ConservativeRiskManager(user_id=self.account_id)
+
     def _cycle_step(
         self,
         symbol: str,
@@ -284,6 +297,7 @@ class BotRunner:
 
         # Ensure runner scope and logging context reflect active strategy.
         self._sync_strategy_scope()
+        self.active_strategy = self._get_strategy_name()
         
         # STRICT ENFORCEMENT: User Stake Must Be Present
         if self.user_stake is None:
@@ -306,8 +320,8 @@ class BotRunner:
                 f"Startup requested for {self.account_id or 'default user'}",
                 emoji="\U0001F680",
             )
-            logger.info(f"[{self.active_strategy}][SYSTEM] \U0001F4DA Symbols: {', '.join(self.symbols)}")
-            logger.info(f"[{self.active_strategy}][SYSTEM] \U0001F4B5 Stake: ${current_stake}")
+            logger.info(f"[{self._get_strategy_name()}][SYSTEM] \U0001F4DA Symbols: {', '.join(self.symbols)}")
+            logger.info(f"[{self._get_strategy_name()}][SYSTEM] \U0001F4B5 Stake: ${current_stake}")
             self.status = BotStatus.STARTING
             self.error_message = None
             self.state.update_status("starting")
@@ -320,9 +334,9 @@ class BotRunner:
                     # Note: We need to adapt the format slightly if needed, but BotState expects dicts
                     # We might want to populate stats based on this history too
                     self.state.trade_history = history
-                    logger.info(f"[{self.active_strategy}][SYSTEM] \U0001F5C2\ufe0f Loaded {len(history)} historical trades")
+                    logger.info(f"[{self._get_strategy_name()}][SYSTEM] \U0001F5C2\ufe0f Loaded {len(history)} historical trades")
             except Exception as e:
-                logger.warning(f"[{self.active_strategy}][SYSTEM] \u26A0\ufe0f Failed to load history: {e}")
+                logger.warning(f"[{self._get_strategy_name()}][SYSTEM] \u26A0\ufe0f Failed to load history: {e}")
 
             # Create bot task
             self.task = asyncio.create_task(self._run_bot())
@@ -483,7 +497,7 @@ class BotRunner:
         return {
             "status": self.status.value,
             "is_running": self.is_running,
-            "active_strategy": self.active_strategy,
+            "active_strategy": self._get_strategy_name(),
             "uptime_seconds": uptime,
             "start_time": self.start_time.isoformat() if self.start_time else None,
             "error_message": self.error_message,
@@ -496,7 +510,7 @@ class BotRunner:
             "statistics": self.state.get_statistics(),
             "config": {
                 "stake": self.user_stake if self.user_stake else config.FIXED_STAKE,
-                "strategy": self.active_strategy
+                "strategy": self._get_strategy_name()
             },
             "multi_asset": {
                 "symbols": self.symbols,
@@ -538,8 +552,7 @@ class BotRunner:
                 
                 # Only initialize risk_manager if not already injected
                 if self.risk_manager is None:
-                    from conservative_risk_manager import ConservativeRiskManager
-                    self.risk_manager = ConservativeRiskManager(user_id=self.account_id)
+                    self.risk_manager = self._init_risk_manager_for_strategy()
                 
                 # Set bot state for risk manager
                 if hasattr(self.risk_manager, 'set_bot_state'):
@@ -610,7 +623,11 @@ class BotRunner:
             
             # Notify Telegram
             try:
-                await self.telegram_bridge.notify_bot_started(balance or 0.0, self.user_stake, self.active_strategy)
+                await self.telegram_bridge.notify_bot_started(
+                    balance or 0.0,
+                    self.user_stake,
+                    self._get_strategy_name(),
+                )
             except Exception as e:
                 logger.warning(f"[{self._get_strategy_name()}][SYSTEM] \u26A0\ufe0f Telegram notification failed: {e}")
             
@@ -629,7 +646,7 @@ class BotRunner:
             await event_manager.broadcast({
                 "type": "statistics",
                 "stats": initial_stats,
-                "strategy": self.active_strategy,
+                "strategy": self._get_strategy_name(),
                 "timestamp": datetime.now().isoformat(),
                 "account_id": self.account_id
             })

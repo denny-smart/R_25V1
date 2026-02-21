@@ -47,6 +47,13 @@ class BotManager:
             if strategy is not None:
                 logger.info(f"Updating strategy for existing bot instance: {user_id}")
                 self._bots[user_id].strategy = strategy
+                if hasattr(strategy, "get_strategy_name"):
+                    try:
+                        self._bots[user_id].active_strategy = strategy.get_strategy_name()
+                    except Exception:
+                        pass
+                if hasattr(self._bots[user_id], "_sync_strategy_scope"):
+                    self._bots[user_id]._sync_strategy_scope()
             if risk_manager is not None:
                 logger.info(f"Updating risk manager for existing bot instance: {user_id}")
                 self._bots[user_id].risk_manager = risk_manager
@@ -128,18 +135,31 @@ class BotManager:
             # --- Multiplier strategies: BotRunner ---
             # Load strategy classes from registry
             from strategy_registry import get_strategy
-            strategy_class, risk_manager_class = get_strategy(active_strategy)
+            # Do not silently downgrade explicit user strategy requests.
+            strategy_class, risk_manager_class = get_strategy(
+                active_strategy,
+                respect_feature_flags=False,
+            )
             
             # Instantiate strategy and risk manager
             strategy_instance = strategy_class()
             risk_manager_instance = risk_manager_class(user_id=user_id)
             
-            logger.info(f"✅ Loaded strategy for {user_id}: {active_strategy}")
+            resolved_strategy = (
+                strategy_instance.get_strategy_name()
+                if hasattr(strategy_instance, "get_strategy_name")
+                else active_strategy
+            )
+            if resolved_strategy != active_strategy:
+                logger.warning(
+                    f"Requested strategy '{active_strategy}' resolved to '{resolved_strategy}' for {user_id}"
+                )
+            logger.info(f"✅ Loaded strategy for {user_id}: {resolved_strategy}")
             logger.info(f"📋 Strategy class: {strategy_class.__name__}, Risk Manager: {risk_manager_class.__name__}")
             
             # Create or get bot with injected instances
             bot = self.get_bot(user_id, strategy=strategy_instance, risk_manager=risk_manager_instance)
-            return await bot.start_bot(api_token=api_token, stake=stake, strategy_name=active_strategy)
+            return await bot.start_bot(api_token=api_token, stake=stake, strategy_name=resolved_strategy)
 
     async def stop_bot(self, user_id: str) -> dict:
         """

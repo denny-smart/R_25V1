@@ -37,6 +37,12 @@ def test_get_strategy_scalping_lowercase_enabled(monkeypatch, mock_env_vars):
     strat, risk = get_strategy("scalping")
     assert strat == STRATEGY_REGISTRY["Scalping"][0]
 
+def test_get_strategy_scalping_bypass_feature_flag(monkeypatch, mock_env_vars):
+    """Explicit callers can bypass feature-flag fallback and keep Scalping."""
+    monkeypatch.setenv("SCALPING_BOT_ENABLED", "false")
+    strat, risk = get_strategy("Scalping", respect_feature_flags=False)
+    assert strat == STRATEGY_REGISTRY["Scalping"][0]
+
 
 def test_normalize_strategy_name_aliases():
     assert normalize_strategy_name("scalping") == "Scalping"
