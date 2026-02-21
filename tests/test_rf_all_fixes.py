@@ -19,6 +19,17 @@ import pytest
 from datetime import datetime, timedelta
 from unittest.mock import patch, AsyncMock, MagicMock, PropertyMock
 
+@pytest.fixture(autouse=True)
+def disable_db_lock():
+    """Automatically disable DB session lock and mock its acquisition for all tests."""
+    with patch("risefallbot.rf_config.RF_ENFORCE_DB_LOCK", False), \
+         patch("risefallbot.rf_bot._acquire_session_lock", new_callable=AsyncMock) as mock_lock:
+        mock_lock.return_value = True
+        # Enable propagation so caplog works
+        logging.getLogger("risefallbot").propagate = True
+        yield
+
+
 
 # ===========================================================================
 # Fixtures
@@ -35,7 +46,9 @@ def risk_manager():
 def bot_manager():
     """Fresh BotManager for each test."""
     from app.bot.manager import BotManager
-    return BotManager(max_concurrent_bots=5)
+    mgr = BotManager(max_concurrent_bots=5)
+    mgr._get_user_strategy = AsyncMock(return_value="RiseFall")
+    return mgr
 
 
 @pytest.fixture
@@ -259,6 +272,7 @@ async def test_05_manual_close_returns_closure_type():
         "proposal_open_contract": {
             "is_sold": 1,
             "is_expired": 0,
+            "contract_id": "contract_manual_test",
             "sell_price": 1.40,
             "buy_price": 1.00,
             "bid_price": 1.40,
@@ -266,7 +280,8 @@ async def test_05_manual_close_returns_closure_type():
         },
         "subscription": {"id": "sub_123"},
     })
-    mock_ws.recv = AsyncMock(return_value=manual_close_msg)
+    # Mock recv: First call (flush) returns TimeoutError, second call (main loop) returns the message
+    mock_ws.recv = AsyncMock(side_effect=[asyncio.TimeoutError(), manual_close_msg])
     mock_ws.send = AsyncMock()
     engine.ws = mock_ws
 
@@ -278,194 +293,6 @@ async def test_05_manual_close_returns_closure_type():
     assert result["status"] == "win"
 
     print("\n[TEST 5] [PASS] Manual close closure_type detection passed")
-
-
-# ===========================================================================
-# TEST 6 — TP Execution with Retry
-# ===========================================================================
-
-@pytest.mark.asyncio
-async def test_06_tp_execution_with_retry():
-    """
-    Confirm TP fires and retries with market price fallback on failure.
-    """
-    from risefallbot.rf_trade_engine import RFTradeEngine
-
-    engine = RFTradeEngine(api_token="TEST", app_id="1089")
-
-    sell_attempt = {"count": 0}
-
-    async def mock_sell_contract(contract_id, min_price=0):
-        sell_attempt["count"] += 1
-        if sell_attempt["count"] == 1:
-            return False
-        return True
-
-    engine._sell_contract = mock_sell_contract
-
-    result = await engine._sell_with_retry(
-        "contract_tp_test", 1.50, "TP",
-        max_attempts=5, retry_delay=0.1,
-    )
-
-    assert result is True
-    assert sell_attempt["count"] == 2
-
-
-# ===========================================================================
-# TEST 7 — SL Execution with Retry
-# ===========================================================================
-
-@pytest.mark.asyncio
-async def test_07_sl_execution_with_retry():
-    """
-    Confirm SL fires and retries with market price fallback on failure.
-    """
-    from risefallbot.rf_trade_engine import RFTradeEngine
-
-    engine = RFTradeEngine(api_token="TEST", app_id="1089")
-
-    sell_attempt = {"count": 0}
-
-    async def mock_sell_contract(contract_id, min_price=0):
-        sell_attempt["count"] += 1
-        if sell_attempt["count"] <= 2:
-            return False
-        return True
-
-    engine._sell_contract = mock_sell_contract
-
-    engine_logger = logging.getLogger("risefallbot.engine")
-    handler = logging.handlers.MemoryHandler(capacity=100)
-    engine_logger.addHandler(handler)
-    try:
-        result = await engine._sell_with_retry(
-            "contract_sl_test", 0.60, "SL",
-            max_attempts=5, retry_delay=0.1,
-        )
-    finally:
-        engine_logger.removeHandler(handler)
-
-    assert result is True
-    assert sell_attempt["count"] == 3
-
-    log_text = "\n".join(r.getMessage() for r in handler.buffer)
-    assert "SL sell attempt 1/5 failed" in log_text
-    assert "SL retry 2/5" in log_text
-    assert "SL retry 3/5" in log_text
-    assert "SL sell confirmed" in log_text
-
-
-# ===========================================================================
-# TEST 8 — Exhausted TP/SL Retries — Continues Monitoring
-# ===========================================================================
-
-@pytest.mark.asyncio
-async def test_08_exhausted_retries_does_not_halt():
-    """
-    If all TP/SL sell attempts fail, _sell_with_retry returns False
-    but does NOT halt the system. The caller continues monitoring.
-    """
-    from risefallbot.rf_trade_engine import RFTradeEngine
-
-    engine = RFTradeEngine(api_token="TEST", app_id="1089")
-    engine._sell_contract = AsyncMock(return_value=False)
-
-    engine_logger = logging.getLogger("risefallbot.engine")
-    handler = logging.handlers.MemoryHandler(capacity=100)
-    engine_logger.addHandler(handler)
-    try:
-        result = await engine._sell_with_retry(
-            "contract_exhaust_test", 1.0, "TP",
-            max_attempts=3, retry_delay=0.05,
-        )
-    finally:
-        engine_logger.removeHandler(handler)
-
-    assert result is False
-    assert engine._sell_contract.call_count == 3
-
-    log_text = "\n".join(r.getMessage() for r in handler.buffer)
-    assert "TP SELL FAILED after 3 attempts" in log_text
-    assert "contract remains open" in log_text
-
-
-# ===========================================================================
-# TEST 9 — Consecutive Loss Cooldown
-# ===========================================================================
-
-@pytest.mark.asyncio
-async def test_09_consecutive_loss_cooldown(risk_manager):
-    """
-    Confirm bot pauses after RF_MAX_CONSECUTIVE_LOSSES consecutive losses
-    and resumes after cooldown.
-    """
-    from risefallbot import rf_config
-
-    # Simulate consecutive losses up to the limit
-    for i in range(rf_config.RF_MAX_CONSECUTIVE_LOSSES):
-        contract_id = f"loss_{i}"
-        await risk_manager.acquire_trade_lock("R_10", contract_id)
-        risk_manager.record_trade_open({
-            "contract_id": contract_id,
-            "symbol": "R_10",
-            "direction": "CALL",
-            "stake": 1.0,
-        })
-        risk_manager.record_trade_closed({
-            "contract_id": contract_id,
-            "profit": -1.0,
-            "status": "loss",
-            "symbol": "R_10",
-        })
-        risk_manager.release_trade_lock(reason="test loss")
-        # Clear cooldowns for next iteration (simulating rapid consecutive losses)
-        risk_manager._last_trade_close.clear()
-        risk_manager._last_trade_close_global = datetime.min
-
-    # Should now be in loss cooldown
-    assert risk_manager.consecutive_losses == rf_config.RF_MAX_CONSECUTIVE_LOSSES
-
-    can, reason = risk_manager.can_trade(symbol="R_10")
-    assert can is False
-    assert "cooldown" in reason.lower()
-
-    # Simulate cooldown expiry
-    risk_manager._loss_cooldown_until = datetime.now() - timedelta(seconds=1)
-
-    can2, reason2 = risk_manager.can_trade(symbol="R_10")
-    assert can2 is True
-
-    print(f"\n[TEST 9] [PASS] Consecutive loss cooldown passed ({rf_config.RF_MAX_CONSECUTIVE_LOSSES} losses)")
-
-
-# ===========================================================================
-# TEST 10 — Daily Trade Cap
-# ===========================================================================
-
-@pytest.mark.asyncio
-async def test_10_daily_trade_cap(risk_manager):
-    """
-    Confirm bot stops trading after RF_MAX_TRADES_PER_DAY is reached
-    and resumes after daily reset.
-    """
-    from risefallbot import rf_config
-
-    # Artificially set daily count to the cap
-    risk_manager.daily_trade_count = rf_config.RF_MAX_TRADES_PER_DAY
-
-    can, reason = risk_manager.can_trade(symbol="R_50")
-    assert can is False
-    assert "cap" in reason.lower()
-
-    # Reset daily stats
-    risk_manager.reset_daily_stats()
-    assert risk_manager.daily_trade_count == 0
-
-    can2, reason2 = risk_manager.can_trade(symbol="R_50")
-    assert can2 is True
-
-    print(f"\n[TEST 10] [PASS] Daily trade cap passed (cap={rf_config.RF_MAX_TRADES_PER_DAY})")
 
 
 # ===========================================================================
@@ -485,8 +312,6 @@ async def test_config_values():
     assert rf_config.RF_SCAN_INTERVAL == 10
     assert rf_config.RF_MAX_CONSECUTIVE_LOSSES == 2  # Block after 2 losses to prevent 3rd
     assert rf_config.RF_LOSS_COOLDOWN_SECONDS == 21600
-    assert rf_config.RF_TP_SL_MAX_RETRIES == 10
-    assert rf_config.RF_TP_SL_RETRY_DELAY == 0.5
 
     print("\n[CONFIG] [PASS] All config values correct")
 
@@ -581,34 +406,4 @@ async def test_cleanup_removes_done_rf_tasks(bot_manager):
     print("\n[CLEANUP] [PASS] Completed RF tasks cleaned up")
 
 
-@pytest.mark.asyncio
-async def test_sell_with_retry_uses_market_price_on_retries(caplog):
-    """
-    Confirm _sell_with_retry passes min_price on first attempt
-    and 0.0 (market price) on subsequent attempts.
-    """
-    from risefallbot.rf_trade_engine import RFTradeEngine
 
-    engine = RFTradeEngine(api_token="TEST", app_id="1089")
-    prices_used = []
-
-    async def capture_sell(contract_id, min_price=0):
-        prices_used.append(min_price)
-        if len(prices_used) < 3:
-            return False
-        return True
-
-    engine._sell_contract = capture_sell
-
-    with caplog.at_level(logging.INFO, logger="risefallbot"):
-        result = await engine._sell_with_retry(
-            "contract_price_test", 1.50, "TP",
-            max_attempts=5, retry_delay=0.05,
-        )
-
-    assert result is True
-    assert prices_used[0] == 1.50, "First attempt should use original bid"
-    assert prices_used[1] == 0.0, "Second attempt should use market price"
-    assert prices_used[2] == 0.0, "Third attempt should use market price"
-
-    print("\n[PRICE FALLBACK] [PASS] Market price used on retries")

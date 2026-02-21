@@ -64,6 +64,16 @@ class BotRunner:
     
     def __init__(self, api_token: Optional[str] = None, account_id: Optional[str] = None,
                  strategy = None, risk_manager = None):
+        # Backward compatibility: allow positional form
+        # BotRunner(account_id, strategy, risk_manager).
+        if (
+            isinstance(api_token, str)
+            and account_id is not None
+            and not isinstance(account_id, str)
+            and strategy is not None
+            and risk_manager is None
+        ):
+            account_id, strategy, risk_manager, api_token = api_token, account_id, strategy, None
         self.is_running = False
         self.task: Optional[asyncio.Task] = None
         self.status = BotStatus.STOPPED

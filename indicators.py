@@ -427,9 +427,9 @@ def detect_consolidation(df: pd.DataFrame, lookback: int = 20,
     price_position = (current_price - range_low) / range_size if range_size > 0 else 0.5
     
     # Consolidation if: low volatility AND price not at extremes
-    is_consolidating = is_low_volatility and (0.2 < price_position < 0.8)
+    is_consolidating = bool(is_low_volatility and (0.2 < price_position < 0.8))
     
-    return is_consolidating, range_high, range_low
+    return is_consolidating, float(range_high), float(range_low)
 
 
 def detect_exhaustion(df: pd.DataFrame, rsi_val: float, 
