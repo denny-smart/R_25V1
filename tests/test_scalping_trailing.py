@@ -122,9 +122,16 @@ class TestTrailingProfitPullback:
         # Activate at 10%, peak at 12%
         rm.check_trailing_profit(_info(), current_pnl=5.0)   # 10%
         rm.check_trailing_profit(_info(), current_pnl=6.0)   # 12%
-        
-        # Pull back to 8% — floor is 12-3=9%, 8 < 9 so EXIT
-        should_close, reason, _ = rm.check_trailing_profit(_info(), current_pnl=4.0)  # 8%
+
+        # Expire warmup for deterministic floor-exit behavior.
+        rm._trailing_state['C001']['activated_at'] = datetime.now() - timedelta(seconds=11)
+
+        # Pull back below floor. With current config at 12% peak:
+        # trail distance is 4%, so floor is 8%; use 7% to breach.
+        # With breach confirmation=2, first breach is a hold, second breach exits.
+        should_close_1, _, _ = rm.check_trailing_profit(_info(), current_pnl=3.5)  # 7%
+        assert should_close_1 is False
+        should_close, reason, _ = rm.check_trailing_profit(_info(), current_pnl=3.5)  # 7%
         assert should_close is True
         assert reason == 'trailing_profit_exit'
     
@@ -159,14 +166,19 @@ class TestTrailingProfitProgressive:
         assert should_close is False  # 16% > 15% floor
     
     def test_tier3_distance_7pct(self, rm):
-        """25%+ profit → 7% trail distance."""
-        rm.check_trailing_profit(_info(), current_pnl=4.0)    # 8% → activates
+        """25%+ profit -> 7% trail distance."""
+        rm.check_trailing_profit(_info(), current_pnl=4.0)    # 8% -> activates
         rm.check_trailing_profit(_info(), current_pnl=15.0)   # 30%
         # Peak at 30%, distance=7%, floor=23%
         should_close, _, _ = rm.check_trailing_profit(_info(), current_pnl=12.0)  # 24%
         assert should_close is False  # 24% > 23% floor
-        
-        # Drop below floor
+
+        # Expire warmup for deterministic floor-exit behavior.
+        rm._trailing_state['C001']['activated_at'] = datetime.now() - timedelta(seconds=11)
+
+        # Drop below floor; requires 2 breaches under current config.
+        should_close_1, _, _ = rm.check_trailing_profit(_info(), current_pnl=11.0)  # 22%
+        assert should_close_1 is False
         should_close, reason, _ = rm.check_trailing_profit(_info(), current_pnl=11.0)  # 22%
         assert should_close is True  # 22% < 23% floor
         assert reason == 'trailing_profit_exit'
@@ -273,3 +285,4 @@ class TestTrailingBreakevenFloor:
         should_close, reason, _ = rm.check_trailing_profit(_info(), current_pnl=-0.5)  # -1%
         assert should_close is True
         assert reason == 'trailing_breakeven_exit'
+

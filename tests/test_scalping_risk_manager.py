@@ -261,6 +261,10 @@ def test_scalping_rm_trailing_profit(srm):
 
     with patch("scalping_config.SCALPING_TRAIL_ACTIVATION_PCT", 10.0), patch(
         "scalping_config.SCALPING_TRAIL_TIERS", [(10.0, 5.0)]
+    ), patch(
+        "scalping_config.SCALPING_TRAIL_BREACH_CONFIRMATIONS", 1
+    ), patch(
+        "scalping_config.SCALPING_TRAIL_MIN_ACTIVE_SECONDS", 0
     ):
         should, _, just_acts = srm.check_trailing_profit(trade_info, 5.0)
         assert should is False
