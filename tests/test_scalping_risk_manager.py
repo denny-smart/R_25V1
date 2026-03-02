@@ -244,11 +244,13 @@ def test_scalping_rm_stagnation_exit_adds_time_for_high_rr(srm):
         "scalping_config.SCALPING_STAGNATION_RR_GRACE_THRESHOLD", 2.5
     ), patch("scalping_config.SCALPING_STAGNATION_EXTRA_TIME", 60), patch(
         "scalping_config.SCALPING_STAGNATION_LOSS_PCT", 5.0
+    ), patch(
+        "scalping_config.SCALPING_SYMBOL_STAGNATION_OVERRIDES", {}
     ):
         should_exit, _ = srm.check_stagnation_exit(trade_info, -1.0)
         assert should_exit is False
 
-        trade_info["open_time"] = datetime.now() - timedelta(seconds=190)
+        trade_info["open_time"] = datetime.now() - timedelta(seconds=195)
         should_exit, reason = srm.check_stagnation_exit(trade_info, -1.0)
         assert should_exit is True
         assert reason == "stagnation_exit"
