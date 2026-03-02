@@ -172,25 +172,52 @@ SCALPING_RUNAWAY_TRADE_COUNT = 10
 # ==================== STAGNATION EXIT ====================
 # Final report recommendation (Feb 25-27, 2026):
 # cut stagnation losers earlier without touching winners (which are positive early).
-SCALPING_STAGNATION_EXIT_TIME = 120  # seconds
-SCALPING_STAGNATION_LOSS_PCT = 3.0  # percentage of stake
+SCALPING_STAGNATION_EXIT_TIME = 300  # seconds
+SCALPING_STAGNATION_LOSS_PCT = 10.0  # percentage of stake
 SCALPING_STAGNATION_RR_GRACE_THRESHOLD = 2.5
 SCALPING_STAGNATION_EXTRA_TIME = 0  # disabled by default for strict 75s/3.0% behavior
 
 SCALPING_SYMBOL_STAGNATION_OVERRIDES = {
-    "stpRNG5": 180,
-    "R_75": 150,
+    "stpRNG5": 220,
+    "R_75": 220,
 }
 
 # ==================== TRAILING PROFIT ====================
+# Activate trailing as soon as profit reaches 6%.
 SCALPING_TRAIL_ACTIVATION_PCT = 6.0
 
 # Dynamic trailing distance tiers: (min_profit_pct, trail_distance_pct)
-# As profit grows, the trail widens to give big winners room to breathe.
 # Tiers are checked from highest to lowest; first match wins.
 SCALPING_TRAIL_TIERS = [
-    (30.0, 7.0),   # 30%+ profit -> 7% trail distance
-    (15.0, 5.0),   # 15-30% profit -> 5% trail distance
-    (12.0, 3.0),   # 12-15% profit -> 3% trail distance (default)
-    (6.0, 2.0),    # 6-12% profit -> 2% trail distance
+    (25.0, 7.0),   # 25%+ profit -> 7% trail distance
+    (15.0, 5.0),   # 15-25% profit -> 5% trail distance
+    (8.0, 4.0),    # 8-15% profit -> 4% trail distance
 ]
+
+# Hard floor after trailing activation: do not allow profitable activated trades
+# to be held into negative P&L.
+SCALPING_TRAIL_BREAKEVEN_FLOOR_PCT = 0.0
+
+# Optional anti-whipsaw guard (global defaults).
+# If a trade dips below trail floor, require this many consecutive checks before exit.
+SCALPING_TRAIL_BREACH_CONFIRMATIONS = 2
+# Minimum time after trailing activation before floor breaches can force an exit.
+SCALPING_TRAIL_MIN_ACTIVE_SECONDS = 10
+
+# Per-symbol trailing overrides for noisy instruments.
+SCALPING_SYMBOL_TRAIL_OVERRIDES = {
+    # Volatility 25 (1s): keep winners alive longer by delaying first eligible
+    # trail exit and requiring confirmation of breakdown.
+    "1HZ25V": {
+        "activation_pct": 6.0,
+        "tiers": [
+            (35.0, 10.0),
+            (25.0, 8.0),
+            (15.0, 6.0),
+            (8.0, 4.0),
+        ],
+        "breach_confirmations": 2,
+        "min_active_seconds": 30,
+        "breakeven_floor_pct": 0.0,
+    },
+}
