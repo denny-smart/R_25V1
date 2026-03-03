@@ -5,8 +5,8 @@ All scalping-specific constants and thresholds
 
 # Dedicated symbol universe for scalping (kept local for independence).
 # 1HZ100V and 1HZ30V are intentionally blocked and must never be traded.
-BLOCKED_SYMBOLS = {"1HZ100V", "1HZ30V", "R_100", "R_25", "1HZ50V"}
-SYMBOLS = ["R_75", "1HZ25V", "1HZ75V", "1HZ90V", "stpRNG5", "stpRNG4"]
+BLOCKED_SYMBOLS = {"1HZ100V", "1HZ30V", "R_100", "1HZ50V","R_50"}
+SYMBOLS = ["R_25", "R_75", "1HZ25V", "1HZ75V", "1HZ90V", "stpRNG5", "stpRNG4"]
 
 # Empty rollout list means: trade full scalping symbol universe.
 SCALPING_ROLLOUT_SYMBOLS = []
@@ -99,7 +99,7 @@ SCALPING_RSI_DOWN_MIN = 28
 SCALPING_RSI_DOWN_MAX = 42
 SCALPING_MAX_PRICE_MOVEMENT_PCT = 1.2
 SCALPING_MOMENTUM_THRESHOLD = 1.0  # ATR multiplier
-SCALPING_MIN_RR_RATIO = 1.5
+SCALPING_MIN_RR_RATIO = 1.4
 # Floating-point guard so values effectively equal to min R:R are not rejected.
 SCALPING_RR_TOLERANCE = 0.01
 # Final report recommendation (Feb 25-27, 2026):
@@ -123,8 +123,8 @@ SCALPING_R50_DOWN_MIN_CONFIDENCE = 9.0
 
 # Directional safety gate from the final improvement report:
 # suspend DOWN signals everywhere except explicit allowlist symbols.
-SCALPING_DOWN_DIRECTION_FILTER_ENABLED = True
-SCALPING_DOWN_ALLOWED_SYMBOLS = {"R_75", "stpRNG5", "stpRNG4"}
+SCALPING_DOWN_DIRECTION_FILTER_ENABLED = False
+SCALPING_DOWN_ALLOWED_SYMBOLS = {"R_75", "stpRNG5"}
 
 # Per-symbol ADX minimum overrides (directional). If no symbol override exists,
 # the global SCALPING_ADX_THRESHOLD is used.
@@ -180,6 +180,7 @@ SCALPING_STAGNATION_EXTRA_TIME = 0  # disabled by default for strict 75s/3.0% be
 SCALPING_SYMBOL_STAGNATION_OVERRIDES = {
     "stpRNG5": 180,
     "R_75": 150,
+    "R_25": 180,
 }
 
 # ==================== TRAILING PROFIT ====================
