@@ -92,6 +92,21 @@ class RiskManager:
     def set_bot_state(self, state):
         """Set BotState instance for real-time API updates"""
         self.bot_state = state
+
+    @staticmethod
+    def _is_manual_tracking_trade(trade_info: Optional[Dict]) -> bool:
+        """Manual/synced trades are tracked for exits but excluded from entry gating counters."""
+        if not isinstance(trade_info, dict):
+            return False
+        if bool(trade_info.get("manual_tracking")):
+            return True
+        entry_source = str(trade_info.get("entry_source") or "").strip().lower()
+        return entry_source in {
+            "manual_imported",
+            "manual_tracking",
+            "sync_import",
+            "broker_sync",
+        }
     
     def update_risk_settings(self, stake: float):
         """
@@ -405,15 +420,17 @@ class RiskManager:
     
     def record_trade_open(self, trade_info: Dict):
         """
-        Record a new trade opening
-        
-        CRITICAL: This LOCKS the global position
-        All other assets are now blocked until this closes
+        Record a new trade opening.
+
+        Manual/synced imports are tracked for exits but excluded from daily
+        entry cooldown/limit counters so bot-owned entries remain unaffected.
         """
         symbol = trade_info.get('symbol', 'UNKNOWN')
-        
+        now = datetime.now()
+        is_manual_tracking = self._is_manual_tracking_trade(trade_info)
+
         trade_record = {
-            'timestamp': datetime.now(),
+            'timestamp': now,
             'symbol': symbol,
             'contract_id': trade_info.get('contract_id'),
             'direction': trade_info.get('direction'),
@@ -427,22 +444,23 @@ class RiskManager:
             'phase': 'committed',
             'cancellation_enabled': False,
             'cancellation_expiry': None,
-            'highest_unrealized_pnl': 0.0, # Track peak profit for trailing stop
-            'has_been_profitable': False,  # Track if trade ever went into profit
+            'highest_unrealized_pnl': 0.0,
+            'has_been_profitable': False,
             'trailing_enabled': True,
             'stagnation_enabled': True,
+            'entry_source': trade_info.get('entry_source') or ('manual_imported' if is_manual_tracking else 'system'),
+            'manual_tracking': is_manual_tracking,
         }
-        
-        self.trades_today.append(trade_record)
-        self.last_trade_time = datetime.now()
-        self.total_trades += 1
-        
-        # Update per-asset stats
-        self.trades_by_symbol[symbol] = self.trades_by_symbol.get(symbol, 0) + 1
-        
-        # CRITICAL: Add to active trades list
+
+        if not is_manual_tracking:
+            self.trades_today.append(trade_record)
+            self.last_trade_time = now
+            self.total_trades += 1
+            self.trades_by_symbol[symbol] = self.trades_by_symbol.get(symbol, 0) + 1
+
+        # Always keep active runtime lock/monitoring for both system and imported trades.
         self.active_trades.append(trade_record)
-        
+
         active_count = len(self.active_trades)
         active_symbols = [t['symbol'] for t in self.active_trades]
         normalized_entry_price = trade_info.get("entry_price", trade_info.get("entry_spot"))
@@ -451,26 +469,30 @@ class RiskManager:
         except Exception:
             normalized_entry_price = 0.0
         trade_info["entry_price"] = normalized_entry_price
-        
-        logger.info(f"🔒 GLOBAL POSITION LOCKED BY {symbol}")
-        logger.info(f"📝 Trade #{self.total_trades}: {trade_info.get('direction')} {symbol} @ {trade_info.get('entry_price'):.4f}")
-        logger.info(f"   Active: {active_count}/{self.max_concurrent_trades} | Active symbols: {', '.join(active_symbols)}")
-        
-        if active_count >= self.max_concurrent_trades:
-            logger.info(f"   ⚠️ LIMIT REACHED: All slots filled, blocking other assets")
+
+        logger.info(f"GLOBAL POSITION LOCKED BY {symbol}")
+        if is_manual_tracking:
+            logger.info(
+                f"Manual/synced trade tracked only: {trade_info.get('direction')} {symbol} @ {trade_info.get('entry_price'):.4f}"
+            )
+            logger.info("Excluded from daily limits/cooldown counters")
         else:
-            logger.info(f"   ✅ {self.max_concurrent_trades - active_count} slot(s) available for other assets")
-        
-        # Top-Down trade logging
+            logger.info(f"Trade #{self.total_trades}: {trade_info.get('direction')} {symbol} @ {trade_info.get('entry_price'):.4f}")
+        logger.info(f"Active: {active_count}/{self.max_concurrent_trades} | Active symbols: {', '.join(active_symbols)}")
+
+        if active_count >= self.max_concurrent_trades:
+            logger.info("LIMIT REACHED: All slots filled, blocking other assets")
+        else:
+            logger.info(f"{self.max_concurrent_trades - active_count} slot(s) available for other assets")
+
         tp = trade_info.get('take_profit')
         sl = trade_info.get('stop_loss')
         if tp and sl:
-            logger.info(f"🎯 Top-Down: TP {tp:.4f} | SL {sl:.4f} ({symbol})")
-        
-        # Update BotState if linked
+            logger.info(f"Top-Down: TP {tp:.4f} | SL {sl:.4f} ({symbol})")
+
         if self.bot_state:
             self.bot_state.add_trade(trade_record)
-    
+
     def record_trade_cancelled(self, contract_id: str, refund: float):
         """Record a trade cancellation (wait-and-cancel at 4-min mark)"""
         for trade in self.trades_today:
@@ -764,103 +786,112 @@ class RiskManager:
     
     def record_trade_close(self, contract_id: str, pnl: float, status: str):
         """
-        Record trade closure and update statistics
-        
-        CRITICAL: This UNLOCKS the global position
-        All assets can now compete for the next trade
+        Record trade closure and update statistics.
+
+        Manual/synced trades are closed and removed from active tracking,
+        but excluded from system entry-gating counters.
         """
         trade = None
         for t in self.trades_today:
             if t.get('contract_id') == contract_id:
                 trade = t
                 break
-        
+
+        is_manual_tracking = self._is_manual_tracking_trade(trade)
+
         if trade:
             trade['status'] = status
             trade['pnl'] = pnl
             trade['close_time'] = datetime.now()
             symbol = trade.get('symbol', 'UNKNOWN')
-            
-            # Determine exit type based on strategy
+
             strategy = trade.get('strategy', 'unknown')
-            
+
             if strategy == 'topdown':
-                # Top-Down: Check if hit structure levels
                 tp_level = trade.get('take_profit')
-                sl_level = trade.get('stop_loss')
-                
                 if tp_level and abs(pnl) > 0:
                     trade['exit_type'] = 'structure_tp' if pnl > 0 else 'structure_sl'
                 else:
                     trade['exit_type'] = 'manual_close'
-                    
             elif trade.get('phase') == 'committed':
-                # Scalping Phase 2: Check fixed TP/SL
                 target_profit = self.target_profit
                 max_loss = self.max_loss
-                
+
                 if abs(pnl - target_profit) < 0.1:
                     trade['exit_type'] = 'take_profit'
-                    logger.info(f"🎯 Hit TAKE PROFIT target (Phase 2)!")
+                    logger.info("Hit TAKE PROFIT target (Phase 2)!")
                 elif abs(abs(pnl) - max_loss) < 0.1:
                     trade['exit_type'] = 'stop_loss'
-                    logger.info(f"🛑 Hit STOP LOSS limit (Phase 2)")
+                    logger.info("Hit STOP LOSS limit (Phase 2)")
                 else:
                     trade['exit_type'] = 'other'
             else:
                 trade['exit_type'] = 'early_close'
-        
-        # CRITICAL: Remove from active trades list
+
         released_symbol = None
+        released_trade = None
         for i, active in enumerate(self.active_trades):
             if active.get('contract_id') == contract_id:
-                released_symbol = active.get('symbol')
-                self.active_trades.pop(i)
+                released_trade = self.active_trades.pop(i)
+                released_symbol = released_trade.get('symbol')
                 break
-        
+
+        if not is_manual_tracking:
+            is_manual_tracking = self._is_manual_tracking_trade(released_trade)
+
         if released_symbol:
             remaining_count = len(self.active_trades)
-            logger.info(f"🔓 POSITION SLOT FREED ({released_symbol} closed)")
+            logger.info(f"POSITION SLOT FREED ({released_symbol} closed)")
             if remaining_count > 0:
                 remaining_symbols = [t['symbol'] for t in self.active_trades]
-                logger.info(f"   {remaining_count}/{self.max_concurrent_trades} slots still active: {', '.join(remaining_symbols)}")
+                logger.info(f"{remaining_count}/{self.max_concurrent_trades} slots still active: {', '.join(remaining_symbols)}")
             else:
-                logger.info(f"   All slots now available for trading")
-        
-        # Update P&L - GLOBAL
+                logger.info("All slots now available for trading")
+
+        if is_manual_tracking:
+            symbol_for_log = (
+                (released_trade.get('symbol') if isinstance(released_trade, dict) else None)
+                or (trade.get('symbol') if isinstance(trade, dict) else None)
+                or 'UNKNOWN'
+            )
+            logger.info(
+                "Trade closed (%s): %s | P&L: %s (excluded from system cooldown/daily counters)",
+                symbol_for_log,
+                str(status).upper(),
+                format_currency(pnl),
+            )
+            return
+
         self.daily_pnl += pnl
         self.total_pnl += pnl
-        
-        # Update per-asset P&L
+
         if trade:
             symbol = trade.get('symbol', 'UNKNOWN')
             self.pnl_by_symbol[symbol] = self.pnl_by_symbol.get(symbol, 0.0) + pnl
-        
-        # Update win/loss stats - GLOBAL
+
         if pnl > 0:
             self.winning_trades += 1
             self.consecutive_losses = 0
             if pnl > self.largest_win:
                 self.largest_win = pnl
-            logger.info(f"✅ WIN | GLOBAL consecutive losses reset to 0")
+            logger.info("WIN | GLOBAL consecutive losses reset to 0")
         elif pnl < 0:
             self.losing_trades += 1
             self.consecutive_losses += 1
             if pnl < self.largest_loss:
                 self.largest_loss = pnl
-            logger.warning(f"❌ LOSS | GLOBAL consecutive losses: {self.consecutive_losses}/{self.max_consecutive_losses}")
-        
-        # Update drawdown - GLOBAL
+            logger.warning(f"LOSS | GLOBAL consecutive losses: {self.consecutive_losses}/{self.max_consecutive_losses}")
+
         if self.total_pnl > self.peak_balance:
             self.peak_balance = self.total_pnl
-        
+
         current_drawdown = self.peak_balance - self.total_pnl
         if current_drawdown > self.max_drawdown:
             self.max_drawdown = current_drawdown
-        
+
         symbol_label = f"({symbol})" if trade else ""
-        logger.info(f"💰 Trade closed {symbol_label}: {status.upper()} | P&L: {format_currency(pnl)}")
-        logger.info(f"📊 GLOBAL Daily: {format_currency(self.daily_pnl)} | Total: {format_currency(self.total_pnl)}")
+        logger.info(f"Trade closed {symbol_label}: {status.upper()} | P&L: {format_currency(pnl)}")
+        logger.info(f"GLOBAL Daily: {format_currency(self.daily_pnl)} | Total: {format_currency(self.total_pnl)}")
 
     def set_trade_exit_controls(
         self,

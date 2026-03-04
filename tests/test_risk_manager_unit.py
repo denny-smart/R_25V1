@@ -112,6 +112,60 @@ def test_record_trade_open_and_close(rm):
     assert rm.winning_trades == 1
     assert rm.consecutive_losses == 0
 
+def test_manual_import_trade_does_not_affect_daily_cooldown_counters(rm):
+    """Manually imported/synced trades must not trip entry gates for system trades."""
+    rm.last_trade_time = None
+    trade_info = {
+        "symbol": "R_25",
+        "contract_id": "manual-1",
+        "direction": "PUT",
+        "stake": 10.0,
+        "entry_price": 100.0,
+        "entry_source": "manual_imported",
+        "manual_tracking": True,
+    }
+
+    rm.record_trade_open(trade_info)
+    assert len(rm.active_trades) == 1
+    assert len(rm.trades_today) == 0
+    assert rm.total_trades == 0
+    assert rm.last_trade_time is None
+
+    can_trade, _ = rm.can_trade("R_50")
+    assert can_trade is True
+
+    rm.record_trade_close("manual-1", -5.0, "lost")
+    assert len(rm.active_trades) == 0
+    assert rm.daily_pnl == 0.0
+    assert rm.losing_trades == 0
+    assert rm.consecutive_losses == 0
+
+def test_manual_import_trade_exit_controls_toggle(rm):
+    """Exit controls must be mutable for synced/manual-import trades."""
+    trade_info = {
+        "symbol": "R_25",
+        "contract_id": "manual-toggle-1",
+        "direction": "PUT",
+        "stake": 10.0,
+        "entry_price": 100.0,
+        "entry_source": "manual_imported",
+        "manual_tracking": True,
+    }
+    rm.record_trade_open(trade_info)
+
+    updated = rm.set_trade_exit_controls(
+        "manual-toggle-1",
+        trailing_enabled=False,
+        stagnation_enabled=False,
+    )
+    assert updated is not None
+    assert updated["trailing_enabled"] is False
+    assert updated["stagnation_enabled"] is False
+
+    active = next(t for t in rm.active_trades if str(t.get("contract_id")) == "manual-toggle-1")
+    assert active["trailing_enabled"] is False
+    assert active["stagnation_enabled"] is False
+
 def test_record_trade_close_loss(rm):
     """Test recording a losing trade."""
     rm.active_trades = [{"symbol": "R_25", "contract_id": "c2"}]
