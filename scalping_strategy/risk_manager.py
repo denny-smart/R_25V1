@@ -114,6 +114,21 @@ class ScalpingRiskManager(BaseRiskManager):
 
         self._load_daily_stats_from_db()
 
+    @staticmethod
+    def _is_manual_tracking_trade(trade_info: Optional[Dict]) -> bool:
+        """True when trade is imported for tracking and must not affect entry gates."""
+        if not isinstance(trade_info, dict):
+            return False
+        if bool(trade_info.get("manual_tracking")):
+            return True
+        entry_source = str(trade_info.get("entry_source") or "").strip().lower()
+        return entry_source in {
+            "manual_imported",
+            "manual_tracking",
+            "sync_import",
+            "broker_sync",
+        }
+
     def _load_daily_stats_from_db(self) -> None:
         """
         Load today's trade stats from DB.
@@ -128,13 +143,14 @@ class ScalpingRiskManager(BaseRiskManager):
             today_start = datetime.combine(date.today(), datetime.min.time())
             result = (
                 supabase.table("trades")
-                .select("contract_id, profit, status, created_at, symbol, signal, exit_price")
+                .select("contract_id, profit, status, created_at, symbol, signal, exit_price, entry_source")
                 .eq("user_id", self.user_id)
                 .gte("created_at", today_start.isoformat())
                 .execute()
             )
 
             rows = list(result.data or [])
+            system_rows = [row for row in rows if not self._is_manual_tracking_trade(row)]
             self._reconcile_stale_open_trades(supabase, rows)
 
             reconcile_lookback_days = max(self.performance_window_days, 3)
@@ -147,17 +163,17 @@ class ScalpingRiskManager(BaseRiskManager):
                 .execute()
             )
             self._reconcile_stale_open_trades(supabase, list(reconcile_result.data or []))
-            self.daily_trade_count = len(rows)
-            self.daily_pnl = sum(float(t.get("profit", 0.0) or 0.0) for t in rows)
+            self.daily_trade_count = len(system_rows)
+            self.daily_pnl = sum(float(t.get("profit", 0.0) or 0.0) for t in system_rows)
 
-            for trade in rows:
+            for trade in system_rows:
                 direction = str(trade.get("signal", "")).upper()
                 if direction in {"UP", "BUY"}:
                     self.daily_up_trade_count += 1
                 elif direction in {"DOWN", "SELL"}:
                     self.daily_down_trade_count += 1
 
-            ordered = sorted(rows, key=lambda x: x.get("created_at", ""))
+            ordered = sorted(system_rows, key=lambda x: x.get("created_at", ""))
             self.consecutive_losses = 0
             for trade in ordered:
                 normalized = self._normalize_status(
@@ -246,12 +262,13 @@ class ScalpingRiskManager(BaseRiskManager):
             today_start = datetime.combine(today, datetime.min.time())
             result = (
                 supabase.table("trades")
-                .select("contract_id", count="exact")
+                .select("contract_id,entry_source")
                 .eq("user_id", self.user_id)
                 .gte("created_at", today_start.isoformat())
                 .execute()
             )
-            db_count = int(result.count or 0)
+            db_rows = list(result.data or [])
+            db_count = sum(1 for row in db_rows if not self._is_manual_tracking_trade(row))
 
             if persisted_count_date != today:
                 persisted_count = 0
@@ -391,12 +408,14 @@ class ScalpingRiskManager(BaseRiskManager):
         try:
             perf_result = (
                 supabase.table("trades")
-                .select("created_at, status, profit")
+                .select("created_at, status, profit, entry_source")
                 .eq("user_id", self.user_id)
                 .gte("created_at", window_start.isoformat())
                 .execute()
             )
             for trade in list(perf_result.data or []):
+                if self._is_manual_tracking_trade(trade):
+                    continue
                 trade_time = self._parse_db_datetime(trade.get("created_at")) or now
                 pnl = float(trade.get("profit", 0.0) or 0.0)
                 normalized = self._normalize_status(trade.get("status"), pnl)
@@ -873,6 +892,7 @@ class ScalpingRiskManager(BaseRiskManager):
         Record a newly opened trade.
         """
         now = datetime.now()
+        is_manual_tracking = self._is_manual_tracking_trade(trade_info)
         contract_id = trade_info.get("contract_id")
         stake = float(trade_info.get("stake", self.stake) or self.stake)
         symbol = trade_info.get("symbol", "UNKNOWN")
@@ -894,30 +914,41 @@ class ScalpingRiskManager(BaseRiskManager):
                 "min_rr_required": trade_info.get("min_rr_required"),
                 "trailing_enabled": True,
                 "stagnation_enabled": True,
+                "entry_source": trade_info.get("entry_source") or ("manual_imported" if is_manual_tracking else "system"),
+                "manual_tracking": is_manual_tracking,
             }
 
-        self.daily_trade_count += 1
-        self._daily_trade_count_date = now.date()
-        if direction in {"UP", "BUY"}:
-            self.daily_up_trade_count += 1
-        elif direction in {"DOWN", "SELL"}:
-            self.daily_down_trade_count += 1
+        if not is_manual_tracking:
+            self.daily_trade_count += 1
+            self._daily_trade_count_date = now.date()
+            if direction in {"UP", "BUY"}:
+                self.daily_up_trade_count += 1
+            elif direction in {"DOWN", "SELL"}:
+                self.daily_down_trade_count += 1
 
-        self.last_trade_time = now
+            self.last_trade_time = now
         self.stake = stake
 
-        self.recent_trade_timestamps.append(now)
-        if len(self.recent_trade_timestamps) > scalping_config.SCALPING_RUNAWAY_TRADE_COUNT:
-            self.recent_trade_timestamps.pop(0)
-        self._persist_daily_trade_count(self._daily_trade_count_date, self.daily_trade_count)
+        if not is_manual_tracking:
+            self.recent_trade_timestamps.append(now)
+            if len(self.recent_trade_timestamps) > scalping_config.SCALPING_RUNAWAY_TRADE_COUNT:
+                self.recent_trade_timestamps.pop(0)
+            self._persist_daily_trade_count(self._daily_trade_count_date, self.daily_trade_count)
 
-        logger.info(
-            "Trade opened - Contract: %s, Symbol: %s, Daily count: %s/%s",
-            contract_id,
-            symbol,
-            self.daily_trade_count,
-            self.max_trades_per_day,
-        )
+        if is_manual_tracking:
+            logger.info(
+                "Manual/synced trade tracked only - Contract: %s, Symbol: %s (excluded from daily cooldown counters)",
+                contract_id,
+                symbol,
+            )
+        else:
+            logger.info(
+                "Trade opened - Contract: %s, Symbol: %s, Daily count: %s/%s",
+                contract_id,
+                symbol,
+                self.daily_trade_count,
+                self.max_trades_per_day,
+            )
         logger.info(
             "Active trades: %s/%s",
             len(self.active_trades),
@@ -985,6 +1016,10 @@ class ScalpingRiskManager(BaseRiskManager):
         raw_status = result.get("status", "unknown")
 
         meta = self._trade_metadata.get(contract_id, {})
+        is_manual_tracking = (
+            self._is_manual_tracking_trade(meta)
+            or self._is_manual_tracking_trade(result)
+        )
         symbol = str(result.get("symbol") or meta.get("symbol") or "UNKNOWN")
 
         # Remove from active trades
@@ -1008,10 +1043,25 @@ class ScalpingRiskManager(BaseRiskManager):
         self._trade_metadata.pop(contract_id, None)
         self._trailing_state.pop(contract_id, None)
 
+        normalized_status = self._normalize_status(raw_status, profit)
+        if is_manual_tracking:
+            logger.info(
+                (
+                    "Manual/synced trade closed - Status: %s | P&L: $%.2f "
+                    "(excluded from daily cooldown/entry-limit counters)"
+                ),
+                normalized_status,
+                profit,
+            )
+            logger.info(
+                "Active trades: %s/%s",
+                len(self.active_trades),
+                self.max_concurrent_trades,
+            )
+            return
+
         # Update P&L
         self.daily_pnl += profit
-
-        normalized_status = self._normalize_status(raw_status, profit)
 
         if normalized_status == "loss":
             self.consecutive_losses += 1

@@ -79,7 +79,10 @@ def test_scalping_rm_daily_entry_limit_hard_caps_config(monkeypatch):
 def test_scalping_rm_daily_entry_limit_uses_db_synced_count(srm, monkeypatch):
     mock_supabase = MagicMock()
     count_response = MagicMock()
-    count_response.count = 10
+    count_response.data = [
+        {"contract_id": f"sys-{i}", "entry_source": "system"}
+        for i in range(10)
+    ]
     (
         mock_supabase.table.return_value.select.return_value.eq.return_value.gte.return_value
         .execute.return_value
@@ -146,6 +149,64 @@ def test_scalping_rm_record_trade_open_persists_runtime_daily_counter(srm):
     )
     assert srm._persist_daily_trade_count.called
     assert srm._persist_daily_trade_count.call_args[0][1] == 1
+
+def test_scalping_manual_import_trade_does_not_increment_daily_cooldown_counters(srm):
+    """Manual/synced trades should be tracked without affecting entry cooldown gates."""
+    srm._persist_daily_trade_count = MagicMock()
+    srm.last_trade_time = None
+    srm.record_trade_open(
+        {
+            "contract_id": "MANUAL-1",
+            "symbol": "R_75",
+            "direction": "DOWN",
+            "stake": 10.0,
+            "entry_source": "manual_imported",
+            "manual_tracking": True,
+        }
+    )
+
+    assert "MANUAL-1" in srm.active_trades
+    assert srm.daily_trade_count == 0
+    assert srm.last_trade_time is None
+    assert not srm._persist_daily_trade_count.called
+
+    srm.record_trade_close("MANUAL-1", -1.0, "loss", symbol="R_75", duration=20)
+    assert srm.daily_pnl == 0.0
+    assert srm.consecutive_losses == 0
+
+def test_scalping_rm_daily_entry_limit_ignores_manual_import_rows(srm, monkeypatch):
+    """DB-synced daily count should exclude manual-import rows."""
+    mock_supabase = MagicMock()
+    trades_table = MagicMock()
+    state_table = MagicMock()
+    mock_supabase.table.side_effect = lambda name: (
+        state_table if name == "scalping_runtime_state" else trades_table
+    )
+
+    today_iso = datetime.now().date().isoformat()
+    # state table read
+    state_table.select.return_value.eq.return_value.limit.return_value.execute.return_value = MagicMock(
+        data=[{"daily_trade_count": 0, "daily_trade_count_date": today_iso}]
+    )
+    # trades table select during sync
+    trades_table.select.return_value.eq.return_value.gte.return_value.execute.return_value = MagicMock(
+        data=[{"contract_id": "m-1", "entry_source": "manual_imported"}]
+    )
+
+    monkeypatch.setitem(
+        sys.modules,
+        "app.core.supabase",
+        MagicMock(supabase=mock_supabase),
+    )
+
+    srm.max_trades_per_day = 1
+    srm.daily_trade_count = 0
+    srm.last_trade_time = None
+    srm._last_daily_count_sync = datetime.min
+
+    can_trade, _ = srm.can_trade("R_75")
+    assert can_trade is True
+    assert srm.daily_trade_count == 0
 
 
 @pytest.mark.asyncio
