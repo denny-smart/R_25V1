@@ -426,6 +426,33 @@ class BotRunner:
             persisted_trade.get("timestamp") or persisted_trade.get("open_time")
         ) or datetime.now()
         entry_source = str(persisted_trade.get("entry_source") or "system")
+
+        def _coerce_exit_flag(value: object, fallback: bool = True) -> bool:
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, (int, float)):
+                if value == 1:
+                    return True
+                if value == 0:
+                    return False
+                return fallback
+            if isinstance(value, str):
+                normalized = value.strip().lower()
+                if normalized in {"true", "1", "yes", "on"}:
+                    return True
+                if normalized in {"false", "0", "no", "off"}:
+                    return False
+            return fallback
+
+        trailing_enabled = _coerce_exit_flag(
+            persisted_trade.get("trailing_enabled"),
+            True,
+        )
+        stagnation_enabled = _coerce_exit_flag(
+            persisted_trade.get("stagnation_enabled"),
+            True,
+        )
+
         is_manual_tracking = entry_source.strip().lower() in {
             "manual_imported",
             "manual_tracking",
@@ -451,8 +478,8 @@ class BotRunner:
                 "multiplier": persisted_trade.get("multiplier", existing_meta.get("multiplier")),
                 "risk_reward_ratio": persisted_trade.get("risk_reward_ratio", existing_meta.get("risk_reward_ratio")),
                 "min_rr_required": persisted_trade.get("min_rr_required", existing_meta.get("min_rr_required")),
-                "trailing_enabled": bool(existing_meta.get("trailing_enabled", True)),
-                "stagnation_enabled": bool(existing_meta.get("stagnation_enabled", True)),
+                "trailing_enabled": trailing_enabled,
+                "stagnation_enabled": stagnation_enabled,
                 "entry_source": entry_source,
                 "manual_tracking": is_manual_tracking,
             }
@@ -477,8 +504,8 @@ class BotRunner:
                     "cancellation_expiry": None,
                     "highest_unrealized_pnl": 0.0,
                     "has_been_profitable": False,
-                    "trailing_enabled": True,
-                    "stagnation_enabled": True,
+                    "trailing_enabled": trailing_enabled,
+                    "stagnation_enabled": stagnation_enabled,
                     "entry_source": entry_source,
                     "manual_tracking": is_manual_tracking,
                 }
@@ -498,6 +525,9 @@ class BotRunner:
                     "open_time": open_time.isoformat(),
                     "status": "open",
                     "strategy_type": self._get_strategy_name(),
+                    "trailing_enabled": trailing_enabled,
+                    "stagnation_enabled": stagnation_enabled,
+                    "entry_source": entry_source,
                 }
             )
 

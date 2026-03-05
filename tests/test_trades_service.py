@@ -205,6 +205,61 @@ def test_track_active_trade_does_not_reopen_settled_row(mock_supabase, mock_cach
     assert str(result["contract_id"]) == "c-closed-1"
     mock_supabase.table.return_value.upsert.assert_not_called()
 
+
+def test_update_active_trade_exit_controls_success(mock_supabase, mock_cache):
+    """Exit-control updates should persist for open trades and invalidate caches."""
+    user_id = "user123"
+    contract_id = "c-open-1"
+    mock_response = MagicMock()
+    mock_response.data = [{"contract_id": contract_id, "trailing_enabled": True, "stagnation_enabled": False}]
+    (
+        mock_supabase.table.return_value.update.return_value.eq.return_value.eq.return_value
+        .eq.return_value.execute.return_value
+    ) = mock_response
+
+    result = UserTradesService.update_active_trade_exit_controls(
+        user_id=user_id,
+        contract_id=contract_id,
+        trailing_enabled=1,
+        stagnation_enabled="off",
+    )
+
+    assert result == {"contract_id": contract_id, "trailing_enabled": True, "stagnation_enabled": False}
+    payload = mock_supabase.table.return_value.update.call_args.args[0]
+    assert payload == {"trailing_enabled": True, "stagnation_enabled": False}
+    mock_cache.delete_pattern.assert_called_with(f"trades:{user_id}:*")
+    mock_cache.delete.assert_any_call(f"stats:{user_id}")
+    mock_cache.delete.assert_any_call(f"trades:{user_id}:active")
+
+
+def test_update_active_trade_exit_controls_no_payload_returns_none(mock_supabase, mock_cache):
+    """No-op payloads should not call Supabase."""
+    result = UserTradesService.update_active_trade_exit_controls(
+        user_id="user123",
+        contract_id="c-open-1",
+        trailing_enabled=None,
+        stagnation_enabled=None,
+    )
+    assert result is None
+    mock_supabase.table.assert_not_called()
+
+
+def test_update_active_trade_exit_controls_missing_column_graceful(mock_supabase, mock_cache):
+    """Schema-missing optional toggle columns should fail gracefully and return None."""
+    chain = (
+        mock_supabase.table.return_value.update.return_value.eq.return_value.eq.return_value
+        .eq.return_value.execute
+    )
+    chain.side_effect = Exception("Could not find the 'trailing_enabled' column of 'trades' in the schema cache")
+
+    result = UserTradesService.update_active_trade_exit_controls(
+        user_id="user123",
+        contract_id="c-open-1",
+        trailing_enabled=False,
+    )
+
+    assert result is None
+
 def test_get_user_active_trades_cache_hit(mock_supabase, mock_cache):
     """Active trades should be returned from cache when present."""
     user_id = "user123"

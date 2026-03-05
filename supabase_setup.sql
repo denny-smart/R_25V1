@@ -153,6 +153,33 @@ BEGIN
   END IF;
 END $$;
 
+-- 1d. Persist per-trade exit-control toggles so refresh/recovery keeps runtime state.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'trades' AND column_name = 'trailing_enabled'
+  ) THEN
+    ALTER TABLE public.trades
+    ADD COLUMN trailing_enabled BOOLEAN NULL DEFAULT TRUE;
+
+    RAISE NOTICE 'Added trailing_enabled column to trades table';
+  END IF;
+END $$;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'trades' AND column_name = 'stagnation_enabled'
+  ) THEN
+    ALTER TABLE public.trades
+    ADD COLUMN stagnation_enabled BOOLEAN NULL DEFAULT TRUE;
+
+    RAISE NOTICE 'Added stagnation_enabled column to trades table';
+  END IF;
+END $$;
+
 -- 6. Scalping runtime state persistence
 create table if not exists public.scalping_runtime_state (
   user_id uuid primary key references auth.users (id) on delete cascade,

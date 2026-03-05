@@ -95,7 +95,7 @@ class RiskManager:
 
     @staticmethod
     def _is_manual_tracking_trade(trade_info: Optional[Dict]) -> bool:
-        """Manual/synced trades are tracked for exits but excluded from entry gating counters."""
+        """Manual/synced trades are tracked for exits and active lock, excluded from daily counters."""
         if not isinstance(trade_info, dict):
             return False
         if bool(trade_info.get("manual_tracking")):
@@ -470,14 +470,12 @@ class RiskManager:
             normalized_entry_price = 0.0
         trade_info["entry_price"] = normalized_entry_price
 
+        source = trade_record.get("entry_source") or ("manual_imported" if is_manual_tracking else "system")
         logger.info(f"GLOBAL POSITION LOCKED BY {symbol}")
-        if is_manual_tracking:
-            logger.info(
-                f"Manual/synced trade tracked only: {trade_info.get('direction')} {symbol} @ {trade_info.get('entry_price'):.4f}"
-            )
-            logger.info("Excluded from daily limits/cooldown counters")
-        else:
-            logger.info(f"Trade #{self.total_trades}: {trade_info.get('direction')} {symbol} @ {trade_info.get('entry_price'):.4f}")
+        logger.info(
+            f"Trade opened: {trade_info.get('direction')} {symbol} @ {trade_info.get('entry_price'):.4f} "
+            f"| Contract: {trade_info.get('contract_id')} | Source: {source}"
+        )
         logger.info(f"Active: {active_count}/{self.max_concurrent_trades} | Active symbols: {', '.join(active_symbols)}")
 
         if active_count >= self.max_concurrent_trades:

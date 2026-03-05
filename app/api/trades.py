@@ -94,6 +94,24 @@ def _to_datetime(value: Optional[object]) -> Optional[datetime]:
     return parsed
 
 
+def _parse_boolean_flag(value: Any) -> Optional[bool]:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        if value == 1:
+            return True
+        if value == 0:
+            return False
+        return None
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off"}:
+            return False
+    return None
+
+
 def _normalize_multiplier_direction(contract_type: Optional[str]) -> Optional[str]:
     raw = str(contract_type or "").strip().upper()
     if raw == "MULTUP":
@@ -126,6 +144,81 @@ def _collect_runtime_active_contract_ids(bot: Any) -> Set[str]:
     return ids
 
 
+def _collect_runtime_exit_controls(bot: Any) -> Dict[str, Dict[str, bool]]:
+    controls: Dict[str, Dict[str, bool]] = {}
+    if not bot or not getattr(bot, "risk_manager", None):
+        return controls
+
+    risk_manager = bot.risk_manager
+
+    active_trades = getattr(risk_manager, "active_trades", None)
+    if isinstance(active_trades, list):
+        for trade in active_trades:
+            if not isinstance(trade, dict):
+                continue
+            contract_id = trade.get("contract_id")
+            if contract_id in (None, ""):
+                continue
+            trailing = _parse_boolean_flag(trade.get("trailing_enabled"))
+            stagnation = _parse_boolean_flag(trade.get("stagnation_enabled"))
+            if trailing is None and stagnation is None:
+                continue
+            controls[str(contract_id)] = {
+                "trailing_enabled": trailing if trailing is not None else True,
+                "stagnation_enabled": stagnation if stagnation is not None else True,
+            }
+
+    trade_metadata = getattr(risk_manager, "_trade_metadata", None)
+    if isinstance(trade_metadata, dict):
+        for contract_id, metadata in trade_metadata.items():
+            if contract_id in (None, "") or not isinstance(metadata, dict):
+                continue
+            trailing = _parse_boolean_flag(metadata.get("trailing_enabled"))
+            stagnation = _parse_boolean_flag(metadata.get("stagnation_enabled"))
+            if trailing is None and stagnation is None:
+                continue
+            controls[str(contract_id)] = {
+                "trailing_enabled": trailing if trailing is not None else True,
+                "stagnation_enabled": stagnation if stagnation is not None else True,
+            }
+
+    if hasattr(risk_manager, "get_active_trade_info"):
+        active_info = risk_manager.get_active_trade_info()
+        if isinstance(active_info, dict) and active_info.get("contract_id") not in (None, ""):
+            contract_id = str(active_info.get("contract_id"))
+            trailing = _parse_boolean_flag(active_info.get("trailing_enabled"))
+            stagnation = _parse_boolean_flag(active_info.get("stagnation_enabled"))
+            if trailing is not None or stagnation is not None:
+                existing = controls.get(contract_id, {})
+                controls[contract_id] = {
+                    "trailing_enabled": trailing if trailing is not None else bool(existing.get("trailing_enabled", True)),
+                    "stagnation_enabled": stagnation if stagnation is not None else bool(existing.get("stagnation_enabled", True)),
+                }
+
+    return controls
+
+
+def _apply_runtime_exit_controls(
+    trades: List[Dict[str, Any]],
+    runtime_controls: Dict[str, Dict[str, bool]],
+) -> List[Dict[str, Any]]:
+    if not trades or not runtime_controls:
+        return trades
+    enriched: List[Dict[str, Any]] = []
+    for trade in trades:
+        if not isinstance(trade, dict):
+            continue
+        row = dict(trade)
+        contract_id = row.get("contract_id")
+        contract_key = str(contract_id) if contract_id not in (None, "") else None
+        if contract_key and contract_key in runtime_controls:
+            controls = runtime_controls[contract_key]
+            row["trailing_enabled"] = bool(controls.get("trailing_enabled", True))
+            row["stagnation_enabled"] = bool(controls.get("stagnation_enabled", True))
+        enriched.append(row)
+    return enriched
+
+
 def _register_runtime_tracking(bot: Any, trade_payload: Dict[str, Any]) -> bool:
     """
     Register imported trades into in-memory runtime so normal monitor/exit logic applies.
@@ -143,6 +236,8 @@ def _register_runtime_tracking(bot: Any, trade_payload: Dict[str, Any]) -> bool:
         return False
 
     bot.risk_manager.record_trade_open(trade_payload)
+    trailing_enabled = _parse_boolean_flag(trade_payload.get("trailing_enabled"))
+    stagnation_enabled = _parse_boolean_flag(trade_payload.get("stagnation_enabled"))
 
     if getattr(bot, "state", None):
         exists_in_state = any(
@@ -160,8 +255,8 @@ def _register_runtime_tracking(bot: Any, trade_payload: Dict[str, Any]) -> bool:
                     "entry_price": trade_payload.get("entry_price"),
                     "status": "open",
                     "timestamp": trade_payload.get("timestamp"),
-                    "trailing_enabled": True,
-                    "stagnation_enabled": True,
+                    "trailing_enabled": trailing_enabled if trailing_enabled is not None else True,
+                    "stagnation_enabled": stagnation_enabled if stagnation_enabled is not None else True,
                     "entry_source": trade_payload.get("entry_source"),
                     "multiplier": trade_payload.get("multiplier"),
                 }
@@ -267,6 +362,8 @@ async def get_active_trades(
     if not trades:
         trades = UserTradesService.get_user_active_trades(user_id)
 
+    runtime_controls = _collect_runtime_exit_controls(bot) if bot else {}
+    trades = _apply_runtime_exit_controls(list(trades or []), runtime_controls)
     trades = _normalize_active_trade_rows(list(trades or []))
 
     return prepare_response(
@@ -778,5 +875,20 @@ async def update_active_trade_exit_controls(
     )
     if not updated:
         raise HTTPException(status_code=404, detail="Active trade not found")
+
+    try:
+        UserTradesService.update_active_trade_exit_controls(
+            user_id=current_user["id"],
+            contract_id=contract_id,
+            trailing_enabled=updated.get("trailing_enabled"),
+            stagnation_enabled=updated.get("stagnation_enabled"),
+        )
+    except Exception as persist_error:
+        logging.getLogger(__name__).warning(
+            "Failed to persist exit controls for contract %s user %s: %s",
+            contract_id,
+            current_user["id"],
+            persist_error,
+        )
 
     return prepare_response(updated, id_fields=["contract_id"])

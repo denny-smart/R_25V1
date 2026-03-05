@@ -200,6 +200,25 @@ def test_scalping_manual_import_trade_exit_controls_toggle(srm):
     assert metadata["trailing_enabled"] is False
     assert metadata["stagnation_enabled"] is False
 
+
+def test_scalping_manual_import_trade_respects_active_trade_lock_when_single_slot(srm):
+    """Manual/synced trades should block new entries when max concurrent is one."""
+    srm.max_concurrent_trades = 1
+    srm.record_trade_open(
+        {
+            "contract_id": "MANUAL-LOCK-1",
+            "symbol": "R_75",
+            "direction": "DOWN",
+            "stake": 10.0,
+            "entry_source": "manual_imported",
+            "manual_tracking": True,
+        }
+    )
+
+    can_trade, reason = srm.can_trade()
+    assert can_trade is False
+    assert "Max concurrent trades reached" in reason
+
 def test_scalping_rm_daily_entry_limit_ignores_manual_import_rows(srm, monkeypatch):
     """DB-synced daily count should exclude manual-import rows."""
     mock_supabase = MagicMock()
