@@ -116,7 +116,7 @@ class ScalpingRiskManager(BaseRiskManager):
 
     @staticmethod
     def _is_manual_tracking_trade(trade_info: Optional[Dict]) -> bool:
-        """True when trade is imported for tracking and must not affect entry gates."""
+        """True when trade is imported for tracking (excluded from daily counters only)."""
         if not isinstance(trade_info, dict):
             return False
         if bool(trade_info.get("manual_tracking")):
@@ -935,20 +935,16 @@ class ScalpingRiskManager(BaseRiskManager):
                 self.recent_trade_timestamps.pop(0)
             self._persist_daily_trade_count(self._daily_trade_count_date, self.daily_trade_count)
 
-        if is_manual_tracking:
-            logger.info(
-                "Manual/synced trade tracked only - Contract: %s, Symbol: %s (excluded from daily cooldown counters)",
-                contract_id,
-                symbol,
-            )
-        else:
-            logger.info(
-                "Trade opened - Contract: %s, Symbol: %s, Daily count: %s/%s",
-                contract_id,
-                symbol,
-                self.daily_trade_count,
-                self.max_trades_per_day,
-            )
+        source = trade_info.get("entry_source") or ("manual_imported" if is_manual_tracking else "system")
+        logger.info("GLOBAL POSITION LOCKED BY %s", symbol)
+        logger.info(
+            "Trade opened - Contract: %s, Symbol: %s, Source: %s, Daily count: %s/%s",
+            contract_id,
+            symbol,
+            source,
+            self.daily_trade_count,
+            self.max_trades_per_day,
+        )
         logger.info(
             "Active trades: %s/%s",
             len(self.active_trades),

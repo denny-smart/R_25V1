@@ -140,6 +140,26 @@ def test_manual_import_trade_does_not_affect_daily_cooldown_counters(rm):
     assert rm.losing_trades == 0
     assert rm.consecutive_losses == 0
 
+
+def test_manual_import_trade_respects_active_trade_lock_when_single_slot(rm):
+    """Manual/synced trades should block new entries when only one slot is configured."""
+    rm.max_concurrent_trades = 1
+    rm.record_trade_open(
+        {
+            "symbol": "R_25",
+            "contract_id": "manual-lock-1",
+            "direction": "PUT",
+            "stake": 10.0,
+            "entry_price": 100.0,
+            "entry_source": "manual_imported",
+            "manual_tracking": True,
+        }
+    )
+
+    can_trade, reason = rm.can_trade("R_50")
+    assert can_trade is False
+    assert "GLOBAL LIMIT" in reason
+
 def test_manual_import_trade_exit_controls_toggle(rm):
     """Exit controls must be mutable for synced/manual-import trades."""
     trade_info = {

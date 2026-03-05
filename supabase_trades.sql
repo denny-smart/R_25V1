@@ -9,6 +9,8 @@ create table if not exists public.trades (
   entry_price numeric null,
   multiplier numeric null,
   entry_source text null,
+  trailing_enabled boolean null default true,
+  stagnation_enabled boolean null default true,
   exit_price numeric null,
   profit numeric null,
   status text null,

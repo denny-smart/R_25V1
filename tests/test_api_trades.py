@@ -109,6 +109,36 @@ def test_get_active_trades_defaults_system_controls_when_missing():
         assert data[0]["stagnation_enabled"] is True
         assert data[0]["entry_source"] == "system"
 
+
+def test_get_active_trades_overlays_runtime_exit_controls_from_metadata():
+    """Runtime metadata flags should override stale/missing BotState toggle values."""
+    with patch("app.api.trades.bot_manager") as mock_bm:
+        mock_bot = MagicMock()
+        mock_bot.state.get_active_trades.return_value = [{
+            "contract_id": "meta-1",
+            "symbol": "R_100",
+            "direction": "UP",
+            "status": "open",
+            "stake": 5.0,
+        }]
+        mock_bot.risk_manager.active_trades = ["meta-1"]
+        mock_bot.risk_manager._trade_metadata = {
+            "meta-1": {
+                "trailing_enabled": False,
+                "stagnation_enabled": False,
+            }
+        }
+        mock_bot.risk_manager.get_active_trade_info.return_value = None
+        mock_bm.get_bot.return_value = mock_bot
+
+        response = client.get(f"{API_PREFIX}/active")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data[0]["contract_id"] == "meta-1"
+        assert data[0]["trailing_enabled"] is False
+        assert data[0]["stagnation_enabled"] is False
+
 def test_get_trade_history():
     """Test /history endpoint."""
     with patch("app.services.trades_service.UserTradesService.get_user_trades") as mock_get:
@@ -237,7 +267,8 @@ def test_debug_trade_stats_critical_failure():
 
 def test_update_active_trade_exit_controls_success():
     """Test toggling active-trade exit controls."""
-    with patch("app.api.trades.bot_manager") as mock_bm:
+    with patch("app.api.trades.bot_manager") as mock_bm, \
+         patch("app.api.trades.UserTradesService.update_active_trade_exit_controls") as mock_persist:
         mock_risk_manager = MagicMock()
         mock_risk_manager.set_trade_exit_controls.return_value = {
             "contract_id": 308022298068,
@@ -263,6 +294,12 @@ def test_update_active_trade_exit_controls_success():
             contract_id="308022298068",
             trailing_enabled=False,
             stagnation_enabled=None,
+        )
+        mock_persist.assert_called_once_with(
+            user_id="user123",
+            contract_id="308022298068",
+            trailing_enabled=False,
+            stagnation_enabled=True,
         )
 
 

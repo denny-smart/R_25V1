@@ -42,6 +42,25 @@ class UserTradesService:
             return None
 
     @staticmethod
+    def _to_bool(value: Optional[object]) -> Optional[bool]:
+        """Safely coerce common bool-like values."""
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            if value == 1:
+                return True
+            if value == 0:
+                return False
+            return None
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"true", "1", "yes", "on"}:
+                return True
+            if normalized in {"false", "0", "no", "off"}:
+                return False
+        return None
+
+    @staticmethod
     def _drop_optional_columns_for_compat(record: Dict, error: Exception) -> Dict:
         """
         Remove optional columns if database schema has not been migrated yet.
@@ -52,6 +71,8 @@ class UserTradesService:
             or ("pgrst204" in error_text and "schema cache" in error_text)
             or ("could not find the 'entry_source' column" in error_text)
             or ("could not find the 'multiplier' column" in error_text)
+            or ("could not find the 'trailing_enabled' column" in error_text)
+            or ("could not find the 'stagnation_enabled' column" in error_text)
         )
         if not is_missing_column:
             return record
@@ -59,6 +80,8 @@ class UserTradesService:
         compact = dict(record)
         compact.pop("entry_source", None)
         compact.pop("multiplier", None)
+        compact.pop("trailing_enabled", None)
+        compact.pop("stagnation_enabled", None)
         return compact
 
     @staticmethod
@@ -137,6 +160,8 @@ class UserTradesService:
                 trade_data.get("profit"),
                 trade_data.get("exit_price"),
             )
+            trailing_enabled = UserTradesService._to_bool(trade_data.get("trailing_enabled"))
+            stagnation_enabled = UserTradesService._to_bool(trade_data.get("stagnation_enabled"))
             
             # Prepare record
             record = {
@@ -157,6 +182,10 @@ class UserTradesService:
                 "entry_source": trade_data.get("entry_source"),
                 "multiplier": trade_data.get("multiplier"),
             }
+            if trailing_enabled is not None:
+                record["trailing_enabled"] = trailing_enabled
+            if stagnation_enabled is not None:
+                record["stagnation_enabled"] = stagnation_enabled
 
             # Insert final trade row. If an active/open row already exists for
             # this contract_id, update it in place.
@@ -226,6 +255,8 @@ class UserTradesService:
             )
             if isinstance(timestamp, datetime):
                 timestamp = timestamp.isoformat()
+            trailing_enabled = UserTradesService._to_bool(trade_data.get("trailing_enabled"))
+            stagnation_enabled = UserTradesService._to_bool(trade_data.get("stagnation_enabled"))
 
             record = {
                 "user_id": user_id,
@@ -243,6 +274,10 @@ class UserTradesService:
                 "entry_source": trade_data.get("entry_source"),
                 "multiplier": trade_data.get("multiplier"),
             }
+            if trailing_enabled is not None:
+                record["trailing_enabled"] = trailing_enabled
+            if stagnation_enabled is not None:
+                record["stagnation_enabled"] = stagnation_enabled
 
             existing_response = (
                 supabase.table("trades")
@@ -313,6 +348,64 @@ class UserTradesService:
         except Exception as e:
             logger.error(f"❌ Error fetching user contract IDs: {e}")
             return set()
+
+    @staticmethod
+    def update_active_trade_exit_controls(
+        user_id: str,
+        contract_id: str,
+        trailing_enabled: Optional[bool] = None,
+        stagnation_enabled: Optional[bool] = None,
+    ) -> Optional[Dict]:
+        """Persist active-trade exit control toggles for refresh/restart continuity."""
+        payload: Dict[str, object] = {}
+        trailing = UserTradesService._to_bool(trailing_enabled)
+        stagnation = UserTradesService._to_bool(stagnation_enabled)
+        if trailing is not None:
+            payload["trailing_enabled"] = trailing
+        if stagnation is not None:
+            payload["stagnation_enabled"] = stagnation
+
+        if not user_id or not contract_id or not payload:
+            return None
+
+        try:
+            try:
+                response = (
+                    supabase.table("trades")
+                    .update(payload)
+                    .eq("user_id", user_id)
+                    .eq("contract_id", str(contract_id))
+                    .eq("status", "open")
+                    .execute()
+                )
+            except Exception as update_error:
+                compact_payload = UserTradesService._drop_optional_columns_for_compat(
+                    payload,
+                    update_error,
+                )
+                if compact_payload == payload or not compact_payload:
+                    raise
+                response = (
+                    supabase.table("trades")
+                    .update(compact_payload)
+                    .eq("user_id", user_id)
+                    .eq("contract_id", str(contract_id))
+                    .eq("status", "open")
+                    .execute()
+                )
+
+            if response.data:
+                UserTradesService._invalidate_trade_cache(user_id)
+                return response.data[0]
+            return None
+        except Exception as e:
+            logger.warning(
+                "Could not persist exit controls for user %s contract %s: %s",
+                user_id,
+                contract_id,
+                e,
+            )
+            return None
 
     @staticmethod
     def get_user_active_trades(user_id: str, limit: int = 20) -> List[Dict]:
