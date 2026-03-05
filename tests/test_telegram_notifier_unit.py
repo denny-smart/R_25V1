@@ -203,3 +203,55 @@ async def test_notify_trade_opened_includes_entry_source_labels(mock_bot):
         sent_sync = notifier.bot.send_message.call_args.kwargs["text"]
         assert "Entry Source: <b>Manual Import (Sync)</b>" in sent_sync
 
+
+@pytest.mark.asyncio
+async def test_notify_trade_closed_dedups_same_contract_across_statuses(mock_bot):
+    with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "test_token", "TELEGRAM_CHAT_ID": "test_chat"}):
+        notifier = TelegramNotifier()
+        notifier.bot.send_message = AsyncMock()
+
+        trade_info = {"symbol": "R_25", "direction": "DOWN", "entry_price": 100.0, "stake": 10.0}
+        await notifier.notify_trade_closed({"status": "won", "profit": 0.85, "contract_id": "dup-1"}, trade_info)
+        await notifier.notify_trade_closed({"status": "sold", "profit": 0.95, "contract_id": "dup-1"}, trade_info)
+
+        assert notifier.bot.send_message.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_notify_trade_closed_formats_missing_duration_as_na(mock_bot):
+    with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "test_token", "TELEGRAM_CHAT_ID": "test_chat"}):
+        notifier = TelegramNotifier()
+        notifier.bot.send_message = AsyncMock()
+
+        result = {"status": "won", "profit": 1.0, "contract_id": "dur-1"}
+        trade_info = {"symbol": "R_25", "direction": "DOWN", "entry_price": 100.0, "stake": 10.0, "duration": None}
+
+        await notifier.notify_trade_closed(result, trade_info)
+
+        sent = notifier.bot.send_message.call_args.kwargs["text"]
+        assert "Duration: N/A" in sent
+        assert "Nones" not in sent
+
+
+@pytest.mark.asyncio
+async def test_notify_trade_opened_manual_import_prefers_sync_label_and_na_targets(mock_bot):
+    with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "test_token", "TELEGRAM_CHAT_ID": "test_chat"}):
+        notifier = TelegramNotifier()
+        notifier.bot.send_message = AsyncMock()
+
+        await notifier.notify_trade_opened(
+            {
+                "symbol": "R_25",
+                "contract_id": "sync-manual-1",
+                "direction": "DOWN",
+                "stake": 10.0,
+                "entry_price": 2810.50,
+                "multiplier": 160,
+                "manual_tracking": True,
+                "entry_source": "manual_imported",
+            }
+        )
+
+        sent = notifier.bot.send_message.call_args.kwargs["text"]
+        assert "Entry Source: <b>Manual Import (Sync)</b>" in sent
+        assert "Target/Risk: N/A / N/A (N/A)" in sent

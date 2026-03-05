@@ -78,8 +78,9 @@ class TelegramNotifier:
         self.bot = None
         self.enabled = False
         
-        # Deduplication tracking
-        self.processed_closed_trades = set() # Stores f"{contract_id}_{status}"
+        # Deduplication tracking: one close notification per contract ID
+        # within a short TTL window to prevent won/sold double-alerts.
+        self.processed_closed_trades: Dict[str, datetime] = {}
         
         if self.bot_token and self.chat_id:
             try:
@@ -268,18 +269,17 @@ class TelegramNotifier:
         if not isinstance(payload, dict):
             return "System Strategy"
 
-        if bool(payload.get("manual_tracking")):
-            return "Manual Tracking"
-
         raw_source = payload.get("entry_source")
         if raw_source is None:
             raw_source = payload.get("source")
 
         text = str(raw_source or "").strip().lower().replace("-", "_").replace(" ", "_")
-        if text in {"manual", "manual_tracking", "manual_entry", "manual_contract"}:
-            return "Manual Tracking"
         if text in {"manual_imported", "sync_import", "broker_sync"}:
             return "Manual Import (Sync)"
+        if bool(payload.get("manual_tracking")):
+            return "Manual Tracking"
+        if text in {"manual", "manual_tracking", "manual_entry", "manual_contract"}:
+            return "Manual Tracking"
         if text in {"system", "strategy", "strategy_engine", "auto", "automated"}:
             return "System Strategy"
         if text:
@@ -297,6 +297,59 @@ class TelegramNotifier:
         if len(text) <= max_len:
             return text
         return f"{text[:max_len - 3].rstrip()}..."
+
+    @staticmethod
+    def _normalize_contract_id(value: Optional[object]) -> Optional[str]:
+        if value in (None, ""):
+            return None
+        text = str(value).strip()
+        return text or None
+
+    @staticmethod
+    def _format_duration_text(value: Optional[object]) -> str:
+        """Format trade duration text safely (avoid 'Nones')."""
+        if value in (None, ""):
+            return "N/A"
+        if isinstance(value, str):
+            text = value.strip()
+            if not text or text.lower() in {"none", "n/a", "na"}:
+                return "N/A"
+            try:
+                seconds = int(round(float(text)))
+                return f"{max(seconds, 0)}s"
+            except Exception:
+                return text
+        try:
+            seconds = int(round(float(value)))
+            return f"{max(seconds, 0)}s"
+        except Exception:
+            return "N/A"
+
+    def _should_skip_duplicate_close(self, contract_id: Optional[str], status: Optional[object]) -> bool:
+        """Suppress duplicate close messages for the same contract across status aliases."""
+        if not contract_id:
+            return False
+
+        now = datetime.now()
+        ttl_seconds = max(int(getattr(config, "TELEGRAM_CLOSE_DEDUP_SECONDS", 600) or 600), 1)
+
+        # Lightweight TTL pruning to keep memory bounded.
+        cutoff = now.timestamp() - ttl_seconds
+        stale_keys = [cid for cid, ts in self.processed_closed_trades.items() if ts.timestamp() < cutoff]
+        for cid in stale_keys:
+            self.processed_closed_trades.pop(cid, None)
+
+        previous = self.processed_closed_trades.get(contract_id)
+        if previous and (now - previous).total_seconds() <= ttl_seconds:
+            logger.debug(
+                "Duplicate close notification prevented for %s (status=%s)",
+                contract_id,
+                status,
+            )
+            return True
+
+        self.processed_closed_trades[contract_id] = now
+        return False
 
     def _format_risk_summary(self, payload: Optional[Dict], strategy_type: str) -> str:
         """Build concise risk summary for signal/open/close notifications."""
@@ -545,8 +598,9 @@ class TelegramNotifier:
             await self.send_message(message)
             return
 
-        tp_amount = 0
-        sl_risk = 0
+        tp_amount = None
+        sl_risk = None
+        is_manual_entry = entry_source_label in {"Manual Tracking", "Manual Import (Sync)"}
 
         entry_spot = self._to_float(trade_info.get("entry_spot") or trade_info.get("entry_price", 0), 0.0)
         multiplier = self._to_float(trade_info.get("multiplier", 0), 0.0)
@@ -556,11 +610,11 @@ class TelegramNotifier:
             sl_price = self._to_float(trade_info["stop_loss"], 0.0)
             tp_amount = stake * multiplier * (abs(tp_price - entry_spot) / entry_spot)
             sl_risk = stake * multiplier * (abs(entry_spot - sl_price) / entry_spot)
-        elif "take_profit_amount" in trade_info:
+        elif trade_info.get("take_profit_amount") is not None:
             tp_amount = self._to_float(trade_info["take_profit_amount"], 0.0)
-            if "stop_loss_amount" in trade_info:
+            if trade_info.get("stop_loss_amount") is not None:
                 sl_risk = self._to_float(trade_info["stop_loss_amount"], 0.0)
-        else:
+        elif not is_manual_entry:
             tp_pct = getattr(config, "TAKE_PROFIT_PERCENT", None)
             sl_pct = getattr(config, "STOP_LOSS_PERCENT", None)
             if tp_pct is not None:
@@ -568,7 +622,13 @@ class TelegramNotifier:
             if sl_pct is not None:
                 sl_risk = stake * multiplier * (sl_pct / 100)
 
-        rr_ratio = f"1:{tp_amount / sl_risk:.1f}" if sl_risk > 0 else "N/A"
+        rr_ratio = (
+            f"1:{tp_amount / sl_risk:.1f}"
+            if tp_amount is not None and sl_risk is not None and sl_risk > 0
+            else "N/A"
+        )
+        target_display = f"+{format_currency(tp_amount)}" if tp_amount is not None else "N/A"
+        risk_display = f"-{format_currency(sl_risk)}" if sl_risk is not None else "N/A"
         mult_display = int(multiplier) if multiplier.is_integer() else multiplier
 
         message = (
@@ -577,7 +637,7 @@ class TelegramNotifier:
             f"Direction: <b>{direction_label}</b>\n"
             f"Entry Source: <b>{entry_source_label}</b>\n"
             f"Stake: {format_currency(stake)} (x{mult_display if multiplier else 0}) | Entry: {self._to_float(trade_info.get('entry_price', 0), 0.0):.2f}\n"
-            f"Target/Risk: +{format_currency(tp_amount)} / -{format_currency(sl_risk)} ({rr_ratio})\n"
+            f"Target/Risk: {target_display} / {risk_display} ({rr_ratio})\n"
             f"Risk: {risk_short}\n"
             f"Reason: {reason_short}\n"
         )
@@ -603,17 +663,11 @@ class TelegramNotifier:
         else:
             profit = float(profit)
 
-        contract_id = result.get("contract_id") or trade_info.get("contract_id")
-
-        if contract_id:
-            dedup_key = f"{contract_id}_{status}"
-            if dedup_key in self.processed_closed_trades:
-                logger.debug(f"Duplicate notification prevented for {dedup_key}")
-                return
-
-            self.processed_closed_trades.add(dedup_key)
-            if len(self.processed_closed_trades) > 100:
-                self.processed_closed_trades.pop()
+        contract_id = self._normalize_contract_id(
+            result.get("contract_id") or trade_info.get("contract_id")
+        )
+        if self._should_skip_duplicate_close(contract_id, status):
+            return
 
         symbol = trade_info.get("symbol", "UNKNOWN")
         user_id = self._extract_user_id(trade_info, result)
@@ -645,7 +699,8 @@ class TelegramNotifier:
             close_reason = "stagnation_exit"
 
         close_reason_label = str(close_reason).replace("_", " ").upper()
-        duration = trade_info.get("duration", result.get("duration", "N/A"))
+        duration = trade_info.get("duration", result.get("duration"))
+        duration_text = self._format_duration_text(duration)
 
         message = (
             f"{prefix}{badge} [CLOSED] <b>TRADE CLOSED ({outcome}): {symbol}</b>\n"
@@ -653,7 +708,7 @@ class TelegramNotifier:
             f"Net Result: <b>{format_currency(profit)}</b> | ROI: {roi:+.1f}%\n"
             f"Direction: {trade_info.get('direction', 'UNKNOWN')}\n"
             f"Close Reason: {close_reason_label}\n"
-            f"Duration: {duration}s\n"
+            f"Duration: {duration_text}\n"
             f"ID: <code>{contract_id or 'N/A'}</code> | Time: {datetime.now().strftime('%H:%M:%S')}"
         )
         await self.send_message(message)
