@@ -19,10 +19,11 @@ SYMBOLS = RF_SYMBOLS
 RF_BLOCKED_SYMBOLS = set()
 
 # ==================== STEP INDEX ENTRY MODEL ====================
-RF_TICK_SEQUENCE_LENGTH = 3
+RF_TICK_SEQUENCE_LENGTH = 4
 RF_CONFIRMATION_TICKS = 2
 RF_BURST_NOISE_LOOKBACK_MOVES = 4
-RF_BURST_MAX_SECONDS = 1.5
+# Step Index streams at a fixed cadence, so burst speed carries no signal value.
+RF_BURST_MAX_SECONDS = 0
 RF_TICK_HISTORY_COUNT = (
     RF_BURST_NOISE_LOOKBACK_MOVES
     + RF_TICK_SEQUENCE_LENGTH
@@ -49,8 +50,8 @@ RF_MAX_CONCURRENT_TRADES = 1
 RF_COOLDOWN_SECONDS = 0
 RF_GLOBAL_COOLDOWN_SECONDS = 0
 
-# Legacy caps are disabled so the Step Index session rules are the authority.
-RF_MAX_TRADES_PER_DAY = 0
+# Cap Rise/Fall entries to 10 per day.
+RF_MAX_TRADES_PER_DAY = 10
 RF_DAILY_LOSS_LIMIT_MULTIPLIER = 0.0
 
 RF_PENDING_TIMEOUT_SECONDS = 60
