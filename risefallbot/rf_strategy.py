@@ -2,8 +2,8 @@
 Rise/Fall Step Index strategy.
 
 Entry model:
-  - 3 consecutive upward ticks + 2-tick weakening confirmation -> FALL contract (PUT)
-  - 3 consecutive downward ticks + 2-tick weakening confirmation -> RISE contract (CALL)
+  - 4 consecutive upward ticks + 2-tick weakening confirmation -> FALL contract (PUT)
+  - 4 consecutive downward ticks + 2-tick weakening confirmation -> RISE contract (CALL)
 """
 
 from __future__ import annotations
@@ -64,7 +64,7 @@ class RiseFallStrategy(BaseStrategy):
         self.allowed_symbols = tuple(
             _cfg_value("RF_SUPPORTED_SYMBOLS", _cfg_value("RF_SYMBOLS", []))
         )
-        self.sequence_length = _cfg_int("RF_TICK_SEQUENCE_LENGTH", 3)
+        self.sequence_length = _cfg_int("RF_TICK_SEQUENCE_LENGTH", 4)
         self.confirmation_ticks = max(_cfg_int("RF_CONFIRMATION_TICKS", 2), 1)
         self.burst_noise_lookback_moves = max(
             _cfg_int("RF_BURST_NOISE_LOOKBACK_MOVES", 4),
@@ -78,7 +78,7 @@ class RiseFallStrategy(BaseStrategy):
             ),
             self.primary_window_points,
         )
-        self.burst_max_seconds = _cfg_float("RF_BURST_MAX_SECONDS", 1.5)
+        self.burst_max_seconds = _cfg_float("RF_BURST_MAX_SECONDS", 0.0)
         self.require_consecutive_direction = _cfg_bool(
             "RF_REQUIRE_CONSECUTIVE_DIRECTION",
             True,
@@ -92,6 +92,8 @@ class RiseFallStrategy(BaseStrategy):
         self.duration_unit = str(_cfg_value("RF_DURATION_UNIT", "t"))
         self._last_analysis: Dict[str, Dict[str, Any]] = {}
         self._last_qualifying_signature: Dict[str, str] = {}
+        self._directional_run_cooldowns: Dict[str, Dict[int, Dict[str, Any]]] = {}
+        self._latest_tick_observation: Dict[str, Dict[str, float]] = {}
 
     def _reject(
         self,
@@ -223,6 +225,114 @@ class RiseFallStrategy(BaseStrategy):
             return burst_end_price > max(pre_burst_prices)
         return burst_end_price < min(pre_burst_prices)
 
+    @staticmethod
+    def _minimum_reversal_move(burst_moves: List[float]) -> float:
+        non_zero_moves = [abs(move) for move in burst_moves if move != 0]
+        if not non_zero_moves:
+            return 0.0
+        return min(non_zero_moves)
+
+    def _has_genuine_reversal(
+        self,
+        burst_direction: int,
+        burst_moves: List[float],
+        confirmation_moves: List[float],
+    ) -> bool:
+        minimum_reversal_move = self._minimum_reversal_move(burst_moves)
+        return any(
+            self._direction(move) == -burst_direction
+            and abs(move) >= minimum_reversal_move
+            for move in confirmation_moves
+        )
+
+    def _update_directional_run_cooldowns(
+        self,
+        symbol: str,
+        ticks: pd.DataFrame,
+    ) -> None:
+        if ticks.empty:
+            return
+
+        observation = self._latest_tick_observation.get(symbol)
+        if observation is None:
+            last_row = ticks.iloc[-1]
+            self._latest_tick_observation[symbol] = {
+                "timestamp": float(last_row["timestamp"]),
+                "quote": float(last_row["quote"]),
+            }
+            return
+
+        new_rows = ticks.loc[
+            ticks["timestamp"] > observation["timestamp"],
+            ["timestamp", "quote"],
+        ]
+        if new_rows.empty:
+            return
+
+        previous_quote = float(observation["quote"])
+        latest_timestamp = float(observation["timestamp"])
+        for row in new_rows.itertuples(index=False):
+            current_quote = float(row.quote)
+            tick_direction = self._direction(round(current_quote - previous_quote, 12))
+            self._advance_directional_run_cooldowns(symbol, tick_direction)
+            previous_quote = current_quote
+            latest_timestamp = float(row.timestamp)
+
+        self._latest_tick_observation[symbol] = {
+            "timestamp": latest_timestamp,
+            "quote": previous_quote,
+        }
+
+    def _advance_directional_run_cooldowns(self, symbol: str, tick_direction: int) -> None:
+        cooldowns = self._directional_run_cooldowns.get(symbol)
+        if not cooldowns or tick_direction == 0:
+            return
+
+        completed_directions: List[int] = []
+        for blocked_direction, state in cooldowns.items():
+            if tick_direction == blocked_direction:
+                state["ticks_without_same_direction"] = 0
+            else:
+                state["ticks_without_same_direction"] += 1
+
+            state["ticks_remaining"] = max(
+                state["required_break_ticks"] - state["ticks_without_same_direction"],
+                0,
+            )
+
+            if state["ticks_remaining"] == 0:
+                completed_directions.append(blocked_direction)
+
+        for blocked_direction in completed_directions:
+            cooldowns.pop(blocked_direction, None)
+
+        if not cooldowns:
+            self._directional_run_cooldowns.pop(symbol, None)
+
+    def _get_directional_run_cooldown(
+        self,
+        symbol: str,
+        burst_direction: int,
+    ) -> Optional[Dict[str, Any]]:
+        return (
+            self._directional_run_cooldowns
+            .get(symbol, {})
+            .get(burst_direction)
+        )
+
+    def _arm_directional_run_cooldown(
+        self,
+        symbol: str,
+        burst_direction: int,
+        signature: str,
+    ) -> None:
+        self._directional_run_cooldowns.setdefault(symbol, {})[burst_direction] = {
+            "required_break_ticks": int(self.sequence_length),
+            "ticks_without_same_direction": 0,
+            "ticks_remaining": int(self.sequence_length),
+            "armed_signature": signature,
+        }
+
     def analyze(self, **kwargs) -> Optional[Dict]:
         ticks = self._normalize_ticks(kwargs.get("data_ticks", kwargs.get("data_1m")))
         symbol = kwargs.get("symbol", "unknown")
@@ -237,6 +347,8 @@ class RiseFallStrategy(BaseStrategy):
                 details={"allowed_symbols": list(self.allowed_symbols)},
             )
             return None
+
+        self._update_directional_run_cooldowns(symbol, ticks)
 
         required_points = self.history_count
         if ticks.empty or len(ticks) < required_points:
@@ -321,33 +433,20 @@ class RiseFallStrategy(BaseStrategy):
             )
             return None
 
-        burst_is_up = all(delta > 0 for delta in burst_moves)
-        if (
-            self.burst_noise_lookback_moves > 0
-            and self._is_alternating(pre_burst_moves)
-            and not self._burst_breaks_previous_region(
-                pre_burst_prices=pre_burst_prices,
-                burst_end_price=burst_end_price,
-                burst_is_up=burst_is_up,
-            )
+        burst_direction = self._direction(burst_moves[0]) if burst_moves else 0
+        burst_is_up = burst_direction > 0
+        minimum_reversal_move = self._minimum_reversal_move(burst_moves)
+        details["confirmation_min_reversal_move"] = minimum_reversal_move
+
+        if not self._has_genuine_reversal(
+            burst_direction=burst_direction,
+            burst_moves=burst_moves,
+            confirmation_moves=confirmation_moves,
         ):
             self._reject(
                 symbol,
-                code="mixed_tick_noise",
-                reason="Burst did not break away from a noisy oscillating region",
-                details=details,
-            )
-            return None
-
-        rejection_confirmation = all(
-            delta > 0 for delta in confirmation_moves
-        ) if burst_is_up else all(delta < 0 for delta in confirmation_moves)
-
-        if rejection_confirmation:
-            self._reject(
-                symbol,
-                code="confirmation_continuation",
-                reason="Confirmation ticks continued burst momentum",
+                code="confirmation_no_genuine_reversal",
+                reason="Confirmation lacked a full opposite-direction reversal tick",
                 details=details,
             )
             return None
@@ -364,6 +463,19 @@ class RiseFallStrategy(BaseStrategy):
             )
             return None
 
+        directional_cooldown = self._get_directional_run_cooldown(symbol, burst_direction)
+        if directional_cooldown:
+            self._reject(
+                symbol,
+                code="directional_run_cooldown_active",
+                reason="A prior burst in the same direction is still cooling down",
+                details={
+                    **details,
+                    "directional_run_cooldown": dict(directional_cooldown),
+                },
+            )
+            return None
+
         if burst_is_up:
             contract_direction = "PUT"
             trade_label = "FALL"
@@ -374,6 +486,7 @@ class RiseFallStrategy(BaseStrategy):
             sequence_direction = "down"
 
         self._last_qualifying_signature[symbol] = signature
+        self._arm_directional_run_cooldown(symbol, burst_direction, signature)
 
         signal = {
             "symbol": symbol,
