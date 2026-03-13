@@ -73,7 +73,7 @@ async def test_process_symbol_lifecycle_failure():
     mock_te = AsyncMock()
     
     with patch("risefallbot.rf_bot.logger"):
-        await rf_bot._process_symbol("stpRNG1", mock_strategy, rm, mock_df, mock_te, 1.0, "user123", mock_em, MagicMock())
+        await rf_bot._process_symbol("R_100S", mock_strategy, rm, mock_df, mock_te, 1.0, "user123", mock_em, MagicMock())
     
     # In rf_bot.py, "lifecycle error" is in the transient list, so it clears the halt in finally
     assert not rm.is_halted()
@@ -174,7 +174,7 @@ async def test_write_trade_to_db_failure(fetcher):
     with patch("risefallbot.rf_bot.rf_config.RF_DB_WRITE_MAX_RETRIES", 2), \
          patch("risefallbot.rf_bot.rf_config.RF_DB_WRITE_RETRY_DELAY", 0.001):
         success = await rf_bot._write_trade_to_db_with_retry(
-            user_id="u1", contract_id="c1", symbol="stpRNG1", direction="CALL",
+            user_id="u1", contract_id="c1", symbol="R_100S", direction="CALL",
             stake_val=1.0, pnl=0.5, status="won", closure_reason="target",
             duration=3, duration_unit="t", result={}, settlement={},
             UserTradesService=mock_service
@@ -214,7 +214,7 @@ async def test_process_symbol_win_lifecycle():
     # Mock successful DB write
     with patch("risefallbot.rf_bot._write_trade_to_db_with_retry", return_value=True), \
          patch("risefallbot.rf_bot.logger"):
-        await rf_bot._process_symbol("stpRNG1", mock_strategy, rm, mock_df, mock_te, 1.0, "user1", mock_em, mock_uts)
+        await rf_bot._process_symbol("R_100S", mock_strategy, rm, mock_df, mock_te, 1.0, "user1", mock_em, mock_uts)
     
     assert not rm.is_halted()
     # Check that trade was recorded and then removed from active_trades
