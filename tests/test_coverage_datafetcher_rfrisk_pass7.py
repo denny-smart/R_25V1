@@ -101,7 +101,7 @@ async def test_data_fetcher_connection_closed_and_weekly_resample_paths(monkeypa
             }
         }
     )
-    ticks = await f.fetch_tick_history("stpRNG1", 4)
+    ticks = await f.fetch_tick_history("R_100S", 4)
     assert ticks is not None
     assert list(ticks["quote"]) == [100.1, 100.2, 100.3, 100.4]
 
@@ -156,12 +156,12 @@ async def test_rf_risk_manager_watchdog_and_acquire_failure_branches():
     rm._pending_entry_timestamp = datetime.now() - timedelta(seconds=rm._pending_timeout_seconds + 5)
     rm._halted = True
     rm._halt_reason = "stale"
-    assert await rm.acquire_trade_lock("stpRNG1", "pending") is True
+    assert await rm.acquire_trade_lock("R_100S", "pending") is True
     rm.release_trade_lock("done")
 
     # halted branch
     rm.halt("manual halt")
-    assert await rm.acquire_trade_lock("stpRNG1", "c1") is False
+    assert await rm.acquire_trade_lock("R_100S", "c1") is False
     rm.clear_halt()
 
     # post-acquire risk check fail branch (non-mutex reason)
@@ -171,12 +171,12 @@ async def test_rf_risk_manager_watchdog_and_acquire_failure_branches():
         return False, "daily cap reached"
 
     rm.can_trade = blocked
-    assert await rm.acquire_trade_lock("stpRNG1", "c2") is False
+    assert await rm.acquire_trade_lock("R_100S", "c2") is False
     rm.can_trade = original_can_trade
 
     # race window branch: active_trades already populated when lock acquired
-    rm.active_trades["x"] = {"contract_id": "x", "symbol": "stpRNG2"}
-    assert await rm.acquire_trade_lock("stpRNG1", "c3") is False
+    rm.active_trades["x"] = {"contract_id": "x", "symbol": "R_200S"}
+    assert await rm.acquire_trade_lock("R_100S", "c3") is False
     rm.active_trades.clear()
 
 
@@ -185,26 +185,26 @@ async def test_rf_risk_manager_record_open_close_and_can_trade_edges():
     rm = rfr_mod.RiseFallRiskManager()
 
     # record_trade_open without mutex held
-    rm.record_trade_open({"contract_id": "c0", "symbol": "stpRNG1"})
+    rm.record_trade_open({"contract_id": "c0", "symbol": "R_100S"})
     assert "c0" not in rm.active_trades
 
     # normal open/close lifecycle with loss cooldown trigger
-    await rm.acquire_trade_lock("stpRNG1", "c1")
-    rm.record_trade_open({"contract_id": "c1", "symbol": "stpRNG1"})
-    rm.record_trade_closed({"contract_id": "c1", "profit": -1.0, "status": "loss", "symbol": "stpRNG1"})
+    await rm.acquire_trade_lock("R_100S", "c1")
+    rm.record_trade_open({"contract_id": "c1", "symbol": "R_100S"})
+    rm.record_trade_closed({"contract_id": "c1", "profit": -1.0, "status": "loss", "symbol": "R_100S"})
     rm.release_trade_lock("closed")
 
-    await rm.acquire_trade_lock("stpRNG1", "c2")
-    rm.record_trade_open({"contract_id": "c2", "symbol": "stpRNG1"})
-    rm.record_trade_closed({"contract_id": "c2", "profit": -1.0, "status": "loss", "symbol": "stpRNG1"})
+    await rm.acquire_trade_lock("R_100S", "c2")
+    rm.record_trade_open({"contract_id": "c2", "symbol": "R_100S"})
+    rm.record_trade_closed({"contract_id": "c2", "profit": -1.0, "status": "loss", "symbol": "R_100S"})
     rm.release_trade_lock("closed")
 
-    can, reason = rm.can_trade(symbol="stpRNG1")
+    can, reason = rm.can_trade(symbol="R_100S")
     assert can is False
     assert reason == "loss_streak_cooldown_active"
 
     rm._loss_cooldown_until = datetime.now() - timedelta(seconds=1)
-    rm.note_qualifying_signal("stpRNG1", {"sequence_start_epoch": datetime.now().timestamp()})
+    rm.note_qualifying_signal("R_100S", {"sequence_start_epoch": datetime.now().timestamp()})
     assert rm.consecutive_losses == 0
 
     # stats helpers
@@ -215,11 +215,11 @@ async def test_rf_risk_manager_record_open_close_and_can_trade_edges():
 
     for idx in range(2):
         contract_id = f"loss-{idx}"
-        await rm.acquire_trade_lock("stpRNG1", contract_id)
-        rm.record_trade_open({"contract_id": contract_id, "symbol": "stpRNG1"})
-        rm.record_trade_closed({"contract_id": contract_id, "profit": -1.0, "status": "loss", "symbol": "stpRNG1"})
+        await rm.acquire_trade_lock("R_100S", contract_id)
+        rm.record_trade_open({"contract_id": contract_id, "symbol": "R_100S"})
+        rm.record_trade_closed({"contract_id": contract_id, "profit": -1.0, "status": "loss", "symbol": "R_100S"})
         rm.release_trade_lock("closed")
-    assert rm.can_trade(symbol="stpRNG1")[1] == "session_loss_limit_reached"
+    assert rm.can_trade(symbol="R_100S")[1] == "session_loss_limit_reached"
 
     # force daily reset path
     rm._last_daily_reset_date = datetime.now().date() - timedelta(days=1)

@@ -64,13 +64,19 @@ class RiseFallStrategy(BaseStrategy):
         self.allowed_symbols = tuple(_cfg_value("RF_SYMBOLS", []))
         self.sequence_length = _cfg_int("RF_TICK_SEQUENCE_LENGTH", 3)
         self.confirmation_ticks = max(_cfg_int("RF_CONFIRMATION_TICKS", 2), 1)
+        self.burst_noise_lookback_moves = max(
+            _cfg_int("RF_BURST_NOISE_LOOKBACK_MOVES", 4),
+            0,
+        )
+        self.primary_window_points = self.sequence_length + self.confirmation_ticks + 1
         self.history_count = max(
             _cfg_int(
                 "RF_TICK_HISTORY_COUNT",
-                self.sequence_length + self.confirmation_ticks + 1,
+                self.primary_window_points + self.burst_noise_lookback_moves,
             ),
-            self.sequence_length + self.confirmation_ticks + 1,
+            self.primary_window_points,
         )
+        self.burst_max_seconds = _cfg_float("RF_BURST_MAX_SECONDS", 1.5)
         self.require_consecutive_direction = _cfg_bool(
             "RF_REQUIRE_CONSECUTIVE_DIRECTION",
             True,
@@ -84,6 +90,22 @@ class RiseFallStrategy(BaseStrategy):
         self.duration_unit = str(_cfg_value("RF_DURATION_UNIT", "t"))
         self._last_analysis: Dict[str, Dict[str, Any]] = {}
         self._last_qualifying_signature: Dict[str, str] = {}
+
+    def _reject(
+        self,
+        symbol: str,
+        code: str,
+        reason: str,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        logger.info("[RF][%s] Reject setup | code=%s reason=%s", symbol, code, reason)
+        self._set_analysis(
+            symbol,
+            decision="no_trade",
+            reason=reason,
+            code=code,
+            details=details,
+        )
 
     def _set_analysis(
         self,
@@ -157,9 +179,47 @@ class RiseFallStrategy(BaseStrategy):
     @staticmethod
     def _build_signature(window: pd.DataFrame) -> str:
         return "|".join(
-            f"{int(row.timestamp)}:{row.quote:.10f}"
+            f"{float(row.timestamp):.6f}:{row.quote:.10f}"
             for row in window.itertuples(index=False)
         )
+
+    @staticmethod
+    def _direction(delta: float) -> int:
+        if delta > 0:
+            return 1
+        if delta < 0:
+            return -1
+        return 0
+
+    def _is_strict_burst(self, moves: List[float]) -> bool:
+        if len(moves) != self.sequence_length:
+            return False
+        directions = [self._direction(move) for move in moves]
+        if any(direction == 0 for direction in directions):
+            return False
+        return all(direction == directions[0] for direction in directions)
+
+    @classmethod
+    def _is_alternating(cls, moves: List[float]) -> bool:
+        directions = [cls._direction(move) for move in moves]
+        if len(directions) < 2 or any(direction == 0 for direction in directions):
+            return False
+        return all(
+            directions[idx] != directions[idx - 1]
+            for idx in range(1, len(directions))
+        )
+
+    @staticmethod
+    def _burst_breaks_previous_region(
+        pre_burst_prices: List[float],
+        burst_end_price: float,
+        burst_is_up: bool,
+    ) -> bool:
+        if not pre_burst_prices:
+            return True
+        if burst_is_up:
+            return burst_end_price > max(pre_burst_prices)
+        return burst_end_price < min(pre_burst_prices)
 
     def analyze(self, **kwargs) -> Optional[Dict]:
         ticks = self._normalize_ticks(kwargs.get("data_ticks", kwargs.get("data_1m")))
@@ -168,87 +228,124 @@ class RiseFallStrategy(BaseStrategy):
 
         if self.allowed_symbols and symbol not in self.allowed_symbols:
             logger.debug(f"[RF][{symbol}] Symbol not allowed for Step Index mode")
-            self._set_analysis(
+            self._reject(
                 symbol,
-                decision="no_trade",
-                reason="Symbol not allowed",
                 code="symbol_not_allowed",
+                reason="Symbol not allowed",
                 details={"allowed_symbols": list(self.allowed_symbols)},
             )
             return None
 
-        required_points = self.sequence_length + self.confirmation_ticks + 1
+        required_points = self.history_count
         if ticks.empty or len(ticks) < required_points:
-            logger.debug(f"[RF][{symbol}] Insufficient tick history")
-            self._set_analysis(
+            self._reject(
                 symbol,
-                decision="no_trade",
-                reason="Insufficient tick history",
                 code="insufficient_tick_history",
+                reason="Insufficient tick history",
                 details={
                     "ticks_available": int(len(ticks)),
                     "ticks_required": int(required_points),
+                    "primary_window_points": int(self.primary_window_points),
+                    "burst_noise_lookback_moves": int(self.burst_noise_lookback_moves),
                 },
             )
             return None
 
-        window = ticks.tail(required_points).reset_index(drop=True)
-        prices = [float(v) for v in window["quote"].tolist()]
+        history_window = ticks.tail(required_points).reset_index(drop=True)
+        history_prices = [float(v) for v in history_window["quote"].tolist()]
+        history_deltas = [
+            round(history_prices[idx] - history_prices[idx - 1], 12)
+            for idx in range(1, len(history_prices))
+        ]
+        analysis_window = history_window.tail(self.primary_window_points).reset_index(drop=True)
+        prices = [float(v) for v in analysis_window["quote"].tolist()]
         deltas = [round(prices[idx] - prices[idx - 1], 12) for idx in range(1, len(prices))]
-        signature = self._build_signature(window)
+        signature = self._build_signature(analysis_window)
         burst_moves = deltas[: self.sequence_length]
         confirmation_moves = deltas[self.sequence_length :]
+        burst_start_idx = len(history_window) - self.primary_window_points
+        pre_burst_moves = history_deltas[
+            max(0, burst_start_idx - self.burst_noise_lookback_moves) : burst_start_idx
+        ]
+        pre_burst_prices = [
+            float(v)
+            for v in history_window["quote"]
+            .iloc[max(0, burst_start_idx - self.burst_noise_lookback_moves) : burst_start_idx + 1]
+            .tolist()
+        ]
+        burst_end_price = prices[self.sequence_length]
+        burst_elapsed_seconds = round(
+            float(
+                analysis_window["timestamp"].iloc[self.sequence_length]
+                - analysis_window["timestamp"].iloc[0]
+            ),
+            6,
+        )
 
         details = {
             "sequence_length": int(self.sequence_length),
             "confirmation_ticks": int(self.confirmation_ticks),
+            "burst_noise_lookback_moves": int(self.burst_noise_lookback_moves),
             "tick_prices": prices,
             "tick_movements": deltas,
             "burst_movements": burst_moves,
             "confirmation_movements": confirmation_moves,
+            "pre_burst_prices": pre_burst_prices,
+            "pre_burst_movements": pre_burst_moves,
             "sequence_signature": signature,
-            "sequence_started_at": self._to_iso(window["datetime"].iloc[0]),
-            "sequence_ended_at": self._to_iso(window["datetime"].iloc[-1]),
-            "sequence_start_epoch": int(window["timestamp"].iloc[0]),
-            "sequence_end_epoch": int(window["timestamp"].iloc[-1]),
+            "sequence_started_at": self._to_iso(analysis_window["datetime"].iloc[0]),
+            "sequence_ended_at": self._to_iso(analysis_window["datetime"].iloc[-1]),
+            "sequence_start_epoch": float(analysis_window["timestamp"].iloc[0]),
+            "sequence_end_epoch": float(analysis_window["timestamp"].iloc[-1]),
+            "burst_elapsed_seconds": burst_elapsed_seconds,
+            "burst_max_seconds": self.burst_max_seconds,
         }
 
-        if any(delta == 0 for delta in burst_moves):
-            logger.debug(f"[RF][{symbol}] Flat tick detected in burst sequence")
-            self._set_analysis(
+        if self.require_consecutive_direction and not self._is_strict_burst(burst_moves):
+            self._reject(
                 symbol,
-                decision="no_trade",
-                reason="Mixed or flat tick burst",
-                code="mixed_tick_sequence",
+                code="burst_not_consecutive",
+                reason="Burst ticks were not strictly consecutive in one direction",
                 details=details,
             )
             return None
 
-        if self.require_consecutive_direction and not (
-            all(delta > 0 for delta in burst_moves) or all(delta < 0 for delta in burst_moves)
-        ):
-            logger.debug(f"[RF][{symbol}] Mixed tick burst")
-            self._set_analysis(
+        if self.burst_max_seconds > 0 and burst_elapsed_seconds >= self.burst_max_seconds:
+            self._reject(
                 symbol,
-                decision="no_trade",
-                reason="Mixed tick burst",
-                code="mixed_tick_sequence",
+                code="burst_too_slow",
+                reason="Burst momentum formed too slowly",
                 details=details,
             )
             return None
 
         burst_is_up = all(delta > 0 for delta in burst_moves)
+        if (
+            self.burst_noise_lookback_moves > 0
+            and self._is_alternating(pre_burst_moves)
+            and not self._burst_breaks_previous_region(
+                pre_burst_prices=pre_burst_prices,
+                burst_end_price=burst_end_price,
+                burst_is_up=burst_is_up,
+            )
+        ):
+            self._reject(
+                symbol,
+                code="mixed_tick_noise",
+                reason="Burst did not break away from a noisy oscillating region",
+                details=details,
+            )
+            return None
+
         rejection_confirmation = all(
             delta > 0 for delta in confirmation_moves
         ) if burst_is_up else all(delta < 0 for delta in confirmation_moves)
 
         if rejection_confirmation:
-            logger.debug(f"[RF][{symbol}] Confirmation ticks continue burst momentum")
-            self._set_analysis(
+            self._reject(
                 symbol,
-                decision="no_trade",
+                code="confirmation_continuation",
                 reason="Confirmation ticks continued burst momentum",
-                code="confirmation_rejected",
                 details=details,
             )
             return None
@@ -257,12 +354,10 @@ class RiseFallStrategy(BaseStrategy):
             self.require_fresh_signal_after_cooldown
             and self._last_qualifying_signature.get(symbol) == signature
         ):
-            logger.debug(f"[RF][{symbol}] Qualifying sequence already consumed")
-            self._set_analysis(
+            self._reject(
                 symbol,
-                decision="no_trade",
-                reason="Signal is not fresh",
                 code="signal_not_fresh",
+                reason="Signal is not fresh",
                 details=details,
             )
             return None
@@ -290,11 +385,13 @@ class RiseFallStrategy(BaseStrategy):
             "tick_movements": deltas,
             "burst_movements": burst_moves,
             "confirmation_movements": confirmation_moves,
+            "pre_burst_movements": pre_burst_moves,
             "sequence_signature": signature,
             "sequence_started_at": details["sequence_started_at"],
             "sequence_ended_at": details["sequence_ended_at"],
             "sequence_start_epoch": details["sequence_start_epoch"],
             "sequence_end_epoch": details["sequence_end_epoch"],
+            "burst_elapsed_seconds": burst_elapsed_seconds,
             "confidence": 10,
         }
 

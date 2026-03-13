@@ -177,13 +177,13 @@ async def test_rf_bot_process_symbol_additional_branches(monkeypatch):
 
     # stake exceeds max branch
     monkeypatch.setattr(rf_bot.rf_config, "RF_MAX_STAKE", 0.5, raising=False)
-    await rf_bot._process_symbol("stpRNG1", strategy, rm, fetcher, AsyncMock(), 1.0, "u1", em, MagicMock())
+    await rf_bot._process_symbol("R_100S", strategy, rm, fetcher, AsyncMock(), 1.0, "u1", em, MagicMock())
     rm.acquire_trade_lock.assert_not_awaited()
 
     # lock acquisition failure branch
     monkeypatch.setattr(rf_bot.rf_config, "RF_MAX_STAKE", 10.0, raising=False)
     rm.acquire_trade_lock = AsyncMock(return_value=False)
-    await rf_bot._process_symbol("stpRNG1", strategy, rm, fetcher, AsyncMock(), 1.0, "u1", em, MagicMock())
+    await rf_bot._process_symbol("R_100S", strategy, rm, fetcher, AsyncMock(), 1.0, "u1", em, MagicMock())
 
     # settlement unknown + no user_id branch (db skip) + unlock broadcast
     rm.acquire_trade_lock = AsyncMock(return_value=True)
@@ -191,7 +191,7 @@ async def test_rf_bot_process_symbol_additional_branches(monkeypatch):
         buy_rise_fall=AsyncMock(return_value={"contract_id": "c1", "buy_price": 1.0}),
         wait_for_result=AsyncMock(return_value=None),
     )
-    await rf_bot._process_symbol("stpRNG1", strategy, rm, fetcher, engine, 1.0, None, em, MagicMock())
+    await rf_bot._process_symbol("R_100S", strategy, rm, fetcher, engine, 1.0, None, em, MagicMock())
     assert rm.record_trade_open.called
     assert rm.record_trade_closed.called
     assert rm.release_trade_lock.called

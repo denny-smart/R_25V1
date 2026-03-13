@@ -142,7 +142,7 @@ async def test_write_trade_to_db_retry_success():
     
     with patch("risefallbot.rf_bot.rf_config.RF_DB_WRITE_RETRY_DELAY", 0.01):
         success = await rf_bot._write_trade_to_db_with_retry(
-            user_id="user123", contract_id="c1", symbol="stpRNG1", direction="CALL",
+            user_id="user123", contract_id="c1", symbol="R_100S", direction="CALL",
             stake_val=1.0, pnl=0.5, status="won", closure_reason="target",
             duration=3, duration_unit="t", result={}, settlement={},
             UserTradesService=mock_service
@@ -182,7 +182,7 @@ async def test_process_symbol_lifecycle_failure():
     mock_te = AsyncMock()
     
     with patch("risefallbot.rf_bot.logger") as mock_logger:
-        await rf_bot._process_symbol("stpRNG1", mock_strategy, rm, mock_df, mock_te, 1.0, "user123", mock_em, mock_uts)
+        await rf_bot._process_symbol("R_100S", mock_strategy, rm, mock_df, mock_te, 1.0, "user123", mock_em, mock_uts)
     
     # It should not be halted because "Lifecycle crash" is caught as a transient "lifecycle error"
     # and auto-cleared in the finally block.
@@ -219,7 +219,7 @@ async def test_process_symbol_no_data():
     mock_df = AsyncMock()
     mock_df.fetch_tick_history.return_value = None
     
-    await rf_bot._process_symbol("stpRNG1", MagicMock(), rm, mock_df, AsyncMock(), 1.0, "user123", AsyncMock(), MagicMock())
+    await rf_bot._process_symbol("R_100S", MagicMock(), rm, mock_df, AsyncMock(), 1.0, "user123", AsyncMock(), MagicMock())
     assert not rm.is_halted()
 
 @pytest.mark.asyncio
@@ -234,7 +234,7 @@ async def test_process_symbol_no_signal():
     
     mock_strategy.get_last_analysis.return_value = {"reason": "Mixed tick sequence", "code": "mixed_tick_sequence", "details": {}}
 
-    await rf_bot._process_symbol("stpRNG1", mock_strategy, rm, mock_df, AsyncMock(), 1.0, "user123", mock_em, MagicMock())
+    await rf_bot._process_symbol("R_100S", mock_strategy, rm, mock_df, AsyncMock(), 1.0, "user123", mock_em, MagicMock())
     payloads = [c.args[0] for c in mock_em.broadcast.await_args_list if c.args]
     assert any(
         p.get("type") == "bot_decision"
