@@ -62,6 +62,9 @@ services:
         value: INFO
       - key: API_LOG_FILE
         value: api.log
+
+      # Redis cache
+      # Set REDIS_URL in the Render dashboard when attaching Render Redis.
       
       # WebSocket
       - key: WS_REQUIRE_AUTH

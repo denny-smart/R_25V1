@@ -6,9 +6,21 @@ import json
 import logging
 import redis
 from typing import Any, Optional, Dict
+from urllib.parse import urlsplit, urlunsplit
 from app.core.settings import settings
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_connection_target(redis_url: str) -> str:
+    """Redact credentials before writing connection details to logs."""
+    parsed = urlsplit(redis_url)
+    if "@" not in parsed.netloc:
+        return redis_url
+
+    host_part = parsed.netloc.split("@", 1)[1]
+    safe_netloc = f"***:***@{host_part}"
+    return urlunsplit((parsed.scheme, safe_netloc, parsed.path, parsed.query, parsed.fragment))
 
 class RedisCache:
     _instance = None
@@ -25,25 +37,37 @@ class RedisCache:
             
         self.enabled = False
         self.client = None
-        
+        redis_url = settings.REDIS_URL or settings.REDIS_TLS_URL
+
         # Check if Redis is enabled in settings or inferred from environment
-        if settings.REDIS_HOST or settings.REDIS_ENABLED:
+        if redis_url or settings.REDIS_HOST or settings.REDIS_ENABLED:
             try:
                 # Initialize Redis client
-                self.client = redis.Redis(
-                    host=settings.REDIS_HOST or 'localhost',
-                    port=settings.REDIS_PORT,
-                    db=settings.REDIS_DB,
-                    password=settings.REDIS_PASSWORD,
-                    decode_responses=True, # Automatically decode bytes to strings
-                    socket_connect_timeout=2,
-                    socket_timeout=2
-                )
+                if redis_url:
+                    self.client = redis.Redis.from_url(
+                        redis_url,
+                        db=settings.REDIS_DB,
+                        decode_responses=True,
+                        socket_connect_timeout=2,
+                        socket_timeout=2,
+                    )
+                    connection_target = _safe_connection_target(redis_url)
+                else:
+                    self.client = redis.Redis(
+                        host=settings.REDIS_HOST or 'localhost',
+                        port=settings.REDIS_PORT,
+                        db=settings.REDIS_DB,
+                        password=settings.REDIS_PASSWORD,
+                        decode_responses=True, # Automatically decode bytes to strings
+                        socket_connect_timeout=2,
+                        socket_timeout=2
+                    )
+                    connection_target = f"{settings.REDIS_HOST or 'localhost'}:{settings.REDIS_PORT}"
                 
                 # Test connection
                 self.client.ping()
                 self.enabled = True
-                logger.info(f"✅ Redis Cache initialized and connected to {settings.REDIS_HOST}:{settings.REDIS_PORT}")
+                logger.info(f"✅ Redis Cache initialized and connected to {connection_target}")
                 
             except Exception as e:
                 logger.warning(f"⚠️ Redis Connection Failed: {e}. Caching will be disabled.")
