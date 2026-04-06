@@ -7,7 +7,7 @@ import os
 os.environ["ENVIRONMENT"] = "development"
 os.environ["JWT_SECRET_KEY"] = "test_secret"
 
-from app.main import app
+from app.main import app, _build_csp_connect_sources
 
 @pytest.fixture
 def client():
@@ -44,3 +44,29 @@ def test_api_monitor_performance(client):
     response = client.get("/api/v1/monitor/performance")
     # Requires auth, so 401 is expected if not mocked. 404 is a failure.
     assert response.status_code in (200, 401)
+
+
+def test_root_includes_expected_csp_connect_src(client):
+    response = client.get("/")
+    csp = response.headers.get("content-security-policy", "")
+    assert "connect-src" in csp
+    assert "https://*.onrender.com" in csp
+    assert "https://*.vercel.app" in csp
+
+
+def test_build_csp_connect_sources_includes_configured_origins(monkeypatch):
+    monkeypatch.setattr(
+        "app.main.settings.CORS_ORIGINS",
+        ["https://frontend.example.com/app", "https://preview.vercel.app"],
+    )
+    monkeypatch.setattr(
+        "app.main.settings.CSP_CONNECT_SRC",
+        ["https://api.example.com/v1", "https://frontend.example.com"],
+    )
+
+    sources = _build_csp_connect_sources()
+
+    assert "https://*.onrender.com" in sources
+    assert "https://frontend.example.com" in sources
+    assert "https://preview.vercel.app" in sources
+    assert "https://api.example.com" in sources

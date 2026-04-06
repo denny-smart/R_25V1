@@ -5,6 +5,7 @@ Wraps existing Deriv trading bot with REST API and WebSocket endpoints
 
 from contextlib import asynccontextmanager
 import logging
+from typing import List
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -28,30 +29,57 @@ from app.core.logging import setup_api_logger
 # are routed to stdout with correct severity mapping.
 logger = setup_api_logger()
 
-# Security Headers Configuration
-# Define policies - Updated to support frontend requirements
-csp = (
-    ContentSecurityPolicy()
-    .default_src("'self'")
-    .script_src("'self'", "'unsafe-inline'", "'unsafe-eval'", "https://vercel.live")
-    .style_src("'self'", "'unsafe-inline'", "https://fonts.googleapis.com")
-    .font_src("'self'", "https://fonts.gstatic.com", "data:")
-    .connect_src("'self'", "https://*.supabase.co", "wss://*", "https://*.railway.app", "https://*.render.com")
-    .img_src("'self'", "data:", "https:", "blob:")
-    .frame_src("'self'", "https://vercel.live")
-    .object_src("'none'")
-)
-hsts = StrictTransportSecurity().max_age(31536000).include_subdomains()
-xfo = XFrameOptions().deny()
-referrer = ReferrerPolicy().no_referrer()
-
-# Initialize Secure with policies
-secure_headers = Secure(csp=csp, hsts=hsts, xfo=xfo, referrer=referrer)
-
 from app.api import auth, bot, config as config_api, monitor, trades
 from app.bot.manager import bot_manager
 from app.core.settings import settings
 from app.ws import live
+
+
+def _dedupe_sources(values: List[str]) -> List[str]:
+    seen: set[str] = set()
+    unique_values: List[str] = []
+
+    for value in values:
+        if value and value not in seen:
+            seen.add(value)
+            unique_values.append(value)
+
+    return unique_values
+
+
+def _build_csp_connect_sources() -> List[str]:
+    default_sources = [
+        "'self'",
+        "https://*.supabase.co",
+        "wss://*",
+        "https://*.railway.app",
+        "https://*.render.com",
+        "https://*.onrender.com",
+        "https://*.vercel.app",
+        "https://vercel.live",
+    ]
+    return _dedupe_sources(default_sources + settings.get_csp_connect_src())
+
+
+def _build_secure_headers() -> Secure:
+    csp = (
+        ContentSecurityPolicy()
+        .default_src("'self'")
+        .script_src("'self'", "'unsafe-inline'", "'unsafe-eval'", "https://vercel.live")
+        .style_src("'self'", "'unsafe-inline'", "https://fonts.googleapis.com")
+        .font_src("'self'", "https://fonts.gstatic.com", "data:")
+        .connect_src(*_build_csp_connect_sources())
+        .img_src("'self'", "data:", "https:", "blob:")
+        .frame_src("'self'", "https://vercel.live")
+        .object_src("'none'")
+    )
+    hsts = StrictTransportSecurity().max_age(31536000).include_subdomains()
+    xfo = XFrameOptions().deny()
+    referrer = ReferrerPolicy().no_referrer()
+    return Secure(csp=csp, hsts=hsts, xfo=xfo, referrer=referrer)
+
+
+secure_headers = _build_secure_headers()
 
 # Setup Telegram Error Logging
 try:

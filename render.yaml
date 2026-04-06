@@ -56,6 +56,9 @@ services:
       # CORS (UPDATE WITH YOUR VERCEL URL)
       - key: CORS_ORIGINS
         value: http://localhost:3000,http://localhost:3001
+      # Optional: add custom API/auth hosts used by the frontend if CSP blocks requests
+      # - key: CSP_CONNECT_SRC
+      #   value: https://your-frontend.vercel.app,https://your-api.onrender.com
       
       # Logging
       - key: LOG_LEVEL
