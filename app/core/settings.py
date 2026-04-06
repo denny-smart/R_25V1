@@ -6,6 +6,7 @@ from typing import Optional, List, Union, Any
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 import os
+from urllib.parse import urlsplit
 
 
 class Settings(BaseSettings):
@@ -68,6 +69,7 @@ class Settings(BaseSettings):
     CORS_ALLOW_CREDENTIALS: bool = True
     CORS_ALLOW_METHODS: List[str] = ["*"]
     CORS_ALLOW_HEADERS: List[str] = ["*"]
+    CSP_CONNECT_SRC: Any = Field(default_factory=list)
     
     # ============================================================================
     # Bot Integration
@@ -197,10 +199,10 @@ class Settings(BaseSettings):
             raise ValueError(f"ENVIRONMENT must be one of {valid_envs}")
         return v
     
-    @field_validator("CORS_ORIGINS", mode="before")
+    @field_validator("CORS_ORIGINS", "CSP_CONNECT_SRC", mode="before")
     @classmethod
-    def validate_cors_origins(cls, v):
-        """Parse CORS_ORIGINS from string or list"""
+    def validate_origin_lists(cls, v):
+        """Parse origin lists from string or list."""
         # Handle None or empty values
         if v is None or v == "":
             return []
@@ -289,6 +291,34 @@ class Settings(BaseSettings):
             origins = [o for o in origins if not o.startswith("http://localhost")]
         
         return origins
+
+    def get_csp_connect_src(self) -> List[str]:
+        """Get extra connect-src origins derived from configured frontend/API origins."""
+        configured = self.get_cors_origins()
+
+        if isinstance(self.CSP_CONNECT_SRC, (list, tuple)):
+            configured.extend(self.CSP_CONNECT_SRC)
+        elif self.CSP_CONNECT_SRC:
+            configured.append(self.CSP_CONNECT_SRC)
+
+        normalized: List[str] = []
+        seen: set[str] = set()
+
+        for origin in configured:
+            if not isinstance(origin, str):
+                continue
+
+            value = origin.strip()
+            if not value:
+                continue
+
+            parsed = urlsplit(value)
+            normalized_value = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else value
+            if normalized_value not in seen:
+                seen.add(normalized_value)
+                normalized.append(normalized_value)
+
+        return normalized
     
     def display_config(self) -> dict:
         """Return safe config for display (hides sensitive data)"""
