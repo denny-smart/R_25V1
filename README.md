@@ -202,6 +202,7 @@ python create_admin.py your@email.com
 1. Connect your GitHub repository.
 2. Render auto-detects `render.yaml`.
 3. Add environment variables in the dashboard.
+4. If you use Render Redis, set `REDIS_URL` for the API service.
 
 ### Railway
 

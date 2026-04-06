@@ -12,7 +12,7 @@ import pytest
 
 # NOTE: Import the module under test and the Settings singleton it uses
 import app.core.cache as cache_mod
-from app.core.cache import RedisCache, settings
+from app.core.cache import RedisCache, settings, _safe_connection_target
 
 
 class FakeRedis:
@@ -28,6 +28,13 @@ class FakeRedis:
         self.socket_timeout = socket_timeout
         self._store: Dict[str, str] = {}
         self._pinged = False
+        self.url = None
+
+    @classmethod
+    def from_url(cls, url: str, **kwargs):
+        inst = cls(**kwargs)
+        inst.url = url
+        return inst
 
     # Connection methods
     def ping(self) -> bool:
@@ -67,6 +74,8 @@ def reset_singleton(monkeypatch):
     RedisCache._instance = None  # type: ignore[attr-defined]
     # Default: disable redis unless test enables it
     monkeypatch.setattr(settings, "REDIS_HOST", None, raising=False)
+    monkeypatch.setattr(settings, "REDIS_URL", None, raising=False)
+    monkeypatch.setattr(settings, "REDIS_TLS_URL", None, raising=False)
     monkeypatch.setattr(settings, "REDIS_ENABLED", False, raising=False)
     monkeypatch.setattr(settings, "REDIS_PORT", 6379, raising=False)
     monkeypatch.setattr(settings, "REDIS_DB", 0, raising=False)
@@ -132,6 +141,25 @@ def test_enable_and_basic_ops_work(monkeypatch):
     # Delete returns True and removes key
     assert inst.delete("user:1") is True
     assert inst.get("user:1") is None
+
+
+def test_enable_with_render_redis_url(monkeypatch):
+    monkeypatch.setattr(settings, "REDIS_HOST", None, raising=False)
+    monkeypatch.setattr(settings, "REDIS_URL", "rediss://default:secret@example.render.com:6379", raising=False)
+    monkeypatch.setattr(settings, "REDIS_ENABLED", False, raising=False)
+    monkeypatch.setattr(cache_mod.redis, "Redis", FakeRedis)
+
+    inst = RedisCache()
+    assert inst.enabled is True
+    assert isinstance(inst.client, FakeRedis)
+    assert inst.client.url == "rediss://default:secret@example.render.com:6379"
+
+
+def test_safe_connection_target_redacts_credentials():
+    assert (
+        _safe_connection_target("rediss://default:secret@example.render.com:6379")
+        == "rediss://***:***@example.render.com:6379"
+    )
 
 
 def test_connection_failure_graceful(monkeypatch):
