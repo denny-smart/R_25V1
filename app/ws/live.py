@@ -15,6 +15,7 @@ from app.bot.events import event_manager
 from app.bot.manager import bot_manager
 from app.core.supabase import supabase
 from app.core.settings import settings
+from app.services.dashboard_status_service import enrich_bot_status_snapshot
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -58,6 +59,7 @@ def _log_unauth_rejection(websocket: WebSocket, reason: str) -> None:
             client,
         )
 
+
 def extract_user_id_from_token(token: str) -> Optional[str]:
     """
     Decode user_id from Supabase JWT access token without remote validation.
@@ -91,6 +93,7 @@ def _validate_token_session(token: str) -> Optional[str]:
             logger.warning(f"Failed to validate WebSocket token session: {e}")
         return None
 
+
 @router.websocket("/live")
 async def websocket_live(websocket: WebSocket, token: Optional[str] = Query(None)):
     """
@@ -99,17 +102,20 @@ async def websocket_live(websocket: WebSocket, token: Optional[str] = Query(None
     """
     # Authenticate
     from app.core.settings import settings
+
     user_id = None
     subprotocol = None
-    
+
     # Try query param first
     token_candidate = token
-    
+
     # If no query param, check Sec-WebSocket-Protocol header
     if not token_candidate and "sec-websocket-protocol" in websocket.headers:
         # The header can contain a comma-separated list of subprotocols
-        protocols = [p.strip() for p in websocket.headers["sec-websocket-protocol"].split(",")]
-        
+        protocols = [
+            p.strip() for p in websocket.headers["sec-websocket-protocol"].split(",")
+        ]
+
         # Use first non-empty protocol as token
         if protocols and protocols[0]:
             token_candidate = protocols[0]
@@ -135,40 +141,52 @@ async def websocket_live(websocket: WebSocket, token: Optional[str] = Query(None
         _log_unauth_rejection(websocket, "missing_or_invalid_token")
         await websocket.close(code=4001, reason="Authentication required")
         return
-            
+
     await event_manager.connect(websocket, user_id, subprotocol=subprotocol)
-    
+
     try:
         # Send initial state
-        await websocket.send_json({
-            "type": "connected",
-            "message": "WebSocket connection established",
-            "timestamp": datetime.now().isoformat()
-        })
-        
+        await websocket.send_json(
+            {
+                "type": "connected",
+                "message": "WebSocket connection established",
+                "timestamp": datetime.now().isoformat(),
+            }
+        )
+
         # Determine initial state source
-        initial_status = {"status": "disconnected", "message": "Authentication required"}
+        initial_status = {
+            "status": "disconnected",
+            "message": "Authentication required",
+        }
         initial_stats = {}
-        
+
         if user_id:
-            bot = bot_manager.get_bot(user_id)
-            initial_status = bot.state.get_status()
-            initial_stats = bot.state.get_statistics()
-        
+            bot = bot_manager._bots.get(user_id)
+            initial_status = bot_manager.get_status(user_id)
+            initial_status = await enrich_bot_status_snapshot(
+                user_id, initial_status, bot=bot
+            )
+            initial_stats = dict(initial_status.get("statistics") or {})
+
         # Send current bot state
-        await websocket.send_json({
-            "type": "bot_status",
-            **initial_status,
-            "timestamp": datetime.now().isoformat()
-        })
-        
+        await websocket.send_json(
+            {
+                "type": "bot_status",
+                **initial_status,
+                "timestamp": datetime.now().isoformat(),
+            }
+        )
+
         # Send current statistics
-        await websocket.send_json({
-            "type": "statistics",
-            "stats": initial_stats,
-            "timestamp": datetime.now().isoformat()
-        })
-        
+        await websocket.send_json(
+            {
+                "type": "statistics",
+                "stats": initial_stats,
+                "timestamp": datetime.now().isoformat(),
+            }
+        )
+
         # Keep connection alive and handle incoming messages
         while True:
             # Receive message (ping/pong or commands)
@@ -178,11 +196,10 @@ async def websocket_live(websocket: WebSocket, token: Optional[str] = Query(None
                 logger.debug(f"Received from client: {data}")
             except asyncio.TimeoutError:
                 # Send heartbeat
-                await websocket.send_json({
-                    "type": "heartbeat",
-                    "timestamp": datetime.now().isoformat()
-                })
-    
+                await websocket.send_json(
+                    {"type": "heartbeat", "timestamp": datetime.now().isoformat()}
+                )
+
     except WebSocketDisconnect:
         event_manager.disconnect(websocket)
         logger.info("WebSocket client disconnected")

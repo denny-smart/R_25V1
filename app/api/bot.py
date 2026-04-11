@@ -19,6 +19,7 @@ from app.core.deriv_api_key_crypto import (
     encrypt_deriv_api_key,
     is_encrypted_deriv_api_key,
 )
+from app.services.dashboard_status_service import enrich_bot_status_snapshot
 
 router = APIRouter()
 
@@ -30,9 +31,11 @@ def _load_start_profile(user_id: str):
     """
     try:
         return (
-            supabase.table('profiles')
-            .select('deriv_api_key, stake_amount, active_strategy, auto_execute_signals')
-            .eq('id', user_id)
+            supabase.table("profiles")
+            .select(
+                "deriv_api_key, stake_amount, active_strategy, auto_execute_signals"
+            )
+            .eq("id", user_id)
             .single()
             .execute()
         )
@@ -45,20 +48,21 @@ def _load_start_profile(user_id: str):
             user_id,
         )
         return (
-            supabase.table('profiles')
-            .select('deriv_api_key, stake_amount, active_strategy')
-            .eq('id', user_id)
+            supabase.table("profiles")
+            .select("deriv_api_key, stake_amount, active_strategy")
+            .eq("id", user_id)
             .single()
             .execute()
         )
+
 
 @router.post("/start", response_model=BotControlResponse)
 async def start_bot(current_user: dict = Depends(get_current_active_user)):
     """
     Start the trading bot
-    
+
     **Requires authentication**
-    
+
     Only authenticated users can start the bot.
     """
     # Fetch API Key from profile
@@ -69,14 +73,14 @@ async def start_bot(current_user: dict = Depends(get_current_active_user)):
     auto_execute_signals = False
 
     try:
-        profile = _load_start_profile(current_user['id'])
+        profile = _load_start_profile(current_user["id"])
         if profile.data:
             stored_key = profile.data.get("deriv_api_key")
             api_key = decrypt_deriv_api_key(stored_key)
-            if profile.data.get('stake_amount') is not None:
-                stake_amount = float(profile.data['stake_amount'])
-            if profile.data.get('active_strategy'):
-                active_strategy = profile.data['active_strategy']
+            if profile.data.get("stake_amount") is not None:
+                stake_amount = float(profile.data["stake_amount"])
+            if profile.data.get("active_strategy"):
+                active_strategy = profile.data["active_strategy"]
             auto_execute_signals = bool(profile.data.get("auto_execute_signals", False))
 
             # Backward-compatible migration: auto-encrypt legacy plaintext keys.
@@ -96,84 +100,88 @@ async def start_bot(current_user: dict = Depends(get_current_active_user)):
     # Enforce API Key existence in DB
     if not api_key:
         raise HTTPException(
-            status_code=400, 
-            detail="No Deriv API Key found. Please add your API Token in Settings first."
+            status_code=400,
+            detail="No Deriv API Key found. Please add your API Token in Settings first.",
         )
 
     result = await bot_manager.start_bot(
-        current_user['id'], 
+        current_user["id"],
         api_token=api_key,
         stake=stake_amount,
         strategy_name=active_strategy,
         auto_execute_signals=auto_execute_signals,
     )
-    
+
     if not result["success"]:
         raise HTTPException(status_code=400, detail=result["message"])
-    
+
     # Add user info to response
     result["started_by"] = current_user["email"]
     result["timestamp"] = datetime.now().isoformat()
-    
+
     return result
+
 
 @router.post("/stop", response_model=BotControlResponse)
 async def stop_bot(current_user: dict = Depends(get_current_active_user)):
     """
     Stop the trading bot
-    
+
     **Requires authentication**
     """
-    result = await bot_manager.stop_bot(current_user['id'])
-    
+    result = await bot_manager.stop_bot(current_user["id"])
+
     if not result["success"]:
         raise HTTPException(status_code=400, detail=result["message"])
-    
+
     # Add user info to response
     result["stopped_by"] = current_user["email"]
     result["timestamp"] = datetime.now().isoformat()
-    
+
     return result
+
 
 @router.post("/restart", response_model=BotControlResponse)
 async def restart_bot(current_user: dict = Depends(get_current_active_user)):
     """
     Restart the trading bot
-    
+
     **Requires authentication**
     """
-    result = await bot_manager.restart_bot(current_user['id'])
-    
+    result = await bot_manager.restart_bot(current_user["id"])
+
     if not result["success"]:
         raise HTTPException(status_code=400, detail=result["message"])
-    
+
     # Add user info to response
     result["restarted_by"] = current_user["email"]
     result["timestamp"] = datetime.now().isoformat()
-    
+
     return result
+
 
 @router.get("/status", response_model=BotStatusResponse)
 async def get_bot_status(current_user: dict = Depends(get_current_active_user)):
     """
     Get current bot status
-    
+
     **Requires authentication**
     Returns detailed information about the bot's current state.
     """
-    status = bot_manager.get_status(current_user['id'])
-    
+    status = bot_manager.get_status(current_user["id"])
+
     # Add active_strategy and effective_limits if bot is running
-    bot = bot_manager._bots.get(current_user['id'])
+    bot = bot_manager._bots.get(current_user["id"])
     if bot and bot.strategy and bot.risk_manager:
         status["active_strategy"] = bot.strategy.get_strategy_name()
         status["effective_limits"] = bot.risk_manager.get_current_limits()
     else:
         status["active_strategy"] = None
         status["effective_limits"] = {}
-    
+
     # Add user info to response
     status["viewed_by"] = current_user["email"]
     status["timestamp"] = datetime.now().isoformat()
-    
+    status = await enrich_bot_status_snapshot(current_user["id"], status, bot=bot)
+
     return status

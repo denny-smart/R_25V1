@@ -8,6 +8,7 @@ from app.core.deriv_api_key_crypto import encrypt_deriv_api_key
 
 client = TestClient(app)
 
+
 @pytest.fixture
 def mock_user():
     return {
@@ -15,8 +16,9 @@ def mock_user():
         "email": "test@example.com",
         "is_approved": True,
         "role": "user",
-        "created_at": "2026-02-20T20:00:00"
+        "created_at": "2026-02-20T20:00:00",
     }
+
 
 @pytest.fixture
 def mock_auth(mock_user):
@@ -24,34 +26,38 @@ def mock_auth(mock_user):
     app.dependency_overrides[get_current_active_user] = lambda: mock_user
     app.dependency_overrides[require_login] = lambda: mock_user
     app.dependency_overrides[require_auth] = lambda: mock_user
-    
+
     yield mock_user
-    
+
     # Clean up after test
     app.dependency_overrides.clear()
 
+
 # --- AUTH API TESTS ---
+
 
 def test_auth_me(mock_auth):
     response = client.get("/api/v1/auth/me")
     assert response.status_code == 200
     assert response.json()["email"] == "test@example.com"
 
+
 def test_auth_status():
     response = client.get("/api/v1/auth/status")
     assert response.status_code == 200
     assert response.json()["enabled"] is True
 
+
 @pytest.mark.asyncio
 async def test_request_approval(mock_auth):
     with patch("app.api.auth.notifier") as mock_notifier:
         mock_notifier.notify_approval_request = AsyncMock()
-        
+
         # Test already approved
         response = client.post("/api/v1/auth/request-approval")
         assert response.status_code == 200
         assert "already approved" in response.json()["message"]
-        
+
         # Test needs approval
         mock_auth["is_approved"] = False
         response = client.post("/api/v1/auth/request-approval")
@@ -59,25 +65,30 @@ async def test_request_approval(mock_auth):
         assert "Approval request sent" in response.json()["message"]
         mock_notifier.notify_approval_request.assert_called_once()
 
+
 # --- BOT API TESTS ---
+
 
 @pytest.mark.asyncio
 async def test_bot_start(mock_auth):
-    with patch("app.api.bot.supabase") as mock_supabase, \
-         patch("app.api.bot.bot_manager") as mock_manager:
-        
+    with patch("app.api.bot.supabase") as mock_supabase, patch(
+        "app.api.bot.bot_manager"
+    ) as mock_manager:
+
         mock_supabase.table.return_value.select.return_value.eq.return_value.single.return_value.execute.return_value.data = {
             "deriv_api_key": "fake_key",
             "stake_amount": 10.0,
             "active_strategy": "Conservative",
             "auto_execute_signals": True,
         }
-        mock_manager.start_bot = AsyncMock(return_value={
-            "success": True, 
-            "message": "Bot started",
-            "status": "running"
-        })
-        
+        mock_manager.start_bot = AsyncMock(
+            return_value={
+                "success": True,
+                "message": "Bot started",
+                "status": "running",
+            }
+        )
+
         response = client.post("/api/v1/bot/start")
         assert response.status_code == 200
         assert response.json()["success"] is True
@@ -88,8 +99,9 @@ async def test_bot_start(mock_auth):
 @pytest.mark.asyncio
 async def test_bot_start_decrypts_encrypted_key(mock_auth):
     encrypted_key = encrypt_deriv_api_key("fake_key_12345")
-    with patch("app.api.bot.supabase") as mock_supabase, \
-         patch("app.api.bot.bot_manager") as mock_manager:
+    with patch("app.api.bot.supabase") as mock_supabase, patch(
+        "app.api.bot.bot_manager"
+    ) as mock_manager:
 
         mock_supabase.table.return_value.select.return_value.eq.return_value.single.return_value.execute.return_value.data = {
             "deriv_api_key": encrypted_key,
@@ -97,11 +109,13 @@ async def test_bot_start_decrypts_encrypted_key(mock_auth):
             "active_strategy": "Conservative",
             "auto_execute_signals": False,
         }
-        mock_manager.start_bot = AsyncMock(return_value={
-            "success": True,
-            "message": "Bot started",
-            "status": "running"
-        })
+        mock_manager.start_bot = AsyncMock(
+            return_value={
+                "success": True,
+                "message": "Bot started",
+                "status": "running",
+            }
+        )
 
         response = client.post("/api/v1/bot/start")
         assert response.status_code == 200
@@ -110,83 +124,110 @@ async def test_bot_start_decrypts_encrypted_key(mock_auth):
         assert mock_manager.start_bot.await_args.kwargs["api_token"] == "fake_key_12345"
         assert mock_manager.start_bot.await_args.kwargs["auto_execute_signals"] is False
 
+
 @pytest.mark.asyncio
 async def test_bot_stop(mock_auth):
     with patch("app.api.bot.bot_manager") as mock_manager:
-        mock_manager.stop_bot = AsyncMock(return_value={
-            "success": True, 
-            "message": "Bot stopped",
-            "status": "stopped"
-        })
-        
+        mock_manager.stop_bot = AsyncMock(
+            return_value={
+                "success": True,
+                "message": "Bot stopped",
+                "status": "stopped",
+            }
+        )
+
         response = client.post("/api/v1/bot/stop")
         assert response.status_code == 200
         assert response.json()["success"] is True
         mock_manager.stop_bot.assert_called_once()
 
+
 def test_bot_status_running(mock_auth):
     """Test /status endpoint when bot is running."""
-    with patch("app.api.bot.bot_manager") as mock_manager:
+    with patch("app.api.bot.bot_manager") as mock_manager, patch(
+        "app.api.bot.enrich_bot_status_snapshot", new_callable=AsyncMock
+    ) as mock_enrich:
         mock_bot = MagicMock()
         mock_bot.strategy.get_strategy_name.return_value = "Conservative"
         mock_bot.risk_manager.get_current_limits.return_value = {"max_trades": 10}
-        
-        mock_manager.get_status.return_value = {
+
+        raw_status = {
             "status": "running",
             "is_running": True,
             "balance": 1000.0,
             "active_trades": [],
             "active_trades_count": 0,
-            "statistics": {}
+            "statistics": {},
         }
+        mock_manager.get_status.return_value = raw_status
         mock_manager._bots = {mock_auth["id"]: mock_bot}
-        
+        mock_enrich.return_value = {
+            **raw_status,
+            "active_strategy": "Conservative",
+            "active_positions": 0,
+            "profit": 25.0,
+            "pnl": 25.0,
+            "win_rate": 60.0,
+            "trades_today": 3,
+        }
+
         response = client.get("/api/v1/bot/status")
         assert response.status_code == 200
         data = response.json()
         assert data["is_running"] is True
-        # NOTE: active_strategy and effective_limits are stripped by Pydantic
-        # because they are not in the BotStatusResponse schema.
-        # But we verified the lines in bot.py are executed by their presence in the code path.
-        assert "active_strategy" not in data
+        assert data["active_strategy"] == "Conservative"
+        assert data["profit"] == 25.0
+        mock_enrich.assert_awaited_once()
+
 
 @pytest.mark.asyncio
 async def test_bot_start_profile_error(mock_auth):
     """Test /start endpoint with profile fetch error."""
-    with patch("app.api.bot.supabase") as mock_supabase, \
-         patch("app.api.bot.bot_manager") as mock_manager:
-        
-        mock_supabase.table.return_value.select.return_value.eq.return_value.single.return_value.execute.side_effect = Exception("DB error")
+    with patch("app.api.bot.supabase") as mock_supabase, patch(
+        "app.api.bot.bot_manager"
+    ) as mock_manager:
+
+        mock_supabase.table.return_value.select.return_value.eq.return_value.single.return_value.execute.side_effect = Exception(
+            "DB error"
+        )
         mock_manager.start_bot = AsyncMock(return_value={"success": True})
-        
+
         # Should still try to start with default stake/strategy if profile fetch fails
         response = client.post("/api/v1/bot/start")
-        assert response.status_code == 400 # Wait, if it fails it might raise 400 if api_key not found
+        assert (
+            response.status_code == 400
+        )  # Wait, if it fails it might raise 400 if api_key not found
         # In bot.py, if profile fetch fails, logger.error is called but execution continues with api_key=None
         # and then if not api_key: raise HTTPException(400)
         assert "API Token" in response.json()["detail"]
+
 
 @pytest.mark.asyncio
 async def test_bot_restart(mock_auth):
     """Test /restart endpoint."""
     with patch("app.api.bot.bot_manager") as mock_manager:
-        mock_manager.restart_bot = AsyncMock(return_value={
-            "success": True, 
-            "message": "Bot restarted",
-            "status": "running"
-        })
-        
+        mock_manager.restart_bot = AsyncMock(
+            return_value={
+                "success": True,
+                "message": "Bot restarted",
+                "status": "running",
+            }
+        )
+
         response = client.post("/api/v1/bot/restart")
         assert response.status_code == 200
         assert response.json()["success"] is True
         mock_manager.restart_bot.assert_called_once()
 
+
 # --- CONFIG API TESTS ---
 
+
 def test_config_current(mock_auth):
-    with patch("app.api.config.cache") as mock_cache, \
-         patch("app.api.config.supabase") as mock_supabase:
-        
+    with patch("app.api.config.cache") as mock_cache, patch(
+        "app.api.config.supabase"
+    ) as mock_supabase:
+
         mock_cache.get.return_value = None
         mock_supabase.table.return_value.select.return_value.eq.return_value.single.return_value.execute.return_value.data = {
             "deriv_api_key": "secret_key_1234",
@@ -194,7 +235,7 @@ def test_config_current(mock_auth):
             "active_strategy": "RiseFall",
             "auto_execute_signals": True,
         }
-        
+
         response = client.get("/api/v1/config/current")
         assert response.status_code == 200
         # Check masking
@@ -202,15 +243,23 @@ def test_config_current(mock_auth):
         assert response.json()["stake_amount"] == 25.0
         assert response.json()["auto_execute_signals"] is True
 
+
 def test_config_update(mock_auth):
-    with patch("app.api.config.supabase") as mock_supabase, \
-         patch("app.api.config.cache") as mock_cache:
-        
-        mock_supabase.table.return_value.update.return_value.eq.return_value.execute.return_value = MagicMock()
-        
-        updates = {"stake_amount": 50.0, "active_strategy": "Scalping", "auto_execute_signals": True}
+    with patch("app.api.config.supabase") as mock_supabase, patch(
+        "app.api.config.cache"
+    ) as mock_cache:
+
+        mock_supabase.table.return_value.update.return_value.eq.return_value.execute.return_value = (
+            MagicMock()
+        )
+
+        updates = {
+            "stake_amount": 50.0,
+            "active_strategy": "Scalping",
+            "auto_execute_signals": True,
+        }
         response = client.put("/api/v1/config/update", json=updates)
-        
+
         assert response.status_code == 200
         assert response.json()["success"] is True
         assert "stake_amount" in response.json()["updated_fields"]
@@ -218,10 +267,13 @@ def test_config_update(mock_auth):
 
 
 def test_config_update_encrypts_deriv_api_key(mock_auth):
-    with patch("app.api.config.supabase") as mock_supabase, \
-         patch("app.api.config.cache") as mock_cache:
+    with patch("app.api.config.supabase") as mock_supabase, patch(
+        "app.api.config.cache"
+    ) as mock_cache:
 
-        mock_supabase.table.return_value.update.return_value.eq.return_value.execute.return_value = MagicMock()
+        mock_supabase.table.return_value.update.return_value.eq.return_value.execute.return_value = (
+            MagicMock()
+        )
 
         updates = {"deriv_api_key": "secret_key_1234"}
         response = client.put("/api/v1/config/update", json=updates)
@@ -233,21 +285,27 @@ def test_config_update_encrypts_deriv_api_key(mock_auth):
 
 
 def test_config_update_applies_auto_execute_mode_to_running_bot(mock_auth):
-    with patch("app.api.config.supabase") as mock_supabase, \
-         patch("app.api.config.cache") as mock_cache, \
-         patch("app.api.config.bot_manager") as mock_bot_manager:
-        mock_supabase.table.return_value.update.return_value.eq.return_value.execute.return_value = MagicMock()
+    with patch("app.api.config.supabase") as mock_supabase, patch(
+        "app.api.config.cache"
+    ) as mock_cache, patch("app.api.config.bot_manager") as mock_bot_manager:
+        mock_supabase.table.return_value.update.return_value.eq.return_value.execute.return_value = (
+            MagicMock()
+        )
 
         running_bot = MagicMock()
         running_bot.is_running = True
         mock_bot_manager._bots = {mock_auth["id"]: running_bot}
 
-        response = client.put("/api/v1/config/update", json={"auto_execute_signals": False})
+        response = client.put(
+            "/api/v1/config/update", json={"auto_execute_signals": False}
+        )
 
         assert response.status_code == 200
         running_bot.set_auto_execute_signals.assert_called_once_with(False)
 
+
 # --- MONITOR API TESTS ---
+
 
 def test_monitor_performance(mock_auth):
     with patch("app.api.monitor.bot_manager") as mock_manager:
@@ -258,12 +316,12 @@ def test_monitor_performance(mock_auth):
             "uptime_seconds": 3600,
             "cycles_completed": 50,
             "total_trades": 10,
-            "total_pnl": 100.0
+            "total_pnl": 100.0,
         }
         mock_bot.state.get_statistics.return_value = {"win_rate": 80.0}
-        
+
         mock_manager.get_bot.return_value = mock_bot
-        
+
         response = client.get("/api/v1/monitor/performance")
         assert response.status_code == 200
         assert response.json()["error_rate"] == 5.0
@@ -307,11 +365,12 @@ def test_monitor_performance_includes_scalping_gate_metrics(mock_auth):
         assert data["scalping_opportunity_rate_pct"] == 4.0
         assert data["scalping_gate_counters"]["gate_2_trend:no_fresh_crossover"] == 40
 
+
 def test_monitor_logs(mock_auth):
-    with patch("app.api.monitor.os.path.exists", return_value=True), \
-         patch("builtins.open") as mock_open, \
-         patch("app.api.monitor.bot_manager") as mock_manager:
-        
+    with patch("app.api.monitor.os.path.exists", return_value=True), patch(
+        "builtins.open"
+    ) as mock_open, patch("app.api.monitor.bot_manager") as mock_manager:
+
         mock_file = MagicMock()
         mock_file.__enter__.return_value.readlines.return_value = [
             "2026-02-20 20:00:00 | INFO | [u123] Test log line\n"
@@ -319,9 +378,9 @@ def test_monitor_logs(mock_auth):
         mock_open.return_value = mock_file
         mock_manager.get_status.return_value = {
             "is_running": True,
-            "active_strategy": "Conservative"
+            "active_strategy": "Conservative",
         }
-        
+
         response = client.get("/api/v1/monitor/logs?lines=10")
         assert response.status_code == 200
         assert response.json()["running_bot"] == "multiplier"
@@ -339,10 +398,11 @@ def test_monitor_logs_no_running_bot_returns_empty(mock_auth):
 
 
 def test_monitor_logs_reads_profile_strategy_when_bot_not_running(mock_auth):
-    with patch("app.api.monitor.os.path.exists", return_value=True), \
-         patch("builtins.open") as mock_open, \
-         patch("app.api.monitor.bot_manager") as mock_manager, \
-         patch("app.api.monitor.supabase") as mock_supabase:
+    with patch("app.api.monitor.os.path.exists", return_value=True), patch(
+        "builtins.open"
+    ) as mock_open, patch("app.api.monitor.bot_manager") as mock_manager, patch(
+        "app.api.monitor.supabase"
+    ) as mock_supabase:
         mock_file = MagicMock()
         mock_file.__enter__.return_value.readlines.return_value = [
             "2026-02-20 20:00:00 | INFO | [u123] Profile-strategy log line\n"
@@ -350,12 +410,7 @@ def test_monitor_logs_reads_profile_strategy_when_bot_not_running(mock_auth):
         mock_open.return_value = mock_file
         mock_manager.get_status.return_value = {"is_running": False}
         (
-            mock_supabase.table.return_value
-            .select.return_value
-            .eq.return_value
-            .limit.return_value
-            .execute.return_value
-            .data
+            mock_supabase.table.return_value.select.return_value.eq.return_value.limit.return_value.execute.return_value.data
         ) = [{"active_strategy": "Scalping"}]
 
         response = client.get("/api/v1/monitor/logs?lines=10")
@@ -369,9 +424,9 @@ def test_monitor_logs_reads_profile_strategy_when_bot_not_running(mock_auth):
 
 
 def test_monitor_logs_filters_decorative_lines(mock_auth):
-    with patch("app.api.monitor.os.path.exists", return_value=True), \
-         patch("builtins.open") as mock_open, \
-         patch("app.api.monitor.bot_manager") as mock_manager:
+    with patch("app.api.monitor.os.path.exists", return_value=True), patch(
+        "builtins.open"
+    ) as mock_open, patch("app.api.monitor.bot_manager") as mock_manager:
         mock_file = MagicMock()
         mock_file.__enter__.return_value.readlines.return_value = [
             "2026-02-21 13:10:36 | INFO | [u123] ============================================================\n",
@@ -380,7 +435,7 @@ def test_monitor_logs_filters_decorative_lines(mock_auth):
         mock_open.return_value = mock_file
         mock_manager.get_status.return_value = {
             "is_running": True,
-            "active_strategy": "Conservative"
+            "active_strategy": "Conservative",
         }
 
         response = client.get("/api/v1/monitor/logs?lines=10")
@@ -397,9 +452,9 @@ def test_monitor_logs_uses_user_specific_file_first(mock_auth):
         normalized = str(path).replace("\\", "/")
         return normalized == expected_path
 
-    with patch("app.api.monitor.os.path.exists", side_effect=_exists), \
-         patch("builtins.open") as mock_open, \
-         patch("app.api.monitor.bot_manager") as mock_manager:
+    with patch("app.api.monitor.os.path.exists", side_effect=_exists), patch(
+        "builtins.open"
+    ) as mock_open, patch("app.api.monitor.bot_manager") as mock_manager:
         mock_file = MagicMock()
         mock_file.__enter__.return_value.readlines.return_value = [
             "2026-02-21 13:10:36 | INFO | [conservative] [u123] User file line\n",
@@ -423,9 +478,9 @@ def test_monitor_logs_normalizes_lowercase_scalping_strategy(mock_auth):
         normalized = str(path).replace("\\", "/")
         return normalized == expected_path
 
-    with patch("app.api.monitor.os.path.exists", side_effect=_exists), \
-         patch("builtins.open") as mock_open, \
-         patch("app.api.monitor.bot_manager") as mock_manager:
+    with patch("app.api.monitor.os.path.exists", side_effect=_exists), patch(
+        "builtins.open"
+    ) as mock_open, patch("app.api.monitor.bot_manager") as mock_manager:
         mock_file = MagicMock()
         mock_file.__enter__.return_value.readlines.return_value = [
             "2026-02-21 13:10:36 | INFO | [scalping] [u123] User file line\n",
@@ -461,9 +516,9 @@ def test_monitor_logs_falls_back_when_user_file_is_empty(mock_auth):
             ]
         return mock_file
 
-    with patch("app.api.monitor.os.path.exists", side_effect=_exists), \
-         patch("builtins.open", side_effect=_open) as mock_open, \
-         patch("app.api.monitor.bot_manager") as mock_manager:
+    with patch("app.api.monitor.os.path.exists", side_effect=_exists), patch(
+        "builtins.open", side_effect=_open
+    ) as mock_open, patch("app.api.monitor.bot_manager") as mock_manager:
         mock_manager.get_status.return_value = {
             "is_running": True,
             "active_strategy": "Scalping",
@@ -473,14 +528,16 @@ def test_monitor_logs_falls_back_when_user_file_is_empty(mock_auth):
         assert response.status_code == 200
         assert len(response.json()["logs"]) == 1
         assert "Fallback file line" in response.json()["logs"][0]
-        opened_paths = [str(c.args[0]).replace("\\", "/") for c in mock_open.call_args_list]
+        opened_paths = [
+            str(c.args[0]).replace("\\", "/") for c in mock_open.call_args_list
+        ]
         assert opened_paths == [primary_path, fallback_path]
 
 
 def test_monitor_logs_repairs_mojibake_lines(mock_auth):
-    with patch("app.api.monitor.os.path.exists", return_value=True), \
-         patch("builtins.open") as mock_open, \
-         patch("app.api.monitor.bot_manager") as mock_manager:
+    with patch("app.api.monitor.os.path.exists", return_value=True), patch(
+        "builtins.open"
+    ) as mock_open, patch("app.api.monitor.bot_manager") as mock_manager:
         mock_file = MagicMock()
         mock_file.__enter__.return_value.readlines.return_value = [
             "2026-02-23 08:21:34 | INFO | [u123] \u00e2\u0153\u2026 Trade Engine connected to Deriv API\n",
