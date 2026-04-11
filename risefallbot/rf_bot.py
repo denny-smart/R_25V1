@@ -34,6 +34,7 @@ from app.core.deriv_api_key_crypto import (
 # Try to import telegram notifier
 try:
     from telegram_notifier import notifier
+
     TELEGRAM_ENABLED = True
 except ImportError:
     TELEGRAM_ENABLED = False
@@ -70,7 +71,9 @@ def _set_task_for_user(user_id: Optional[str], task: asyncio.Task) -> None:
         _bot_task_by_user[key] = task
 
 
-def _clear_task_for_user(user_id: Optional[str], task: Optional[asyncio.Task] = None) -> None:
+def _clear_task_for_user(
+    user_id: Optional[str], task: Optional[asyncio.Task] = None
+) -> None:
     global _bot_task
     key = _state_key(user_id)
     if key == "__legacy__":
@@ -168,7 +171,9 @@ def _ensure_utf8_stdio() -> None:
 class _SafeConsoleFormatter(logging.Formatter):
     """Console formatter with optional ASCII-only output for stable log sinks."""
 
-    def __init__(self, fmt: str, datefmt: Optional[str] = None, ascii_only: bool = True):
+    def __init__(
+        self, fmt: str, datefmt: Optional[str] = None, ascii_only: bool = True
+    ):
         super().__init__(fmt=fmt, datefmt=datefmt)
         self._ascii_only = ascii_only
 
@@ -196,14 +201,16 @@ def _setup_rf_logger():
 
     rf_root.setLevel(getattr(logging, rf_config.RF_LOG_LEVEL, logging.INFO))
     rf_root.propagate = False  # ← isolate from multiplier bot logs
-    
+
     # Add context filter for user_id injection.
     # IMPORTANT: attach to handlers too, because ancestor logger filters are not
     # applied to records emitted by child loggers.
     try:
         from app.core.logging import ContextInjectingFilter
+
         user_filter = ContextInjectingFilter()
     except Exception:
+
         class _DefaultUserFilter(logging.Filter):
             def filter(self, record):
                 if not hasattr(record, "user_id"):
@@ -225,7 +232,9 @@ def _setup_rf_logger():
     rf_root.addHandler(per_user_handler)
 
     # Console handler (optional — useful during development)
-    console_ascii_only = str(os.getenv("R50_CONSOLE_ASCII_ONLY", "1")).strip().lower() not in {
+    console_ascii_only = str(
+        os.getenv("R50_CONSOLE_ASCII_ONLY", "1")
+    ).strip().lower() not in {
         "0",
         "false",
         "no",
@@ -240,10 +249,11 @@ def _setup_rf_logger():
     ch.setFormatter(console_formatter)
     ch.addFilter(user_filter)
     rf_root.addHandler(ch)
-    
+
     # WebSocket handler (for live dashboard streaming) — added early
     try:
         from app.core.logging import WebSocketLoggingHandler
+
         ws_handler = WebSocketLoggingHandler()
         ws_handler.setFormatter(formatter)
         ws_handler.addFilter(user_filter)
@@ -271,7 +281,10 @@ async def _fetch_user_config(user_id: Optional[str] = None) -> dict:
 
     try:
         from app.core.supabase import supabase
-        base_query = supabase.table("profiles").select("id, deriv_api_key, stake_amount")
+
+        base_query = supabase.table("profiles").select(
+            "id, deriv_api_key, stake_amount"
+        )
         if user_id:
             result = base_query.eq("id", user_id).single().execute()
             row = result.data if isinstance(result.data, dict) else None
@@ -288,7 +301,11 @@ async def _fetch_user_config(user_id: Optional[str] = None) -> dict:
                     if profile_id:
                         try:
                             supabase.table("profiles").update(
-                                {"deriv_api_key": encrypt_deriv_api_key(result_config["api_token"])}
+                                {
+                                    "deriv_api_key": encrypt_deriv_api_key(
+                                        result_config["api_token"]
+                                    )
+                                }
                             ).eq("id", profile_id).execute()
                         except Exception as migration_error:
                             logger.warning(
@@ -298,7 +315,9 @@ async def _fetch_user_config(user_id: Optional[str] = None) -> dict:
                 logger.info("🔑 API token loaded from user profile")
             if row.get("stake_amount") is not None:
                 result_config["stake"] = float(row["stake_amount"])
-                logger.info(f"💵 User stake loaded from profile: ${result_config['stake']}")
+                logger.info(
+                    f"💵 User stake loaded from profile: ${result_config['stake']}"
+                )
     except Exception as e:
         logger.warning(f"⚠️ Could not fetch user config from Supabase: {e}")
 
@@ -308,6 +327,7 @@ async def _fetch_user_config(user_id: Optional[str] = None) -> dict:
 # ═══════════════════════════════════════════════════════════════════════════════
 # Cross-process session lock (Supabase rf_bot_sessions table)
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 async def _acquire_session_lock(user_id: str) -> bool:
     """
@@ -319,7 +339,9 @@ async def _acquire_session_lock(user_id: str) -> bool:
     Guarded by RF_ENFORCE_DB_LOCK — returns True immediately when disabled.
     """
     if not rf_config.RF_ENFORCE_DB_LOCK:
-        logger.info("[RF] DB session lock disabled (RF_ENFORCE_DB_LOCK=False) — skipping")
+        logger.info(
+            "[RF] DB session lock disabled (RF_ENFORCE_DB_LOCK=False) — skipping"
+        )
         return True
 
     if not user_id:
@@ -366,29 +388,36 @@ async def _acquire_session_lock(user_id: str) -> bool:
                     f"(ttl={ttl_seconds}s)"
                 )
 
-        supabase.table("rf_bot_sessions").insert({
-            "user_id": user_id,
-            "started_at": datetime.now().isoformat(),
-            "process_id": os.getpid(),
-        }).execute()
+        supabase.table("rf_bot_sessions").insert(
+            {
+                "user_id": user_id,
+                "started_at": datetime.now().isoformat(),
+                "process_id": os.getpid(),
+            }
+        ).execute()
         logger.info(
             f"[RF] ✅ DB session lock acquired for user={user_id} pid={os.getpid()}"
         )
         return True
     except Exception as e:
         err_str = str(e).lower()
-        if any(x in err_str for x in [
-            "duplicate", "unique", "conflict", "23505",  # duplicate key
-            "invalid input syntax", "uuid",               # malformed UUID
-        ]):
+        if any(
+            x in err_str
+            for x in [
+                "duplicate",
+                "unique",
+                "conflict",
+                "23505",  # duplicate key
+                "invalid input syntax",
+                "uuid",  # malformed UUID
+            ]
+        ):
             logger.warning(
                 f"[RF] ⛔ DB session lock DENIED for user={user_id} — "
                 f"another instance is already running or invalid user_id: {e}"
             )
         else:
-            logger.error(
-                f"[RF] ❌ DB session lock error for user={user_id}: {e}"
-            )
+            logger.error(f"[RF] ❌ DB session lock error for user={user_id}: {e}")
         return False
 
 
@@ -402,12 +431,13 @@ async def _release_session_lock(user_id: str) -> None:
 
     try:
         from app.core.supabase import supabase
-        supabase.table("rf_bot_sessions").delete().eq(
-            "user_id", user_id
-        ).execute()
+
+        supabase.table("rf_bot_sessions").delete().eq("user_id", user_id).execute()
         logger.info(f"[RF] 🔓 DB session lock released for user={user_id}")
     except Exception as e:
-        logger.error(f"[RF] ❌ Failed to release DB session lock for user={user_id}: {e}")
+        logger.error(
+            f"[RF] ❌ Failed to release DB session lock for user={user_id}: {e}"
+        )
 
 
 async def _refresh_session_lock(user_id: str) -> None:
@@ -420,33 +450,42 @@ async def _refresh_session_lock(user_id: str) -> None:
 
     try:
         from app.core.supabase import supabase
-        supabase.table("rf_bot_sessions").update({
-            "started_at": datetime.now().isoformat(),
-            "process_id": os.getpid(),
-        }).eq("user_id", user_id).execute()
+
+        supabase.table("rf_bot_sessions").update(
+            {
+                "started_at": datetime.now().isoformat(),
+                "process_id": os.getpid(),
+            }
+        ).eq("user_id", user_id).execute()
     except Exception as e:
-        logger.warning(f"[RF] ⚠️ Failed to refresh DB session lock for user={user_id}: {e}")
+        logger.warning(
+            f"[RF] ⚠️ Failed to refresh DB session lock for user={user_id}: {e}"
+        )
 
 
-async def run(stake: Optional[float] = None, api_token: Optional[str] = None,
-              user_id: Optional[str] = None):
+async def run(
+    stake: Optional[float] = None,
+    api_token: Optional[str] = None,
+    user_id: Optional[str] = None,
+):
     """
     Main Rise/Fall bot entry point.
-    
+
     Args:
         stake: User stake amount. If None, fetches from Supabase profiles table.
         api_token: Deriv API token. If None, fetches from Supabase profiles table.
         user_id: User ID for event broadcasting and DB persistence.
-    
+
     - Creates its own DataFetcher (reuses the class, own WS connection)
     - Creates its own RFTradeEngine (independent WS connection)
     - Loops: fetch 1m candles → analyse → risk check → execute (strict 6-step lifecycle)
-    
+
     CRITICAL: Prevents duplicate instances per user/task key.
     Different users can run concurrently; same user is guarded.
     """
     # Set logging context first so all startup logs route to the correct user file.
     from app.core.context import user_id_var, bot_type_var
+
     user_id_var.set(user_id)
     bot_type_var.set("risefall")
 
@@ -468,7 +507,7 @@ async def run(stake: Optional[float] = None, api_token: Optional[str] = None,
     if current_task:
         _set_task_for_user(user_id, current_task)
     logger.info(f"[RF] ✅ Registered bot task for user={user_id}: {current_task}")
-    
+
     # Lazy import to avoid circular imports at module level
     from app.bot.events import event_manager
     from app.services.trades_service import UserTradesService
@@ -484,20 +523,26 @@ async def run(stake: Optional[float] = None, api_token: Optional[str] = None,
         api_token = user_cfg["api_token"]
 
     if not api_token:
-        logger.error("❌ No API token found (profile or DERIV_API_TOKEN env) — cannot start Rise/Fall bot")
-        await event_manager.broadcast({
-            "type": "error",
-            "message": "Rise/Fall startup failed: missing API token",
-            "timestamp": datetime.now().isoformat(),
-            "account_id": user_id,
-        })
-        await event_manager.broadcast({
-            "type": "bot_status",
-            "status": "stopped",
-            "message": "Rise/Fall bot not started: missing API token",
-            "timestamp": datetime.now().isoformat(),
-            "account_id": user_id,
-        })
+        logger.error(
+            "❌ No API token found (profile or DERIV_API_TOKEN env) — cannot start Rise/Fall bot"
+        )
+        await event_manager.broadcast(
+            {
+                "type": "error",
+                "message": "Rise/Fall startup failed: missing API token",
+                "timestamp": datetime.now().isoformat(),
+                "account_id": user_id,
+            }
+        )
+        await event_manager.broadcast(
+            {
+                "type": "bot_status",
+                "status": "stopped",
+                "message": "Rise/Fall bot not started: missing API token",
+                "timestamp": datetime.now().isoformat(),
+                "account_id": user_id,
+            }
+        )
         _clear_task_for_user(user_id, current_task)
         return
 
@@ -510,37 +555,45 @@ async def run(stake: Optional[float] = None, api_token: Optional[str] = None,
     # --- Connect ---
     if not await data_fetcher.connect():
         logger.error("❌ DataFetcher connection failed — aborting")
-        await event_manager.broadcast({
-            "type": "error",
-            "message": "Rise/Fall startup failed: market data connection failed",
-            "timestamp": datetime.now().isoformat(),
-            "account_id": user_id,
-        })
-        await event_manager.broadcast({
-            "type": "bot_status",
-            "status": "stopped",
-            "message": "Rise/Fall bot not started: data connection failed",
-            "timestamp": datetime.now().isoformat(),
-            "account_id": user_id,
-        })
+        await event_manager.broadcast(
+            {
+                "type": "error",
+                "message": "Rise/Fall startup failed: market data connection failed",
+                "timestamp": datetime.now().isoformat(),
+                "account_id": user_id,
+            }
+        )
+        await event_manager.broadcast(
+            {
+                "type": "bot_status",
+                "status": "stopped",
+                "message": "Rise/Fall bot not started: data connection failed",
+                "timestamp": datetime.now().isoformat(),
+                "account_id": user_id,
+            }
+        )
         _clear_task_for_user(user_id, current_task)
         return
     if not await trade_engine.connect():
         logger.error("❌ RFTradeEngine connection failed — aborting")
         await data_fetcher.disconnect()
-        await event_manager.broadcast({
-            "type": "error",
-            "message": "Rise/Fall startup failed: trade engine connection failed",
-            "timestamp": datetime.now().isoformat(),
-            "account_id": user_id,
-        })
-        await event_manager.broadcast({
-            "type": "bot_status",
-            "status": "stopped",
-            "message": "Rise/Fall bot not started: trade engine connection failed",
-            "timestamp": datetime.now().isoformat(),
-            "account_id": user_id,
-        })
+        await event_manager.broadcast(
+            {
+                "type": "error",
+                "message": "Rise/Fall startup failed: trade engine connection failed",
+                "timestamp": datetime.now().isoformat(),
+                "account_id": user_id,
+            }
+        )
+        await event_manager.broadcast(
+            {
+                "type": "bot_status",
+                "status": "stopped",
+                "message": "Rise/Fall bot not started: trade engine connection failed",
+                "timestamp": datetime.now().isoformat(),
+                "account_id": user_id,
+            }
+        )
         _clear_task_for_user(user_id, current_task)
         return
 
@@ -551,8 +604,8 @@ async def run(stake: Optional[float] = None, api_token: Optional[str] = None,
         if TELEGRAM_ENABLED:
             try:
                 await notifier.notify_bot_started(
-                    balance, 
-                    stake, 
+                    balance,
+                    stake,
                     "Rise/Fall Scalping",
                     symbol_count=len(rf_config.RF_SYMBOLS),
                 )
@@ -612,31 +665,35 @@ async def run(stake: Optional[float] = None, api_token: Optional[str] = None,
             )
 
     # Broadcast bot_status → running with all fields the frontend expects
-    await event_manager.broadcast({
-        "type": "bot_status",
-        "status": "running",
-        "active_strategy": "RiseFall",
-        "stake_amount": stake,
-        "uptime_seconds": 0,
-        "balance": _current_balance,
-        "active_positions": 0,
-        "win_rate": 0,
-        "trades_today": 0,
-        "profit": 0,
-        "message": f"Rise/Fall bot started – scanning {len(rf_config.RF_SYMBOLS)} symbols",
-        "symbols": rf_config.RF_SYMBOLS,
-        "account_id": user_id,
-    })
+    await event_manager.broadcast(
+        {
+            "type": "bot_status",
+            "status": "running",
+            "active_strategy": "RiseFall",
+            "stake_amount": stake,
+            "uptime_seconds": 0,
+            "balance": _current_balance,
+            "active_positions": 0,
+            "win_rate": 0,
+            "trades_today": 0,
+            "profit": 0,
+            "message": f"Rise/Fall bot started – scanning {len(rf_config.RF_SYMBOLS)} symbols",
+            "symbols": rf_config.RF_SYMBOLS,
+            "account_id": user_id,
+        }
+    )
 
     # Broadcast initial statistics
     initial_stats = risk_manager.get_statistics()
-    await event_manager.broadcast({
-        "type": "statistics",
-        "stats": initial_stats,
-        "strategy": "RiseFall",
-        "timestamp": datetime.now().isoformat(),
-        "account_id": user_id,
-    })
+    await event_manager.broadcast(
+        {
+            "type": "statistics",
+            "stats": initial_stats,
+            "strategy": "RiseFall",
+            "timestamp": datetime.now().isoformat(),
+            "account_id": user_id,
+        }
+    )
 
     try:
         while _is_running_for_user(user_id):
@@ -652,14 +709,19 @@ async def run(stake: Optional[float] = None, api_token: Optional[str] = None,
             # Runs every cycle so it fires even when no new trade is being acquired
             # PRIORITY 4 FIX: Guard with datetime.min check to prevent false trigger on startup
             # ─────────────────────────────────────────────────────────────────────
-            if risk_manager.trade_mutex.locked() and len(risk_manager.active_trades) == 0:
+            if (
+                risk_manager.trade_mutex.locked()
+                and len(risk_manager.active_trades) == 0
+            ):
                 # _pending_entry_timestamp initializes to datetime.min, which would cause
                 # elapsed time to be astronomically large and trigger false watchdog on startup
                 if risk_manager._pending_entry_timestamp != datetime.min:
-                    elapsed = (datetime.now() - risk_manager._pending_entry_timestamp).total_seconds()
+                    elapsed = (
+                        datetime.now() - risk_manager._pending_entry_timestamp
+                    ).total_seconds()
                 else:
                     elapsed = 0.0
-                
+
                 if elapsed > rf_config.RF_PENDING_TIMEOUT_SECONDS:
                     logger.warning(
                         f"[RF] ⚠️ WATCHDOG: Mutex held for {elapsed:.0f}s with no active trades — "
@@ -671,7 +733,9 @@ async def run(stake: Optional[float] = None, api_token: Optional[str] = None,
                     risk_manager._locked_trade_info = {}
                     if risk_manager.is_halted():
                         risk_manager.clear_halt()
-                    logger.info("[RF] ✅ WATCHDOG RECOVERY COMPLETE: Ghost lock released — resuming scan")
+                    logger.info(
+                        "[RF] ✅ WATCHDOG RECOVERY COMPLETE: Ghost lock released — resuming scan"
+                    )
 
             # ─────────────────────────────────────────────────────────────
             # AUTO-RECOVERY: If halted and no active trades, auto-clear halt
@@ -684,13 +748,15 @@ async def run(stake: Optional[float] = None, api_token: Optional[str] = None,
                     f"Clearing halt and resuming. Reason was: {risk_manager._halt_reason}"
                 )
                 risk_manager.clear_halt()
-                await event_manager.broadcast({
-                    "type": "bot_status",
-                    "status": "running",
-                    "message": "🔄 System recovered from halt — resuming normal operation",
-                    "timestamp": datetime.now().isoformat(),
-                    "account_id": user_id,
-                })
+                await event_manager.broadcast(
+                    {
+                        "type": "bot_status",
+                        "status": "running",
+                        "message": "🔄 System recovered from halt — resuming normal operation",
+                        "timestamp": datetime.now().isoformat(),
+                        "account_id": user_id,
+                    }
+                )
 
             # ═══════════════════════════════════════════════════════════
             # MUTEX-LEVEL CHECK: If the trade lock is held, the scan
@@ -698,7 +764,9 @@ async def run(stake: Optional[float] = None, api_token: Optional[str] = None,
             # asyncio.Lock prevents any race condition.
             # ═══════════════════════════════════════════════════════════
             if risk_manager.is_halted():
-                elapsed = (datetime.now() - risk_manager._halt_timestamp).total_seconds()
+                elapsed = (
+                    datetime.now() - risk_manager._halt_timestamp
+                ).total_seconds()
                 logger.error(
                     f"[RF] 🚨 SYSTEM HALTED — no scanning until halt is cleared | "
                     f"Reason: {risk_manager._halt_reason} | "
@@ -715,16 +783,18 @@ async def run(stake: Optional[float] = None, api_token: Optional[str] = None,
                     severity="error",
                     min_interval_seconds=10,
                 )
-                await event_manager.broadcast({
-                    "type": "bot_status",
-                    "status": "running",
-                    "message": (
-                        f"🚨 SYSTEM LOCKED: {risk_manager._halt_reason}. "
-                        "Scanning paused until lock clears."
-                    ),
-                    "timestamp": datetime.now().isoformat(),
-                    "account_id": user_id,
-                })
+                await event_manager.broadcast(
+                    {
+                        "type": "bot_status",
+                        "status": "running",
+                        "message": (
+                            f"🚨 SYSTEM LOCKED: {risk_manager._halt_reason}. "
+                            "Scanning paused until lock clears."
+                        ),
+                        "timestamp": datetime.now().isoformat(),
+                        "account_id": user_id,
+                    }
+                )
             elif risk_manager.is_trade_active():
                 active_info = risk_manager.get_active_trade_info()
                 active_symbol = active_info.get("symbol", "unknown")
@@ -764,10 +834,12 @@ async def run(stake: Optional[float] = None, api_token: Optional[str] = None,
                     details={"cycle": cycle, "symbols": len(rf_config.RF_SYMBOLS)},
                     min_interval_seconds=0,
                 )
-                
+
                 async def _process_symbol_safe(symbol: str):
                     try:
-                        logger.info(f"[RF][{symbol}] SCAN | Checking trading opportunities")
+                        logger.info(
+                            f"[RF][{symbol}] SCAN | Checking trading opportunities"
+                        )
                         await _process_symbol(
                             symbol,
                             strategy,
@@ -789,7 +861,6 @@ async def run(stake: Optional[float] = None, api_token: Optional[str] = None,
                 if tasks:
                     await asyncio.gather(*tasks)
 
-
             # Log summary
             stats = risk_manager.get_statistics()
             logger.debug(
@@ -801,12 +872,14 @@ async def run(stake: Optional[float] = None, api_token: Optional[str] = None,
             )
 
             # Broadcast statistics after each cycle
-            await event_manager.broadcast({
-                "type": "statistics",
-                "stats": stats,
-                "timestamp": datetime.now().isoformat(),
-                "account_id": user_id,
-            })
+            await event_manager.broadcast(
+                {
+                    "type": "statistics",
+                    "stats": stats,
+                    "timestamp": datetime.now().isoformat(),
+                    "account_id": user_id,
+                }
+            )
 
             # Refresh balance periodically
             try:
@@ -818,19 +891,21 @@ async def run(stake: Optional[float] = None, api_token: Optional[str] = None,
 
             # Broadcast periodic bot_status so dashboard updates uptime/balance
             uptime_secs = int((datetime.now() - _start_time).total_seconds())
-            await event_manager.broadcast({
-                "type": "bot_status",
-                "status": "running",
-                "active_strategy": "RiseFall",
-                "stake_amount": stake,
-                "uptime_seconds": uptime_secs,
-                "balance": _current_balance,
-                "active_positions": stats.get('active_positions', 0),
-                "win_rate": stats.get('win_rate', 0),
-                "trades_today": stats.get('trades_today', 0),
-                "profit": stats.get('total_pnl', 0),
-                "account_id": user_id,
-            })
+            await event_manager.broadcast(
+                {
+                    "type": "bot_status",
+                    "status": "running",
+                    "active_strategy": "RiseFall",
+                    "stake_amount": stake,
+                    "uptime_seconds": uptime_secs,
+                    "balance": _current_balance,
+                    "active_positions": stats.get("active_positions", 0),
+                    "win_rate": stats.get("win_rate", 0),
+                    "trades_today": stats.get("trades_today", 0),
+                    "profit": stats.get("total_pnl", 0),
+                    "account_id": user_id,
+                }
+            )
 
             await asyncio.sleep(rf_config.RF_SCAN_INTERVAL)
 
@@ -838,12 +913,14 @@ async def run(stake: Optional[float] = None, api_token: Optional[str] = None,
         logger.info("🛑 Rise/Fall bot cancelled")
     except Exception as e:
         logger.error(f"❌ Rise/Fall bot fatal error: {e}")
-        await event_manager.broadcast({
-            "type": "error",
-            "message": f"Rise/Fall fatal error: {e}",
-            "timestamp": datetime.now().isoformat(),
-            "account_id": user_id,
-        })
+        await event_manager.broadcast(
+            {
+                "type": "error",
+                "message": f"Rise/Fall fatal error: {e}",
+                "timestamp": datetime.now().isoformat(),
+                "account_id": user_id,
+            }
+        )
     finally:
         _set_running_for_user(user_id, False)
         _clear_task_for_user(user_id, asyncio.current_task())
@@ -868,6 +945,7 @@ async def run(stake: Optional[float] = None, api_token: Optional[str] = None,
             if user_id:
                 try:
                     from app.services.trades_service import UserTradesService
+
                     emergency_record = {
                         "contract_id": emergency_cid,
                         "symbol": emergency_sym,
@@ -916,13 +994,15 @@ async def run(stake: Optional[float] = None, api_token: Optional[str] = None,
                 logger.error(f"❌ Telegram notification failed: {e}")
 
         # Broadcast bot_status → stopped
-        await event_manager.broadcast({
-            "type": "bot_status",
-            "status": "stopped",
-            "message": stop_message,
-            "timestamp": datetime.now().isoformat(),
-            "account_id": user_id,
-        })
+        await event_manager.broadcast(
+            {
+                "type": "bot_status",
+                "status": "stopped",
+                "message": stop_message,
+                "timestamp": datetime.now().isoformat(),
+                "account_id": user_id,
+            }
+        )
 
 
 def stop(user_id: Optional[str] = None):
@@ -1097,7 +1177,9 @@ async def _process_symbol(
         try:
             risk_manager.note_qualifying_signal(symbol, signal)
         except Exception as exc:
-            logger.warning(f"[RF][{symbol}] Failed to register qualifying signal: {exc}")
+            logger.warning(
+                f"[RF][{symbol}] Failed to register qualifying signal: {exc}"
+            )
 
     direction = signal["direction"]
     stake_val = signal["stake"]
@@ -1193,14 +1275,16 @@ async def _process_symbol(
         return
 
     try:
-        await event_manager.broadcast({
-            "type": "signal",
-            "symbol": symbol,
-            "signal": direction,
-            "strategy": "RiseFall",
-            "timestamp": datetime.now().isoformat(),
-            "account_id": user_id,
-        })
+        await event_manager.broadcast(
+            {
+                "type": "signal",
+                "symbol": symbol,
+                "signal": direction,
+                "strategy": "RiseFall",
+                "timestamp": datetime.now().isoformat(),
+                "account_id": user_id,
+            }
+        )
 
         if TELEGRAM_ENABLED:
             try:
@@ -1266,12 +1350,14 @@ async def _process_symbol(
                 min_interval_seconds=0,
             )
             risk_manager.halt(f"Trade execution failed for {symbol} {direction}")
-            await event_manager.broadcast({
-                "type": "error",
-                "message": f"Trade execution failed for {symbol} - system halted",
-                "timestamp": datetime.now().isoformat(),
-                "account_id": user_id,
-            })
+            await event_manager.broadcast(
+                {
+                    "type": "error",
+                    "message": f"Trade execution failed for {symbol} - system halted",
+                    "timestamp": datetime.now().isoformat(),
+                    "account_id": user_id,
+                }
+            )
             return
 
         contract_id = result["contract_id"]
@@ -1282,32 +1368,38 @@ async def _process_symbol(
 
         risk_manager._locked_trade_info = {"contract_id": contract_id, "symbol": symbol}
 
-        risk_manager.record_trade_open({
-            "contract_id": contract_id,
-            "symbol": symbol,
-            "direction": direction,
-            "stake": stake_val,
-        })
+        risk_manager.record_trade_open(
+            {
+                "contract_id": contract_id,
+                "symbol": symbol,
+                "direction": direction,
+                "stake": stake_val,
+            }
+        )
 
-        await event_manager.broadcast({
-            "type": "trade_lock_active",
-            "symbol": symbol,
-            "contract_id": contract_id,
-            "message": f"Trade LOCKED on {symbol} - full lifecycle active",
-            "timestamp": datetime.now().isoformat(),
-            "account_id": user_id,
-        })
+        await event_manager.broadcast(
+            {
+                "type": "trade_lock_active",
+                "symbol": symbol,
+                "contract_id": contract_id,
+                "message": f"Trade LOCKED on {symbol} - full lifecycle active",
+                "timestamp": datetime.now().isoformat(),
+                "account_id": user_id,
+            }
+        )
 
-        await event_manager.broadcast({
-            "type": "trade_opened",
-            "symbol": symbol,
-            "direction": direction,
-            "stake": stake_val,
-            "contract_id": contract_id,
-            "strategy": "RiseFall",
-            "timestamp": datetime.now().isoformat(),
-            "account_id": user_id,
-        })
+        await event_manager.broadcast(
+            {
+                "type": "trade_opened",
+                "symbol": symbol,
+                "direction": direction,
+                "stake": stake_val,
+                "contract_id": contract_id,
+                "strategy": "RiseFall",
+                "timestamp": datetime.now().isoformat(),
+                "account_id": user_id,
+            }
+        )
 
         if TELEGRAM_ENABLED:
             try:
@@ -1350,23 +1442,27 @@ async def _process_symbol(
             pnl = settlement["profit"]
             status = settlement["status"]
             closure_reason = settlement.get("closure_type", "unknown")
-            risk_manager.record_trade_closed({
-                "contract_id": contract_id,
-                "profit": pnl,
-                "status": status,
-                "symbol": symbol,
-            })
+            risk_manager.record_trade_closed(
+                {
+                    "contract_id": contract_id,
+                    "profit": pnl,
+                    "status": status,
+                    "symbol": symbol,
+                }
+            )
         else:
             logger.warning(f"[RF][{symbol}] Settlement unknown for #{contract_id}")
             pnl = -stake_val
             status = "loss"
             closure_reason = "settlement_unknown"
-            risk_manager.record_trade_closed({
-                "contract_id": contract_id,
-                "profit": pnl,
-                "status": status,
-                "symbol": symbol,
-            })
+            risk_manager.record_trade_closed(
+                {
+                    "contract_id": contract_id,
+                    "profit": pnl,
+                    "status": status,
+                    "symbol": symbol,
+                }
+            )
 
         logger.info(
             f"[RF] CLOSING | contract={contract_id} symbol={symbol} "
@@ -1406,7 +1502,9 @@ async def _process_symbol(
                 UserTradesService=UserTradesService,
             )
         else:
-            logger.warning("[RF] No user_id - skipping DB write (trade lock will release)")
+            logger.warning(
+                "[RF] No user_id - skipping DB write (trade lock will release)"
+            )
             db_write_success = True
 
         if not db_write_success:
@@ -1414,28 +1512,66 @@ async def _process_symbol(
                 f"DB write failed for contract {contract_id} after "
                 f"{rf_config.RF_DB_WRITE_MAX_RETRIES} retries"
             )
-            await event_manager.broadcast({
-                "type": "error",
-                "message": (
-                    f"SYSTEM HALTED: DB write failed for {symbol}#{contract_id}. "
-                    f"Trade lock held. Manual intervention required."
-                ),
-                "timestamp": datetime.now().isoformat(),
-                "account_id": user_id,
-            })
+            await event_manager.broadcast(
+                {
+                    "type": "error",
+                    "message": (
+                        f"SYSTEM HALTED: DB write failed for {symbol}#{contract_id}. "
+                        f"Trade lock held. Manual intervention required."
+                    ),
+                    "timestamp": datetime.now().isoformat(),
+                    "account_id": user_id,
+                }
+            )
             return
 
-        await event_manager.broadcast({
-            "type": "trade_closed",
-            "symbol": symbol,
-            "contract_id": contract_id,
-            "pnl": pnl,
-            "status": status,
-            "strategy": "RiseFall",
-            "closure_reason": closure_reason,
-            "timestamp": datetime.now().isoformat(),
-            "account_id": user_id,
-        })
+        stats = risk_manager.get_statistics()
+        try:
+            fresh_balance = await data_fetcher.get_balance()
+        except Exception:
+            fresh_balance = None
+
+        await event_manager.broadcast(
+            {
+                "type": "trade_closed",
+                "symbol": symbol,
+                "contract_id": contract_id,
+                "pnl": pnl,
+                "status": status,
+                "strategy": "RiseFall",
+                "closure_reason": closure_reason,
+                "balance": fresh_balance,
+                "active_positions": stats.get("active_positions", 0),
+                "statistics": stats,
+                "timestamp": datetime.now().isoformat(),
+                "account_id": user_id,
+            }
+        )
+        await event_manager.broadcast(
+            {
+                "type": "statistics",
+                "stats": stats,
+                "timestamp": datetime.now().isoformat(),
+                "account_id": user_id,
+            }
+        )
+        await event_manager.broadcast(
+            {
+                "type": "bot_status",
+                "status": "running",
+                "active_strategy": "RiseFall",
+                "stake_amount": stake,
+                "balance": fresh_balance,
+                "active_positions": stats.get("active_positions", 0),
+                "win_rate": stats.get("win_rate", 0),
+                "trades_today": stats.get("trades_today", stats.get("total_trades", 0)),
+                "profit": stats.get("total_pnl", 0),
+                "pnl": stats.get("total_pnl", 0),
+                "statistics": stats,
+                "timestamp": datetime.now().isoformat(),
+                "account_id": user_id,
+            }
+        )
         await _broadcast_rf_decision(
             event_manager=event_manager,
             user_id=user_id,
@@ -1458,49 +1594,59 @@ async def _process_symbol(
                     "status": status,
                     "profit": pnl,
                     "contract_id": contract_id,
-                    "current_price": settlement.get("sell_price", 0) if settlement else 0,
+                    "current_price": (
+                        settlement.get("sell_price", 0) if settlement else 0
+                    ),
                     "duration": signal.get("duration", 0),
                     "exit_reason": closure_reason,
                     "strategy_type": "RiseFall",
                     "user_id": user_id,
                     "execution_reason": execution_reason,
                 }
-                await notifier.notify_trade_closed(result_info, {
-                    "symbol": symbol,
-                    "direction": direction,
-                    "stake": stake_val,
-                    "duration": signal.get("duration", 0),
-                    "duration_unit": signal.get("duration_unit"),
-                    "strategy_type": "RiseFall",
-                    "user_id": user_id,
-                    "execution_reason": execution_reason,
-                    "closure_reason": closure_reason,
-                }, strategy_type="RiseFall")
+                await notifier.notify_trade_closed(
+                    result_info,
+                    {
+                        "symbol": symbol,
+                        "direction": direction,
+                        "stake": stake_val,
+                        "duration": signal.get("duration", 0),
+                        "duration_unit": signal.get("duration_unit"),
+                        "strategy_type": "RiseFall",
+                        "user_id": user_id,
+                        "execution_reason": execution_reason,
+                        "closure_reason": closure_reason,
+                    },
+                    strategy_type="RiseFall",
+                )
             except Exception as e:
                 logger.error(f"Telegram notification failed: {e}")
 
         if closure_reason == "manual":
-            await event_manager.broadcast({
-                "type": "notification",
-                "level": "warning",
-                "title": "Manual Trade Close Detected",
-                "message": (
-                    f"{symbol} contract #{contract_id} was manually closed on Deriv. "
-                    f"Trade has been recorded in DB. P&L: ${pnl:.2f}"
-                ),
-                "timestamp": datetime.now().isoformat(),
-                "account_id": user_id,
-            })
+            await event_manager.broadcast(
+                {
+                    "type": "notification",
+                    "level": "warning",
+                    "title": "Manual Trade Close Detected",
+                    "message": (
+                        f"{symbol} contract #{contract_id} was manually closed on Deriv. "
+                        f"Trade has been recorded in DB. P&L: ${pnl:.2f}"
+                    ),
+                    "timestamp": datetime.now().isoformat(),
+                    "account_id": user_id,
+                }
+            )
 
         notification_type = "success" if pnl > 0 else "error" if pnl < 0 else "info"
-        await event_manager.broadcast({
-            "type": "notification",
-            "level": notification_type,
-            "title": f"RF Trade {status.title()}",
-            "message": f"{symbol} Rise/Fall trade closed. P&L: ${pnl:.2f}",
-            "timestamp": datetime.now().isoformat(),
-            "account_id": user_id,
-        })
+        await event_manager.broadcast(
+            {
+                "type": "notification",
+                "level": notification_type,
+                "title": f"RF Trade {status.title()}",
+                "message": f"{symbol} Rise/Fall trade closed. P&L: ${pnl:.2f}",
+                "timestamp": datetime.now().isoformat(),
+                "account_id": user_id,
+            }
+        )
 
     except Exception as e:
         logger.error(f"[RF][{symbol}] Lifecycle error: {e}")
@@ -1515,23 +1661,28 @@ async def _process_symbol(
             min_interval_seconds=0,
         )
         risk_manager.halt(f"Unexpected lifecycle error: {e}")
-        await event_manager.broadcast({
-            "type": "error",
-            "message": f"SYSTEM HALTED: Lifecycle error on {symbol}: {e}",
-            "timestamp": datetime.now().isoformat(),
-            "account_id": user_id,
-        })
+        await event_manager.broadcast(
+            {
+                "type": "error",
+                "message": f"SYSTEM HALTED: Lifecycle error on {symbol}: {e}",
+                "timestamp": datetime.now().isoformat(),
+                "account_id": user_id,
+            }
+        )
         return
 
     finally:
         if risk_manager.is_halted():
             halt_reason = risk_manager._halt_reason
             halt_reason_lower = halt_reason.lower()
-            is_transient = any(x in halt_reason_lower for x in [
-                "trade execution failed",
-                "lifecycle error",
-                "duplicate trade",
-            ])
+            is_transient = any(
+                x in halt_reason_lower
+                for x in [
+                    "trade execution failed",
+                    "lifecycle error",
+                    "duplicate trade",
+                ]
+            )
 
             if is_transient:
                 logger.warning(
@@ -1542,16 +1693,18 @@ async def _process_symbol(
                     reason=f"transient error recovery - {halt_reason_lower}"
                 )
                 risk_manager.clear_halt()
-                await event_manager.broadcast({
-                    "type": "trade_lock_released",
-                    "symbol": symbol,
-                    "message": (
-                        f"Trade lock released for transient error recovery on {symbol} "
-                        f"(reason: {halt_reason})"
-                    ),
-                    "timestamp": datetime.now().isoformat(),
-                    "account_id": user_id,
-                })
+                await event_manager.broadcast(
+                    {
+                        "type": "trade_lock_released",
+                        "symbol": symbol,
+                        "message": (
+                            f"Trade lock released for transient error recovery on {symbol} "
+                            f"(reason: {halt_reason})"
+                        ),
+                        "timestamp": datetime.now().isoformat(),
+                        "account_id": user_id,
+                    }
+                )
                 await _broadcast_rf_decision(
                     event_manager=event_manager,
                     user_id=user_id,
@@ -1576,24 +1729,28 @@ async def _process_symbol(
                     severity="error",
                     min_interval_seconds=0,
                 )
-                await event_manager.broadcast({
-                    "type": "bot_status",
-                    "status": "running",
-                    "message": (
-                        f"SYSTEM LOCKED: {halt_reason}. "
-                        "Trade lock remains held until manual intervention."
-                    ),
+                await event_manager.broadcast(
+                    {
+                        "type": "bot_status",
+                        "status": "running",
+                        "message": (
+                            f"SYSTEM LOCKED: {halt_reason}. "
+                            "Trade lock remains held until manual intervention."
+                        ),
+                        "timestamp": datetime.now().isoformat(),
+                        "account_id": user_id,
+                    }
+                )
+        else:
+            await event_manager.broadcast(
+                {
+                    "type": "trade_lock_released",
+                    "symbol": symbol,
+                    "message": f"Trade UNLOCKED on {symbol} - scan resuming",
                     "timestamp": datetime.now().isoformat(),
                     "account_id": user_id,
-                })
-        else:
-            await event_manager.broadcast({
-                "type": "trade_lock_released",
-                "symbol": symbol,
-                "message": f"Trade UNLOCKED on {symbol} - scan resuming",
-                "timestamp": datetime.now().isoformat(),
-                "account_id": user_id,
-            })
+                }
+            )
             risk_manager.release_trade_lock(
                 reason=f"{symbol} lifecycle complete - pnl={pnl:+.2f}"
             )
@@ -1616,7 +1773,7 @@ async def _write_trade_to_db_with_retry(
 ) -> bool:
     """
     Write trade to DB with configurable retries.
-    
+
     Returns:
         True if DB write succeeded, False if all retries exhausted.
     """
@@ -1625,11 +1782,11 @@ async def _write_trade_to_db_with_retry(
 
     # Convert duration to seconds (int) for DB
     duration_sec = 0
-    if duration_unit == 'm':
+    if duration_unit == "m":
         duration_sec = int(duration * 60)
-    elif duration_unit == 'h':
+    elif duration_unit == "h":
         duration_sec = int(duration * 3600)
-    elif duration_unit == 's':
+    elif duration_unit == "s":
         duration_sec = int(duration)
 
     trade_record = {
