@@ -802,7 +802,7 @@ async def run(
                 try:
                     from app.services.trades_service import UserTradesService
 
-                    emergency_record = {
+                    UserTradesService.save_trade(user_id, {
                         "contract_id": emergency_cid,
                         "symbol": emergency_sym,
                         "signal": first_trade.get("direction", "unknown"),
