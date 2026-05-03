@@ -1,25 +1,38 @@
 """
-Rise/Fall Step Index strategy.
+Rise/Fall R_25 Support & Resistance strategy.
 
-Entry model:
-  - 4 consecutive upward ticks + 2-tick weakening confirmation -> FALL contract (PUT)
-  - 4 consecutive downward ticks + 2-tick weakening confirmation -> RISE contract (CALL)
+Entry model
+-----------
+1.  Load the last RF_SR_CANDLE_COUNT 1-minute OHLCV candles for R_25.
+2.  Identify swing-high and swing-low pivot levels using a rolling window.
+3.  Merge nearby pivots into distinct zones (support or resistance).
+4.  On each scan:
+      a. Check whether the latest CLOSED candle's high/low touches an active zone.
+      b. Require a confirmation candle pattern inside/at the zone:
+           - Support zone  → bullish pin-bar (long lower wick) or bullish engulf → RISE (CALL)
+           - Resistance zone → bearish pin-bar (long upper wick) or bearish engulf → FALL (PUT)
+5.  Emit a signal only when ALL conditions are met and the signal is fresh
+    (signature-gated so the same bar is not traded twice).
 """
 
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import logging
 
 import pandas as pd
+import numpy as np
 
 from base_strategy import BaseStrategy
 from risefallbot import rf_config
 
-
 logger = logging.getLogger("risefallbot.strategy")
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Config helpers (identical pattern to the original strategy)
+# ─────────────────────────────────────────────────────────────────────────────
 
 def _cfg_value(name: str, default):
     cfg_dict = getattr(rf_config, "__dict__", {})
@@ -49,51 +62,97 @@ def _cfg_bool(name: str, default: bool) -> bool:
     if isinstance(value, (int, float)):
         return bool(value)
     if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in {"1", "true", "yes", "on"}:
+        v = value.strip().lower()
+        if v in {"1", "true", "yes", "on"}:
             return True
-        if normalized in {"0", "false", "no", "off"}:
+        if v in {"0", "false", "no", "off"}:
             return False
     return default
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Zone dataclass (plain dict for JSON-serialisability)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _make_zone(
+    zone_type: str,   # "support" | "resistance"
+    level: float,
+    touches: int = 1,
+    half_width: float = 0.0,
+) -> Dict[str, Any]:
+    return {
+        "type": zone_type,
+        "level": level,
+        "touches": touches,
+        "upper": level + half_width,
+        "lower": level - half_width,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Main strategy class
+# ─────────────────────────────────────────────────────────────────────────────
+
 class RiseFallStrategy(BaseStrategy):
-    """Step Index tick-sequence reversal strategy."""
+    """
+    R_25 Support & Resistance reversal strategy.
+
+    Uses 1-minute OHLCV candles to:
+      1. Build support/resistance zones from swing pivots.
+      2. Detect when price touches a zone on the latest candle.
+      3. Require a confirmation candle pattern (pin-bar or engulfing).
+      4. Fire RISE at support, FALL at resistance.
+    """
 
     def __init__(self):
-        self.allowed_symbols = tuple(
+        # ── allowed symbols ──────────────────────────────────────────────
+        self.allowed_symbols: Tuple[str, ...] = tuple(
             _cfg_value("RF_SUPPORTED_SYMBOLS", _cfg_value("RF_SYMBOLS", []))
         )
-        self.sequence_length = _cfg_int("RF_TICK_SEQUENCE_LENGTH", 4)
-        self.confirmation_ticks = max(_cfg_int("RF_CONFIRMATION_TICKS", 2), 1)
-        self.burst_noise_lookback_moves = max(
-            _cfg_int("RF_BURST_NOISE_LOOKBACK_MOVES", 4),
-            0,
-        )
-        self.primary_window_points = self.sequence_length + self.confirmation_ticks + 1
-        self.history_count = max(
-            _cfg_int(
-                "RF_TICK_HISTORY_COUNT",
-                self.primary_window_points + self.burst_noise_lookback_moves,
-            ),
-            self.primary_window_points,
-        )
-        self.burst_max_seconds = _cfg_float("RF_BURST_MAX_SECONDS", 0.0)
-        self.require_consecutive_direction = _cfg_bool(
-            "RF_REQUIRE_CONSECUTIVE_DIRECTION",
-            True,
-        )
-        self.require_fresh_signal_after_cooldown = _cfg_bool(
-            "RF_REQUIRE_FRESH_SIGNAL_AFTER_COOLDOWN",
-            True,
-        )
-        self.default_stake = _cfg_float("RF_DEFAULT_STAKE", 1.0)
-        self.duration = _cfg_int("RF_CONTRACT_DURATION", 3)
-        self.duration_unit = str(_cfg_value("RF_DURATION_UNIT", "t"))
+
+        # ── S&R detection parameters ─────────────────────────────────────
+        self.sr_candle_count         = _cfg_int("RF_SR_CANDLE_COUNT", 100)
+        self.sr_pivot_window         = _cfg_int("RF_SR_PIVOT_WINDOW", 5)
+        self.sr_merge_pct            = _cfg_float("RF_SR_MERGE_PCT", 0.10)
+        self.sr_zone_touch_buffer_pct = _cfg_float("RF_SR_ZONE_TOUCH_BUFFER_PCT", 0.05)
+        self.sr_max_zones            = _cfg_int("RF_SR_MAX_ZONES", 10)
+        self.sr_min_touches          = _cfg_int("RF_SR_MIN_TOUCHES", 2)
+
+        # ── confirmation candle parameters ───────────────────────────────
+        self.confirm_wick_ratio           = _cfg_float("RF_CONFIRM_WICK_RATIO", 2.0)
+        self.confirm_max_body_pct_of_zone = _cfg_float("RF_CONFIRM_MAX_BODY_PCT_OF_ZONE", 150.0)
+        self.confirm_lookback             = _cfg_int("RF_CONFIRM_LOOKBACK", 1)
+
+        # ── contract parameters ──────────────────────────────────────────
+        self.default_stake    = _cfg_float("RF_DEFAULT_STAKE", 1.0)
+        self.duration         = _cfg_int("RF_CONTRACT_DURATION", 2)
+        self.duration_unit    = str(_cfg_value("RF_DURATION_UNIT", "m"))
+
+        # ── freshness gate ───────────────────────────────────────────────
+        # Maps symbol → last emitted signal signature so the same candle
+        # cannot trigger two trades.
+        self._last_signal_signature: Dict[str, str] = {}
+
+        # ── analysis metadata ────────────────────────────────────────────
         self._last_analysis: Dict[str, Dict[str, Any]] = {}
-        self._last_qualifying_signature: Dict[str, str] = {}
-        self._directional_run_cooldowns: Dict[str, Dict[int, Dict[str, Any]]] = {}
-        self._latest_tick_observation: Dict[str, Dict[str, float]] = {}
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Public helpers (kept compatible with rf_bot.py)
+    # ─────────────────────────────────────────────────────────────────────
+
+    def get_last_analysis(self, symbol: str) -> Dict[str, Any]:
+        data = self._last_analysis.get(symbol, {})
+        return dict(data) if isinstance(data, dict) else {}
+
+    def get_required_timeframes(self) -> List[str]:
+        return ["1m"]
+
+    def get_strategy_name(self) -> str:
+        return "RiseFall"
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Internal helpers
+    # ─────────────────────────────────────────────────────────────────────
 
     def _reject(
         self,
@@ -102,434 +161,532 @@ class RiseFallStrategy(BaseStrategy):
         reason: str,
         details: Optional[Dict[str, Any]] = None,
     ) -> None:
-        logger.info("[RF][%s] Reject setup | code=%s reason=%s", symbol, code, reason)
-        self._set_analysis(
-            symbol,
-            decision="no_trade",
-            reason=reason,
-            code=code,
-            details=details,
-        )
-
-    def _set_analysis(
-        self,
-        symbol: str,
-        decision: str,
-        reason: str,
-        code: str,
-        details: Optional[Dict[str, Any]] = None,
-    ) -> None:
+        logger.info("[RF][%s] No trade | code=%s reason=%s", symbol, code, reason)
         self._last_analysis[symbol] = {
-            "decision": decision,
+            "decision": "no_trade",
             "reason": reason,
             "code": code,
             "details": details or {},
         }
 
-    def get_last_analysis(self, symbol: str) -> Dict[str, Any]:
-        data = self._last_analysis.get(symbol, {})
-        return dict(data) if isinstance(data, dict) else {}
+    def _accept(
+        self,
+        symbol: str,
+        code: str,
+        reason: str,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        self._last_analysis[symbol] = {
+            "decision": "signal",
+            "reason": reason,
+            "code": code,
+            "details": details or {},
+        }
 
-    def _normalize_ticks(self, raw_ticks: Any) -> pd.DataFrame:
-        if raw_ticks is None:
+    # ── Candle normalisation ─────────────────────────────────────────────
+
+    def _normalize_candles(self, raw: Any) -> pd.DataFrame:
+        """
+        Accept a DataFrame or list-of-dicts with OHLCV columns.
+        Returns a clean DataFrame with columns:
+          open, high, low, close, volume (optional), timestamp, datetime
+        Sorted oldest-first.
+        """
+        if raw is None:
             return pd.DataFrame()
-        if isinstance(raw_ticks, pd.DataFrame):
-            df = raw_ticks.copy()
-        else:
-            df = pd.DataFrame(raw_ticks)
 
+        df = raw.copy() if isinstance(raw, pd.DataFrame) else pd.DataFrame(raw)
         if df.empty:
             return df
 
-        price_column = None
-        for candidate in ("quote", "price", "close"):
-            if candidate in df.columns:
-                price_column = candidate
-                break
-        if price_column is None:
+        # ── map common alternative column names ──
+        rename = {}
+        for col in df.columns:
+            lc = col.lower()
+            if lc in ("open", "o") and "open" not in rename.values():
+                rename[col] = "open"
+            elif lc in ("high", "h") and "high" not in rename.values():
+                rename[col] = "high"
+            elif lc in ("low", "l") and "low" not in rename.values():
+                rename[col] = "low"
+            elif lc in ("close", "c", "quote", "price") and "close" not in rename.values():
+                rename[col] = "close"
+            elif lc in ("volume", "vol", "v") and "volume" not in rename.values():
+                rename[col] = "volume"
+            elif lc in ("epoch", "timestamp", "time") and "timestamp" not in rename.values():
+                rename[col] = "timestamp"
+        df = df.rename(columns=rename)
+
+        required = {"open", "high", "low", "close"}
+        if not required.issubset(df.columns):
+            logger.warning(
+                "[RF-Strategy] Candle DataFrame missing columns: %s",
+                required - set(df.columns),
+            )
             return pd.DataFrame()
 
-        normalized = pd.DataFrame({"quote": pd.to_numeric(df[price_column], errors="coerce")})
+        for col in ("open", "high", "low", "close"):
+            df[col] = pd.to_numeric(df[col], errors="coerce")
 
-        if "timestamp" in df.columns:
-            normalized["timestamp"] = pd.to_numeric(df["timestamp"], errors="coerce")
-        elif "epoch" in df.columns:
-            normalized["timestamp"] = pd.to_numeric(df["epoch"], errors="coerce")
+        if "timestamp" not in df.columns:
+            df["timestamp"] = range(len(df))
         else:
-            normalized["timestamp"] = range(len(normalized))
+            df["timestamp"] = pd.to_numeric(df["timestamp"], errors="coerce")
 
-        if "datetime" in df.columns:
-            normalized["datetime"] = pd.to_datetime(df["datetime"], errors="coerce")
-        else:
-            normalized["datetime"] = pd.to_datetime(
-                normalized["timestamp"],
-                unit="s",
-                errors="coerce",
-            )
+        if "datetime" not in df.columns:
+            df["datetime"] = pd.to_datetime(df["timestamp"], unit="s", errors="coerce")
 
-        normalized = normalized.dropna(subset=["quote", "timestamp"]).reset_index(drop=True)
-        return normalized
+        df = df.dropna(subset=["open", "high", "low", "close"]).reset_index(drop=True)
+        df = df.sort_values("timestamp").reset_index(drop=True)
+        return df
 
-    @staticmethod
-    def _to_iso(value: Any) -> Optional[str]:
-        if value is None or (isinstance(value, float) and pd.isna(value)):
-            return None
-        if hasattr(value, "to_pydatetime"):
-            value = value.to_pydatetime()
-        if isinstance(value, datetime):
-            return value.isoformat()
-        return str(value)
+    # ── Pivot detection ──────────────────────────────────────────────────
 
-    @staticmethod
-    def _build_signature(window: pd.DataFrame) -> str:
-        return "|".join(
-            f"{float(row.timestamp):.6f}:{row.quote:.10f}"
-            for row in window.itertuples(index=False)
-        )
+    def _find_pivots(
+        self, df: pd.DataFrame
+    ) -> Tuple[List[float], List[float]]:
+        """
+        Returns (swing_highs, swing_lows) as lists of price levels.
+        A swing-high at index i: df['high'][i] is the max over
+        [i-window … i+window].  Swing-lows are symmetric on 'low'.
+        """
+        w = self.sr_pivot_window
+        highs: List[float] = []
+        lows:  List[float] = []
 
-    @staticmethod
-    def _direction(delta: float) -> int:
-        if delta > 0:
-            return 1
-        if delta < 0:
-            return -1
-        return 0
+        for i in range(w, len(df) - w):
+            h = float(df["high"].iloc[i])
+            l = float(df["low"].iloc[i])
 
-    def _is_strict_burst(self, moves: List[float]) -> bool:
-        if len(moves) != self.sequence_length:
-            return False
-        directions = [self._direction(move) for move in moves]
-        if any(direction == 0 for direction in directions):
-            return False
-        return all(direction == directions[0] for direction in directions)
+            left_h  = df["high"].iloc[i - w: i]
+            right_h = df["high"].iloc[i + 1: i + w + 1]
+            if h >= left_h.max() and h >= right_h.max():
+                highs.append(h)
 
-    @classmethod
-    def _is_alternating(cls, moves: List[float]) -> bool:
-        directions = [cls._direction(move) for move in moves]
-        if len(directions) < 2 or any(direction == 0 for direction in directions):
-            return False
-        return all(
-            directions[idx] != directions[idx - 1]
-            for idx in range(1, len(directions))
-        )
+            left_l  = df["low"].iloc[i - w: i]
+            right_l = df["low"].iloc[i + 1: i + w + 1]
+            if l <= left_l.min() and l <= right_l.min():
+                lows.append(l)
 
-    @staticmethod
-    def _burst_breaks_previous_region(
-        pre_burst_prices: List[float],
-        burst_end_price: float,
-        burst_is_up: bool,
-    ) -> bool:
-        if not pre_burst_prices:
-            return True
-        if burst_is_up:
-            return burst_end_price > max(pre_burst_prices)
-        return burst_end_price < min(pre_burst_prices)
+        return highs, lows
 
-    @staticmethod
-    def _minimum_reversal_move(burst_moves: List[float]) -> float:
-        non_zero_moves = [abs(move) for move in burst_moves if move != 0]
-        if not non_zero_moves:
-            return 0.0
-        return min(non_zero_moves)
+    # ── Zone building ────────────────────────────────────────────────────
 
-    def _has_genuine_reversal(
+    def _build_zones(
         self,
-        burst_direction: int,
-        burst_moves: List[float],
-        confirmation_moves: List[float],
-    ) -> bool:
-        minimum_reversal_move = self._minimum_reversal_move(burst_moves)
-        return any(
-            self._direction(move) == -burst_direction
-            and abs(move) >= minimum_reversal_move
-            for move in confirmation_moves
-        )
+        df: pd.DataFrame,
+        swing_highs: List[float],
+        swing_lows:  List[float],
+    ) -> List[Dict[str, Any]]:
+        """
+        Merge nearby pivot levels into zones and count their touches.
 
-    def _update_directional_run_cooldowns(
-        self,
-        symbol: str,
-        ticks: pd.DataFrame,
-    ) -> None:
-        if ticks.empty:
-            return
+        Returns a list of zone dicts sorted by |distance from current price|.
+        """
+        if df.empty:
+            return []
 
-        observation = self._latest_tick_observation.get(symbol)
-        if observation is None:
-            last_row = ticks.iloc[-1]
-            self._latest_tick_observation[symbol] = {
-                "timestamp": float(last_row["timestamp"]),
-                "quote": float(last_row["quote"]),
-            }
-            return
+        current_price = float(df["close"].iloc[-1])
+        merge_threshold = current_price * self.sr_merge_pct / 100.0
 
-        new_rows = ticks.loc[
-            ticks["timestamp"] > observation["timestamp"],
-            ["timestamp", "quote"],
-        ]
-        if new_rows.empty:
-            return
+        def _merge_levels(levels: List[float]) -> List[Tuple[float, int]]:
+            """Group levels within merge_threshold → (mean_level, count)."""
+            if not levels:
+                return []
+            sorted_levels = sorted(levels)
+            groups: List[List[float]] = [[sorted_levels[0]]]
+            for lvl in sorted_levels[1:]:
+                if lvl - groups[-1][-1] <= merge_threshold:
+                    groups[-1].append(lvl)
+                else:
+                    groups.append([lvl])
+            return [(float(np.mean(g)), len(g)) for g in groups]
 
-        previous_quote = float(observation["quote"])
-        latest_timestamp = float(observation["timestamp"])
-        for row in new_rows.itertuples(index=False):
-            current_quote = float(row.quote)
-            tick_direction = self._direction(round(current_quote - previous_quote, 12))
-            self._advance_directional_run_cooldowns(symbol, tick_direction)
-            previous_quote = current_quote
-            latest_timestamp = float(row.timestamp)
+        merged_highs = _merge_levels(swing_highs)
+        merged_lows  = _merge_levels(swing_lows)
 
-        self._latest_tick_observation[symbol] = {
-            "timestamp": latest_timestamp,
-            "quote": previous_quote,
-        }
-
-    def _advance_directional_run_cooldowns(self, symbol: str, tick_direction: int) -> None:
-        cooldowns = self._directional_run_cooldowns.get(symbol)
-        if not cooldowns or tick_direction == 0:
-            return
-
-        completed_directions: List[int] = []
-        for blocked_direction, state in cooldowns.items():
-            if tick_direction == blocked_direction:
-                state["ticks_without_same_direction"] = 0
+        # Count actual candle touches for each zone
+        def _count_touches(level: float, df: pd.DataFrame, zone_type: str) -> int:
+            half_buf = level * self.sr_zone_touch_buffer_pct / 100.0
+            upper = level + half_buf
+            lower = level - half_buf
+            if zone_type == "resistance":
+                return int(((df["high"] >= lower) & (df["high"] <= upper * 1.002)).sum())
             else:
-                state["ticks_without_same_direction"] += 1
+                return int(((df["low"] >= lower * 0.998) & (df["low"] <= upper)).sum())
 
-            state["ticks_remaining"] = max(
-                state["required_break_ticks"] - state["ticks_without_same_direction"],
-                0,
-            )
+        half_buf = current_price * self.sr_zone_touch_buffer_pct / 100.0
 
-            if state["ticks_remaining"] == 0:
-                completed_directions.append(blocked_direction)
+        zones: List[Dict[str, Any]] = []
+        for level, pivot_count in merged_highs:
+            touches = _count_touches(level, df, "resistance")
+            total   = pivot_count + touches
+            if total >= self.sr_min_touches:
+                zones.append(_make_zone("resistance", level, total, half_buf))
 
-        for blocked_direction in completed_directions:
-            cooldowns.pop(blocked_direction, None)
+        for level, pivot_count in merged_lows:
+            touches = _count_touches(level, df, "support")
+            total   = pivot_count + touches
+            if total >= self.sr_min_touches:
+                zones.append(_make_zone("support", level, total, half_buf))
 
-        if not cooldowns:
-            self._directional_run_cooldowns.pop(symbol, None)
+        # Sort by strength (touches) descending, then trim to max_zones
+        zones.sort(key=lambda z: -z["touches"])
+        zones = zones[: self.sr_max_zones]
 
-    def _get_directional_run_cooldown(
-        self,
-        symbol: str,
-        burst_direction: int,
-    ) -> Optional[Dict[str, Any]]:
-        return (
-            self._directional_run_cooldowns
-            .get(symbol, {})
-            .get(burst_direction)
+        # Re-sort by distance from current price (nearest first) for signal logic
+        zones.sort(key=lambda z: abs(z["level"] - current_price))
+        return zones
+
+    # ── Zone touch detection ─────────────────────────────────────────────
+
+    def _candle_touches_zone(
+        self, candle: pd.Series, zone: Dict[str, Any]
+    ) -> bool:
+        """
+        Returns True if the candle's high or low enters the zone's buffer.
+        """
+        upper = zone["upper"]
+        lower = zone["lower"]
+
+        if zone["type"] == "resistance":
+            # High must reach up into the resistance zone
+            return float(candle["high"]) >= lower and float(candle["low"]) <= upper
+        else:
+            # Low must dip into the support zone
+            return float(candle["low"]) <= upper and float(candle["high"]) >= lower
+
+    # ── Confirmation candle patterns ─────────────────────────────────────
+
+    def _is_bullish_pin_bar(self, candle: pd.Series, zone: Dict[str, Any]) -> bool:
+        """
+        Bullish pin-bar: long lower wick, small body near the top of the candle.
+        Lower wick ≥ confirm_wick_ratio × body.
+        Candle close should be in upper half of candle range.
+        """
+        o = float(candle["open"])
+        h = float(candle["high"])
+        l = float(candle["low"])
+        c = float(candle["close"])
+
+        body        = abs(c - o)
+        full_range  = h - l
+        lower_wick  = min(o, c) - l
+        upper_wick  = h - max(o, c)
+
+        if full_range == 0:
+            return False
+
+        # Lower wick dominates
+        if body > 0 and lower_wick < self.confirm_wick_ratio * body:
+            return False
+        # Close in upper half of range
+        if c < l + full_range * 0.5:
+            return False
+        # Lower wick should be larger than upper wick
+        if lower_wick <= upper_wick:
+            return False
+        return True
+
+    def _is_bearish_pin_bar(self, candle: pd.Series, zone: Dict[str, Any]) -> bool:
+        """
+        Bearish pin-bar: long upper wick, small body near the bottom of the candle.
+        Upper wick ≥ confirm_wick_ratio × body.
+        """
+        o = float(candle["open"])
+        h = float(candle["high"])
+        l = float(candle["low"])
+        c = float(candle["close"])
+
+        body        = abs(c - o)
+        full_range  = h - l
+        upper_wick  = h - max(o, c)
+        lower_wick  = min(o, c) - l
+
+        if full_range == 0:
+            return False
+
+        if body > 0 and upper_wick < self.confirm_wick_ratio * body:
+            return False
+        if c > l + full_range * 0.5:
+            return False
+        if upper_wick <= lower_wick:
+            return False
+        return True
+
+    def _is_bullish_engulf(
+        self, prev: pd.Series, curr: pd.Series
+    ) -> bool:
+        """Bullish engulfing: previous candle bearish, current bullish and wraps it."""
+        prev_bearish = float(prev["close"]) < float(prev["open"])
+        curr_bullish = float(curr["close"]) > float(curr["open"])
+        engulfs = (
+            float(curr["open"]) <= float(prev["close"])
+            and float(curr["close"]) >= float(prev["open"])
         )
+        return prev_bearish and curr_bullish and engulfs
 
-    def _arm_directional_run_cooldown(
+    def _is_bearish_engulf(
+        self, prev: pd.Series, curr: pd.Series
+    ) -> bool:
+        """Bearish engulfing: previous candle bullish, current bearish and wraps it."""
+        prev_bullish = float(prev["close"]) > float(prev["open"])
+        curr_bearish = float(curr["close"]) < float(curr["open"])
+        engulfs = (
+            float(curr["open"]) >= float(prev["close"])
+            and float(curr["close"]) <= float(prev["open"])
+        )
+        return prev_bullish and curr_bearish and engulfs
+
+    def _confirmation_for_zone(
         self,
+        df: pd.DataFrame,
+        zone: Dict[str, Any],
+    ) -> Tuple[bool, str]:
+        """
+        Checks the last `confirm_lookback` closed candles for a valid
+        confirmation pattern at the given zone.
+
+        Returns (confirmed: bool, pattern_name: str).
+        """
+        n = len(df)
+        if n < 2:
+            return False, ""
+
+        # The most recent closed candle is df.iloc[-1]
+        curr = df.iloc[-1]
+        prev = df.iloc[-2]
+
+        if zone["type"] == "support":
+            if self._is_bullish_pin_bar(curr, zone):
+                return True, "bullish_pin_bar"
+            if self._is_bullish_engulf(prev, curr):
+                return True, "bullish_engulf"
+        else:  # resistance
+            if self._is_bearish_pin_bar(curr, zone):
+                return True, "bearish_pin_bar"
+            if self._is_bearish_engulf(prev, curr):
+                return True, "bearish_engulf"
+
+        return False, ""
+
+    # ── Signal signature ─────────────────────────────────────────────────
+
+    @staticmethod
+    def _signal_signature(
         symbol: str,
-        burst_direction: int,
-        signature: str,
-    ) -> None:
-        self._directional_run_cooldowns.setdefault(symbol, {})[burst_direction] = {
-            "required_break_ticks": int(self.sequence_length),
-            "ticks_without_same_direction": 0,
-            "ticks_remaining": int(self.sequence_length),
-            "armed_signature": signature,
-        }
+        zone_type: str,
+        zone_level: float,
+        candle_timestamp: float,
+    ) -> str:
+        return f"{symbol}:{zone_type}:{zone_level:.5f}:{candle_timestamp:.0f}"
 
-    def analyze(self, **kwargs) -> Optional[Dict]:
-        ticks = self._normalize_ticks(kwargs.get("data_ticks", kwargs.get("data_1m")))
-        symbol = kwargs.get("symbol", "unknown")
-        stake = kwargs.get("stake", self.default_stake)
+    # ─────────────────────────────────────────────────────────────────────
+    # Primary entry point: analyze()
+    # Called by rf_bot._process_symbol() — must accept **kwargs and return
+    # a signal dict or None (same contract as the original strategy).
+    # ─────────────────────────────────────────────────────────────────────
 
+    def analyze(self, **kwargs) -> Optional[Dict[str, Any]]:
+        """
+        Analyse the latest 1-minute candles for R_25 and return a signal dict
+        if an S&R zone touch + confirmation candle is detected.
+
+        Expected kwargs
+        ---------------
+        data_1m   : DataFrame or list-of-dicts with 1-minute OHLCV candles
+        symbol    : trading symbol (default "R_25")
+        stake     : trade stake (default self.default_stake)
+        """
+        symbol = kwargs.get("symbol", "R_25")
+        stake  = kwargs.get("stake",  self.default_stake)
+
+        # Accept both key names for backward-compat with rf_bot.py
+        raw_candles = kwargs.get("data_1m") or kwargs.get("data_ticks")
+
+        # ── symbol whitelist ─────────────────────────────────────────────
         if self.allowed_symbols and symbol not in self.allowed_symbols:
-            logger.debug(f"[RF][{symbol}] Symbol not allowed for Step Index mode")
             self._reject(
-                symbol,
-                code="symbol_not_allowed",
-                reason="Symbol not allowed",
-                details={"allowed_symbols": list(self.allowed_symbols)},
+                symbol, "symbol_not_allowed", "Symbol not in allowed list",
+                {"allowed": list(self.allowed_symbols)},
             )
             return None
 
-        self._update_directional_run_cooldowns(symbol, ticks)
+        # ── normalise candles ────────────────────────────────────────────
+        df = self._normalize_candles(raw_candles)
 
-        required_points = self.history_count
-        if ticks.empty or len(ticks) < required_points:
+        min_required = self.sr_candle_count
+        if df.empty or len(df) < min_required:
             self._reject(
-                symbol,
-                code="insufficient_tick_history",
-                reason="Insufficient tick history",
-                details={
-                    "ticks_available": int(len(ticks)),
-                    "ticks_required": int(required_points),
-                    "primary_window_points": int(self.primary_window_points),
-                    "burst_noise_lookback_moves": int(self.burst_noise_lookback_moves),
+                symbol, "insufficient_candle_history",
+                f"Need {min_required} candles, got {len(df)}",
+                {"candles_available": len(df), "candles_required": min_required},
+            )
+            return None
+
+        # Use only the last sr_candle_count candles for S&R calculation
+        df = df.tail(self.sr_candle_count).reset_index(drop=True)
+        current_price = float(df["close"].iloc[-1])
+
+        # ── build S&R zones ──────────────────────────────────────────────
+        swing_highs, swing_lows = self._find_pivots(df)
+        zones = self._build_zones(df, swing_highs, swing_lows)
+
+        if not zones:
+            self._reject(
+                symbol, "no_zones_detected",
+                "No valid S&R zones found in candle history",
+                {
+                    "candles": len(df),
+                    "swing_highs": len(swing_highs),
+                    "swing_lows": len(swing_lows),
                 },
             )
             return None
 
-        history_window = ticks.tail(required_points).reset_index(drop=True)
-        history_prices = [float(v) for v in history_window["quote"].tolist()]
-        history_deltas = [
-            round(history_prices[idx] - history_prices[idx - 1], 12)
-            for idx in range(1, len(history_prices))
-        ]
-        analysis_window = history_window.tail(self.primary_window_points).reset_index(drop=True)
-        prices = [float(v) for v in analysis_window["quote"].tolist()]
-        deltas = [round(prices[idx] - prices[idx - 1], 12) for idx in range(1, len(prices))]
-        signature = self._build_signature(analysis_window)
-        burst_moves = deltas[: self.sequence_length]
-        confirmation_moves = deltas[self.sequence_length :]
-        burst_start_idx = len(history_window) - self.primary_window_points
-        pre_burst_moves = history_deltas[
-            max(0, burst_start_idx - self.burst_noise_lookback_moves) : burst_start_idx
-        ]
-        pre_burst_prices = [
-            float(v)
-            for v in history_window["quote"]
-            .iloc[max(0, burst_start_idx - self.burst_noise_lookback_moves) : burst_start_idx + 1]
-            .tolist()
-        ]
-        burst_end_price = prices[self.sequence_length]
-        burst_elapsed_seconds = round(
-            float(
-                analysis_window["timestamp"].iloc[self.sequence_length]
-                - analysis_window["timestamp"].iloc[0]
-            ),
-            6,
-        )
+        # ── check for zone touches on the latest closed candle ───────────
+        latest_candle = df.iloc[-1]
+        latest_ts     = float(latest_candle["timestamp"])
 
-        details = {
-            "sequence_length": int(self.sequence_length),
-            "confirmation_ticks": int(self.confirmation_ticks),
-            "burst_noise_lookback_moves": int(self.burst_noise_lookback_moves),
-            "tick_prices": prices,
-            "tick_movements": deltas,
-            "burst_movements": burst_moves,
-            "confirmation_movements": confirmation_moves,
-            "pre_burst_prices": pre_burst_prices,
-            "pre_burst_movements": pre_burst_moves,
-            "sequence_signature": signature,
-            "sequence_started_at": self._to_iso(analysis_window["datetime"].iloc[0]),
-            "sequence_ended_at": self._to_iso(analysis_window["datetime"].iloc[-1]),
-            "sequence_start_epoch": float(analysis_window["timestamp"].iloc[0]),
-            "sequence_end_epoch": float(analysis_window["timestamp"].iloc[-1]),
-            "burst_elapsed_seconds": burst_elapsed_seconds,
-            "burst_max_seconds": self.burst_max_seconds,
-        }
+        touched_zone   = None
+        confirmed      = False
+        pattern_name   = ""
 
-        if self.require_consecutive_direction and not self._is_strict_burst(burst_moves):
+        for zone in zones:
+            if not self._candle_touches_zone(latest_candle, zone):
+                continue
+
+            # Zone touched — require confirmation candle
+            conf, pat = self._confirmation_for_zone(df, zone)
+            if conf:
+                touched_zone = zone
+                confirmed    = True
+                pattern_name = pat
+                break  # Take the nearest confirmed zone
+
+        if touched_zone is None:
+            near_zones = [
+                {"type": z["type"], "level": round(z["level"], 5), "touches": z["touches"]}
+                for z in zones[:5]
+            ]
             self._reject(
-                symbol,
-                code="burst_not_consecutive",
-                reason="Burst ticks were not strictly consecutive in one direction",
-                details=details,
-            )
-            return None
-
-        if self.burst_max_seconds > 0 and burst_elapsed_seconds >= self.burst_max_seconds:
-            self._reject(
-                symbol,
-                code="burst_too_slow",
-                reason="Burst momentum formed too slowly",
-                details=details,
-            )
-            return None
-
-        burst_direction = self._direction(burst_moves[0]) if burst_moves else 0
-        burst_is_up = burst_direction > 0
-        minimum_reversal_move = self._minimum_reversal_move(burst_moves)
-        details["confirmation_min_reversal_move"] = minimum_reversal_move
-
-        if not self._has_genuine_reversal(
-            burst_direction=burst_direction,
-            burst_moves=burst_moves,
-            confirmation_moves=confirmation_moves,
-        ):
-            self._reject(
-                symbol,
-                code="confirmation_no_genuine_reversal",
-                reason="Confirmation lacked a full opposite-direction reversal tick",
-                details=details,
-            )
-            return None
-
-        if (
-            self.require_fresh_signal_after_cooldown
-            and self._last_qualifying_signature.get(symbol) == signature
-        ):
-            self._reject(
-                symbol,
-                code="signal_not_fresh",
-                reason="Signal is not fresh",
-                details=details,
-            )
-            return None
-
-        directional_cooldown = self._get_directional_run_cooldown(symbol, burst_direction)
-        if directional_cooldown:
-            self._reject(
-                symbol,
-                code="directional_run_cooldown_active",
-                reason="A prior burst in the same direction is still cooling down",
-                details={
-                    **details,
-                    "directional_run_cooldown": dict(directional_cooldown),
+                symbol, "no_zone_touch",
+                "Latest candle does not touch any active S&R zone",
+                {
+                    "current_price": current_price,
+                    "zones_detected": len(zones),
+                    "nearest_zones": near_zones,
                 },
             )
             return None
 
-        if burst_is_up:
-            contract_direction = "PUT"
-            trade_label = "FALL"
+        if not confirmed:
+            self._reject(
+                symbol, "no_confirmation_candle",
+                f"Zone touched ({touched_zone['type']} @ {touched_zone['level']:.5f}) "
+                "but no confirmation candle pattern found",
+                {
+                    "zone": touched_zone,
+                    "latest_candle_ohlc": {
+                        "open":  round(float(latest_candle["open"]),  5),
+                        "high":  round(float(latest_candle["high"]),  5),
+                        "low":   round(float(latest_candle["low"]),   5),
+                        "close": round(float(latest_candle["close"]), 5),
+                    },
+                },
+            )
+            return None
+
+        # ── determine trade direction ────────────────────────────────────
+        if touched_zone["type"] == "support":
+            contract_direction = "CALL"
+            trade_label        = "RISE"
             sequence_direction = "up"
         else:
-            contract_direction = "CALL"
-            trade_label = "RISE"
+            contract_direction = "PUT"
+            trade_label        = "FALL"
             sequence_direction = "down"
 
-        self._last_qualifying_signature[symbol] = signature
-        self._arm_directional_run_cooldown(symbol, burst_direction, signature)
+        # ── freshness gate ───────────────────────────────────────────────
+        sig = self._signal_signature(
+            symbol,
+            touched_zone["type"],
+            touched_zone["level"],
+            latest_ts,
+        )
+        if self._last_signal_signature.get(symbol) == sig:
+            self._reject(
+                symbol, "signal_not_fresh",
+                "Signal already emitted for this candle + zone combination",
+                {"signature": sig},
+            )
+            return None
 
-        signal = {
-            "symbol": symbol,
-            "direction": contract_direction,
-            "trade_label": trade_label,
-            "sequence_direction": sequence_direction,
-            "stake": stake,
-            "duration": self.duration,
-            "duration_unit": self.duration_unit,
-            "tick_sequence": prices,
-            "tick_movements": deltas,
-            "burst_movements": burst_moves,
-            "confirmation_movements": confirmation_moves,
-            "pre_burst_movements": pre_burst_moves,
-            "sequence_signature": signature,
-            "sequence_started_at": details["sequence_started_at"],
-            "sequence_ended_at": details["sequence_ended_at"],
-            "sequence_start_epoch": details["sequence_start_epoch"],
-            "sequence_end_epoch": details["sequence_end_epoch"],
-            "burst_elapsed_seconds": burst_elapsed_seconds,
-            "confidence": 10,
+        self._last_signal_signature[symbol] = sig
+
+        # ── build signal dict ────────────────────────────────────────────
+        candle_dt = latest_candle.get("datetime")
+        candle_dt_iso = (
+            candle_dt.isoformat()
+            if hasattr(candle_dt, "isoformat")
+            else str(candle_dt)
+        )
+
+        signal: Dict[str, Any] = {
+            "symbol":              symbol,
+            "direction":           contract_direction,
+            "trade_label":         trade_label,
+            "sequence_direction":  sequence_direction,
+            "stake":               stake,
+            "duration":            self.duration,
+            "duration_unit":       self.duration_unit,
+            # Zone info
+            "zone_type":           touched_zone["type"],
+            "zone_level":          round(touched_zone["level"], 5),
+            "zone_upper":          round(touched_zone["upper"],  5),
+            "zone_lower":          round(touched_zone["lower"],  5),
+            "zone_touches":        touched_zone["touches"],
+            # Pattern
+            "confirmation_pattern": pattern_name,
+            # Candle snapshot
+            "candle_open":         round(float(latest_candle["open"]),  5),
+            "candle_high":         round(float(latest_candle["high"]),  5),
+            "candle_low":          round(float(latest_candle["low"]),   5),
+            "candle_close":        round(float(latest_candle["close"]), 5),
+            "candle_timestamp":    latest_ts,
+            "candle_datetime":     candle_dt_iso,
+            # Meta
+            "sequence_signature":  sig,
+            "sequence_started_at": candle_dt_iso,
+            "sequence_ended_at":   candle_dt_iso,
+            "sequence_start_epoch": latest_ts,
+            "sequence_end_epoch":   latest_ts,
+            "confidence":           min(10, touched_zone["touches"]),
         }
 
         logger.info(
-            f"[RF][{symbol}] Step sequence signal: {sequence_direction} burst with "
-            f"weakening confirmation -> {trade_label} ({contract_direction})"
-        )
-        self._set_analysis(
+            "[RF][%s] Signal: %s @ %s zone (level=%.5f) | pattern=%s | "
+            "entry=%s duration=%s%s",
             symbol,
-            decision="signal",
-            reason=f"{trade_label} signal accepted",
+            trade_label,
+            touched_zone["type"],
+            touched_zone["level"],
+            pattern_name,
+            contract_direction,
+            self.duration,
+            self.duration_unit,
+        )
+
+        self._accept(
+            symbol,
             code="signal_ready",
+            reason=f"{trade_label} signal at {touched_zone['type']} zone",
             details={
-                **details,
-                "direction": contract_direction,
-                "trade_label": trade_label,
-                "sequence_direction": sequence_direction,
+                "direction":            contract_direction,
+                "trade_label":          trade_label,
+                "zone_type":            touched_zone["type"],
+                "zone_level":           touched_zone["level"],
+                "confirmation_pattern": pattern_name,
             },
         )
         return signal
-
-    def get_required_timeframes(self) -> List[str]:
-        return ["ticks"]
-
-    def get_strategy_name(self) -> str:
-        return "RiseFall"
