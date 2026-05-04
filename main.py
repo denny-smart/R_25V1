@@ -4,6 +4,7 @@ Coordinates all components and runs the trading loop across multiple assets
 main.py - MULTI-ASSET WITH TOP-DOWN STRATEGY SUPPORT
 """
 
+# Triggering new build after removing problematic binary files
 import asyncio
 import signal
 import sys
