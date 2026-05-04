@@ -502,7 +502,9 @@ class RiseFallStrategy(BaseStrategy):
         stake  = kwargs.get("stake",  self.default_stake)
 
         # Accept both key names for backward-compat with rf_bot.py
-        raw_candles = kwargs.get("data_1m") or kwargs.get("data_ticks")
+        raw_candles = kwargs.get("data_1m")
+        if raw_candles is None:
+            raw_candles = kwargs.get("data_ticks")
 
         # ── symbol whitelist ─────────────────────────────────────────────
         if self.allowed_symbols and symbol not in self.allowed_symbols:
