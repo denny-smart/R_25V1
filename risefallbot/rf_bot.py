@@ -47,6 +47,65 @@ _running_by_user: Dict[str, bool] = {}
 _bot_task_by_user: Dict[str, asyncio.Task] = {}
 _decision_emit_state: Dict[str, Dict[str, Any]] = {}
 
+def _should_emit_rf_decision(
+    user_id, symbol, phase, decision, reason, min_interval_seconds
+) -> bool:
+    if min_interval_seconds <= 0:
+        return True
+    now = datetime.now()
+    state_key = f"{user_id or 'anon'}:{symbol}:{phase}:{decision}"
+    fingerprint = reason or ""
+    last = _decision_emit_state.get(state_key)        
+    if not last:
+        _decision_emit_state[state_key] = {"fingerprint": fingerprint, "time": now}
+        return True
+    elapsed = (now - last.get("time", datetime.min)).total_seconds()
+    if last.get("fingerprint") != fingerprint or elapsed >= min_interval_seconds:
+        _decision_emit_state[state_key] = {"fingerprint": fingerprint, "time": now}
+        return True
+    return False
+
+async def _broadcast_rf_decision(
+    event_manager,
+    user_id: Optional[str],
+    symbol: str,
+    phase: str,
+    decision: str,
+    reason: Optional[str] = None,
+    details: Optional[Dict[str, Any]] = None,
+    severity: str = "info",
+    min_interval_seconds: int = 20,
+) -> None:
+    if not _should_emit_rf_decision(
+        user_id=user_id,
+        symbol=symbol,
+        phase=phase,
+        decision=decision,
+        reason=reason or "",
+        min_interval_seconds=min_interval_seconds,    
+    ):
+        return
+    payload = {
+        "type":      "bot_decision",
+        "bot":       "risefall",
+        "strategy":  "RiseFall",
+        "symbol":    symbol,
+        "phase":     phase,
+        "decision":  decision,
+        "severity":  severity,
+        "message":   reason or decision.replace("_", " "),
+        "timestamp": datetime.now().isoformat(),      
+        "account_id": user_id,
+    }
+    if reason:
+        payload["reason"] = reason
+    if details:
+        payload["details"] = details
+    try:
+        await event_manager.broadcast(payload)        
+    except Exception as e:
+        logger.debug(f"[RF] Decision event broadcast skipped: {e}")
+
 
 def _state_key(user_id: Optional[str]) -> str:
     return str(user_id) if user_id else "__legacy__"

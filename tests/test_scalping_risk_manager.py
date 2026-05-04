@@ -404,7 +404,7 @@ def test_global_consecutive_loss_cooldown_and_recovery_reset(srm):
 
 
 def test_symbol_cooldown_after_two_symbol_losses(srm):
-    with patch("scalping_config.BLOCKED_SYMBOLS", {"1HZ100V", "1HZ30V", "R_100", "1HZ50V"}):
+    with patch("scalping_config.BLOCKED_SYMBOLS", {"1HZ100V", "1HZ30V", "R_25", "1HZ50V"}):
         srm.max_consecutive_losses = 99
         srm.symbol_max_consecutive_losses = 2
         srm.symbol_loss_cooldown_seconds = 600
@@ -469,7 +469,7 @@ def test_short_loss_suppression_triggers_symbol_pause(srm):
 
 
 def test_r50_down_requires_high_confidence(srm):
-    with patch("scalping_config.BLOCKED_SYMBOLS", {"1HZ100V", "1HZ30V", "R_100", "1HZ50V"}):
+    with patch("scalping_config.BLOCKED_SYMBOLS", {"1HZ100V", "1HZ30V", "R_25", "1HZ50V"}):
         blocked, reason = srm.can_open_trade(
             symbol="R_50",
             stake=10.0,

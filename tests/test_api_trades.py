@@ -116,7 +116,7 @@ def test_get_active_trades_overlays_runtime_exit_controls_from_metadata():
         mock_bot = MagicMock()
         mock_bot.state.get_active_trades.return_value = [{
             "contract_id": "meta-1",
-            "symbol": "R_100",
+            "symbol": "R_25",
             "direction": "UP",
             "status": "open",
             "stake": 5.0,
@@ -354,7 +354,7 @@ def test_sync_active_trades_imports_new_multiplier_contracts():
                     "contracts": [
                         {"contract_id": "existing-1", "contract_type": "MULTUP", "underlying": "R_50"},
                         {"contract_id": "new-mult-1", "contract_type": "MULTDOWN", "underlying": "R_75", "buy_price": 12.5},
-                        {"contract_id": "new-nonmult-1", "contract_type": "CALL", "underlying": "R_100"},
+                        {"contract_id": "new-nonmult-1", "contract_type": "CALL", "underlying": "R_25"},
                     ]
                 }
             }
@@ -378,7 +378,7 @@ def test_sync_active_trades_imports_new_multiplier_contracts():
                 "proposal_open_contract": {
                     "contract_id": "new-nonmult-1",
                     "contract_type": "CALL",
-                    "underlying": "R_100",
+                    "underlying": "R_25",
                 }
             }
 

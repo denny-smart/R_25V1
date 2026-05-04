@@ -305,17 +305,17 @@ async def test_trade_lock_prevents_concurrent_execution():
     assert not rm.trade_mutex.locked()
     assert not rm.is_trade_active()
 
-    can, reason = rm.can_trade(symbol="R_100S")
+    can, reason = rm.can_trade(symbol="R_25")
     assert can is True, f"Should be allowed: {reason}"
 
     # Acquire lock for first trade
-    acquired = await rm.acquire_trade_lock("R_100S", "contract_001")
+    acquired = await rm.acquire_trade_lock("R_25", "contract_001")
     assert acquired is True
     assert rm.trade_mutex.locked()
     assert rm.is_trade_active()
 
     # Second trade should be rejected by can_trade()
-    can2, reason2 = rm.can_trade(symbol="R_200S")
+    can2, reason2 = rm.can_trade(symbol="R_25")
     assert can2 is False
     assert reason2 == "trade_lock_active"
 
@@ -325,7 +325,7 @@ async def test_trade_lock_prevents_concurrent_execution():
     assert not rm.is_trade_active()
 
     # Now should be able to trade again
-    can3, reason3 = rm.can_trade(symbol="R_200S")
+    can3, reason3 = rm.can_trade(symbol="R_25")
     assert can3 is True
 
     print("\n[LOCK TEST] ✅ Mutex correctly prevents concurrent trades")
@@ -348,10 +348,10 @@ async def test_db_failure_halts_and_keeps_lock():
     rm = RiseFallRiskManager()
 
     # Acquire lock and simulate a trade
-    await rm.acquire_trade_lock("R_100S", "contract_fail_test")
+    await rm.acquire_trade_lock("R_25", "contract_fail_test")
     rm.record_trade_open({
         "contract_id": "contract_fail_test",
-        "symbol": "R_100S",
+        "symbol": "R_25",
         "direction": "CALL",
         "stake": 1.0,
     })
@@ -361,7 +361,7 @@ async def test_db_failure_halts_and_keeps_lock():
         "contract_id": "contract_fail_test",
         "profit": 0.50,
         "status": "win",
-        "symbol": "R_100S",
+        "symbol": "R_25",
     })
 
     # Lock should still be held (DB write hasn't happened yet)
@@ -372,12 +372,12 @@ async def test_db_failure_halts_and_keeps_lock():
     assert rm.is_halted()
 
     # New trades should be rejected
-    can, reason = rm.can_trade(symbol="R_200S")
+    can, reason = rm.can_trade(symbol="R_25")
     assert can is False
     assert reason == "system_halted"
 
     # Acquiring a new lock should also fail
-    acquired = await rm.acquire_trade_lock("R_200S", "should_fail")
+    acquired = await rm.acquire_trade_lock("R_25", "should_fail")
     assert acquired is False
 
     # Clear halt and release lock manually
@@ -395,7 +395,7 @@ async def test_db_failure_halts_and_keeps_lock():
         rm._loss_cooldown_until = datetime.min
 
     # Should be able to trade again
-    can2, reason2 = rm.can_trade(symbol="R_200S")
+    can2, reason2 = rm.can_trade(symbol="R_25")
     assert can2 is True
 
     print("\n[HALT TEST] ✅ DB failure correctly halts system and preserves lock")
@@ -418,12 +418,12 @@ async def test_full_lifecycle_step_logging(caplog):
 
     with caplog.at_level(logging.INFO, logger="risefallbot.risk"):
         # Step 1: Acquire lock
-        await rm.acquire_trade_lock("R_100S", "contract_log_test")
+        await rm.acquire_trade_lock("R_25", "contract_log_test")
 
         # Step 3: Record trade open
         rm.record_trade_open({
             "contract_id": "contract_log_test",
-            "symbol": "R_100S",
+            "symbol": "R_25",
             "direction": "PUT",
             "stake": 2.0,
         })
@@ -433,7 +433,7 @@ async def test_full_lifecycle_step_logging(caplog):
             "contract_id": "contract_log_test",
             "profit": -0.40,
             "status": "loss",
-            "symbol": "R_100S",
+            "symbol": "R_25",
         })
 
         # Step 6: Release lock (simulates successful DB write)
@@ -477,13 +477,13 @@ async def test_mutex_blocks_concurrent_acquire():
     rm = RiseFallRiskManager()
 
     # First acquire — should succeed immediately
-    await rm.acquire_trade_lock("R_100S", "first_trade")
+    await rm.acquire_trade_lock("R_25", "first_trade")
 
     # Track if second acquire completes
     second_acquired = asyncio.Event()
 
     async def try_second_acquire():
-        await rm.acquire_trade_lock("R_200S", "second_trade")
+        await rm.acquire_trade_lock("R_25", "second_trade")
         second_acquired.set()
 
     # Start second acquire in background
@@ -564,7 +564,7 @@ async def test_record_trade_open_requires_mutex():
     assert not rm.trade_mutex.locked()
     rm.record_trade_open({
         "contract_id": "rogue_trade",
-        "symbol": "R_100S",
+        "symbol": "R_25",
         "direction": "CALL",
         "stake": 1.0,
     })
