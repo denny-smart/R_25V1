@@ -1,17 +1,19 @@
 """
 Rise/Fall R_25 Support & Resistance strategy.
 
-Entry model
------------
+6-gate entry model
+------------------
 1.  Load the last RF_SR_CANDLE_COUNT 1-minute OHLCV candles for R_25.
 2.  Identify swing-high and swing-low pivot levels using a rolling window.
 3.  Merge nearby pivots into distinct zones (support or resistance).
-4.  On each scan:
-      a. Check whether the latest CLOSED candle's high/low touches an active zone.
-      b. Require a confirmation candle pattern inside/at the zone:
-           - Support zone  → bullish pin-bar (long lower wick) or bullish engulf → RISE (CALL)
-           - Resistance zone → bearish pin-bar (long upper wick) or bearish engulf → FALL (PUT)
-5.  Emit a signal only when ALL conditions are met and the signal is fresh
+4.  On each scan, the latest CLOSED candle must pass ALL 6 gates:
+      Gate 1 — Zone gap: nearest S and R must be far enough apart.
+      Gate 2 — Zone touch: candle high/low reaches into the nearest zone.
+      Gate 3 — Strong body: body ≥ 30% of the full candle range.
+      Gate 4 — Escaped zone: close is fully outside the touched zone.
+      Gate 5 — Reversal pattern: pin-bar (wick ≥ 1.5× body) or engulfing.
+      Gate 6 — Momentum: close moved ≥ 0.02% of price away from zone.
+5.  Emit a signal only when ALL gates pass and the signal is fresh
     (signature-gated so the same bar is not traded twice).
 """
 
@@ -119,9 +121,14 @@ class RiseFallStrategy(BaseStrategy):
         self.sr_min_touches          = _cfg_int("RF_SR_MIN_TOUCHES", 2)
 
         # ── confirmation candle parameters ───────────────────────────────
-        self.confirm_wick_ratio           = _cfg_float("RF_CONFIRM_WICK_RATIO", 2.0)
+        self.confirm_wick_ratio           = _cfg_float("RF_CONFIRM_WICK_RATIO", 1.5)
         self.confirm_max_body_pct_of_zone = _cfg_float("RF_CONFIRM_MAX_BODY_PCT_OF_ZONE", 150.0)
         self.confirm_lookback             = _cfg_int("RF_CONFIRM_LOOKBACK", 1)
+
+        # ── entry gate parameters ────────────────────────────────────────
+        self.sr_min_zone_gap_pct      = _cfg_float("RF_SR_MIN_ZONE_GAP_PCT", 0.10)
+        self.confirm_min_body_pct     = _cfg_float("RF_CONFIRM_MIN_BODY_PCT", 30.0)
+        self.confirm_min_momentum_pct = _cfg_float("RF_CONFIRM_MIN_MOMENTUM_PCT", 0.02)
 
         # ── contract parameters ──────────────────────────────────────────
         self.default_stake    = _cfg_float("RF_DEFAULT_STAKE", 1.0)
@@ -438,6 +445,73 @@ class RiseFallStrategy(BaseStrategy):
         )
         return prev_bullish and curr_bearish and engulfs
 
+    # ── Gate helpers (6-gate entry model) ───────────────────────────────
+
+    @staticmethod
+    def _find_nearest_sr_pair(
+        zones: List[Dict[str, Any]], price: float
+    ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        """Return (nearest_support, nearest_resistance) relative to *price*."""
+        nearest_sup: Optional[Dict[str, Any]] = None
+        nearest_res: Optional[Dict[str, Any]] = None
+        best_sup_dist = float("inf")
+        best_res_dist = float("inf")
+        for z in zones:
+            dist = abs(z["level"] - price)
+            if z["type"] == "support" and dist < best_sup_dist:
+                nearest_sup = z
+                best_sup_dist = dist
+            elif z["type"] == "resistance" and dist < best_res_dist:
+                nearest_res = z
+                best_res_dist = dist
+        return nearest_sup, nearest_res
+
+    def _check_zone_gap(
+        self,
+        support: Optional[Dict[str, Any]],
+        resistance: Optional[Dict[str, Any]],
+        price: float,
+    ) -> bool:
+        """Gate 1 — True when the S/R gap is wide enough for a reversal."""
+        if support is None or resistance is None:
+            return True  # only one side exists; gap is infinite
+        gap_pct = abs(resistance["level"] - support["level"]) / price * 100
+        return gap_pct >= self.sr_min_zone_gap_pct
+
+    def _check_strong_body(self, candle: pd.Series) -> bool:
+        """Gate 3 — True when candle body is ≥ confirm_min_body_pct of range."""
+        h = float(candle["high"])
+        l = float(candle["low"])
+        full_range = h - l
+        if full_range == 0:
+            return False
+        body = abs(float(candle["close"]) - float(candle["open"]))
+        return (body / full_range) * 100 >= self.confirm_min_body_pct
+
+    def _check_escaped_zone(
+        self, candle: pd.Series, zone: Dict[str, Any]
+    ) -> bool:
+        """Gate 4 — True when the close is fully outside the zone."""
+        close = float(candle["close"])
+        if zone["type"] == "resistance":
+            return close < zone["lower"]
+        else:  # support
+            return close > zone["upper"]
+
+    def _check_momentum(
+        self, candle: pd.Series, zone: Dict[str, Any], price: float
+    ) -> bool:
+        """Gate 6 — True when close has moved far enough away from the zone."""
+        close = float(candle["close"])
+        if zone["type"] == "resistance":
+            distance = zone["lower"] - close  # close below zone
+        else:  # support
+            distance = close - zone["upper"]  # close above zone
+        min_distance = price * self.confirm_min_momentum_pct / 100.0
+        return distance >= min_distance
+
+    # ── Confirmation candle patterns (Gate 5) ────────────────────────────
+
     def _confirmation_for_zone(
         self,
         df: pd.DataFrame,
@@ -546,25 +620,81 @@ class RiseFallStrategy(BaseStrategy):
             )
             return None
 
-        # ── check for zone touches on the latest closed candle ───────────
+        # ── identify nearest support / resistance pair ────────────────────
         latest_candle = df.iloc[-1]
         latest_ts     = float(latest_candle["timestamp"])
 
-        touched_zone   = None
-        confirmed      = False
-        pattern_name   = ""
+        nearest_sup, nearest_res = self._find_nearest_sr_pair(
+            zones, current_price
+        )
 
-        for zone in zones:
+        # ── Gate 1 — zone gap filter ────────────────────────────────────
+        if not self._check_zone_gap(nearest_sup, nearest_res, current_price):
+            self._reject(
+                symbol, "zone_gap_too_narrow",
+                "Nearest S and R zones are too close together",
+                {
+                    "support_level": nearest_sup["level"] if nearest_sup else None,
+                    "resistance_level": nearest_res["level"] if nearest_res else None,
+                    "min_gap_pct": self.sr_min_zone_gap_pct,
+                },
+            )
+            return None
+
+        # ── Gates 2-6: evaluate each candidate zone ─────────────────────
+        candidates = [z for z in (nearest_sup, nearest_res) if z is not None]
+        touched_zone  = None
+        pattern_name  = ""
+        last_reject_code   = "no_zone_touch"
+        last_reject_reason = "Latest candle does not touch any active S&R zone"
+
+        for zone in candidates:
+            # Gate 2 — zone touch
             if not self._candle_touches_zone(latest_candle, zone):
                 continue
+            last_reject_code = "no_zone_touch"
 
-            # Zone touched — require confirmation candle
+            # Gate 3 — strong body close
+            if not self._check_strong_body(latest_candle):
+                last_reject_code = "weak_body"
+                last_reject_reason = (
+                    f"Candle body too small at "
+                    f"{zone['type']} zone {zone['level']:.5f}"
+                )
+                continue
+
+            # Gate 4 — escaped the zone
+            if not self._check_escaped_zone(latest_candle, zone):
+                last_reject_code = "close_inside_zone"
+                last_reject_reason = (
+                    f"Close still inside {zone['type']} zone "
+                    f"{zone['level']:.5f}"
+                )
+                continue
+
+            # Gate 5 — reversal pattern
             conf, pat = self._confirmation_for_zone(df, zone)
-            if conf:
-                touched_zone = zone
-                confirmed    = True
-                pattern_name = pat
-                break  # Take the nearest confirmed zone
+            if not conf:
+                last_reject_code = "no_confirmation_candle"
+                last_reject_reason = (
+                    f"Zone touched ({zone['type']} @ {zone['level']:.5f}) "
+                    "but no confirmation candle pattern found"
+                )
+                continue
+
+            # Gate 6 — momentum filter
+            if not self._check_momentum(latest_candle, zone, current_price):
+                last_reject_code = "insufficient_momentum"
+                last_reject_reason = (
+                    f"Close lacks momentum away from "
+                    f"{zone['type']} zone {zone['level']:.5f}"
+                )
+                continue
+
+            # All 6 gates passed
+            touched_zone = zone
+            pattern_name = pat
+            break
 
         if touched_zone is None:
             near_zones = [
@@ -572,29 +702,11 @@ class RiseFallStrategy(BaseStrategy):
                 for z in zones[:5]
             ]
             self._reject(
-                symbol, "no_zone_touch",
-                "Latest candle does not touch any active S&R zone",
+                symbol, last_reject_code, last_reject_reason,
                 {
                     "current_price": current_price,
                     "zones_detected": len(zones),
                     "nearest_zones": near_zones,
-                },
-            )
-            return None
-
-        if not confirmed:
-            self._reject(
-                symbol, "no_confirmation_candle",
-                f"Zone touched ({touched_zone['type']} @ {touched_zone['level']:.5f}) "
-                "but no confirmation candle pattern found",
-                {
-                    "zone": touched_zone,
-                    "latest_candle_ohlc": {
-                        "open":  round(float(latest_candle["open"]),  5),
-                        "high":  round(float(latest_candle["high"]),  5),
-                        "low":   round(float(latest_candle["low"]),   5),
-                        "close": round(float(latest_candle["close"]), 5),
-                    },
                 },
             )
             return None

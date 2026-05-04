@@ -50,7 +50,7 @@ RF_SR_MIN_TOUCHES = 2
 # rejection wick (hammer / shooting-star pattern).
 #
 # Rejection wick ratio: wick must be at least this multiple of the body.
-RF_CONFIRM_WICK_RATIO = 2.0
+RF_CONFIRM_WICK_RATIO = 1.5
 
 # The confirmation candle body must be at most this % of the zone width
 # for a "pin-bar" confirmation.  Set 0 to disable body-size filter.
@@ -71,6 +71,19 @@ RF_DURATION_UNIT_LABEL = "minutes"
 RF_MAX_CONCURRENT_PER_SYMBOL = 1
 RF_MAX_CONCURRENT_TOTAL      = 1
 RF_MAX_CONCURRENT_TRADES     = 1
+
+# ==================== ENTRY GATES ====================
+# Gate 1: Minimum gap between nearest support and resistance (% of price).
+# Rejects setups where the opposite zone is too close for a meaningful move.
+RF_SR_MIN_ZONE_GAP_PCT      = 0.10
+
+# Gate 3: Candle body must be at least this % of full high-low range.
+# Rejects dojis and indecision candles.
+RF_CONFIRM_MIN_BODY_PCT     = 30.0
+
+# Gate 6: Close must move at least this % of price away from zone level.
+# Directional momentum confirmation.
+RF_CONFIRM_MIN_MOMENTUM_PCT = 0.02
 
 # No artificial cooldowns — each signal is already gated by the zone-touch
 # and confirmation-candle logic.
