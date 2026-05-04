@@ -950,7 +950,7 @@ async def _process_symbol(
     # ── STEP 1: Fetch 1-minute candles ───────────────────────────────────
     candle_data = await data_fetcher.fetch_candles(
         symbol=symbol,
-        interval=rf_config.RF_CANDLE_INTERVAL_MINUTES,
+        granularity=rf_config.RF_CANDLE_INTERVAL_MINUTES * 60,
         count=rf_config.RF_SR_CANDLE_COUNT,
     )
 
@@ -963,7 +963,7 @@ async def _process_symbol(
                 try:
                     candle_data = await method(
                         symbol, count=rf_config.RF_SR_CANDLE_COUNT,
-                        interval=rf_config.RF_CANDLE_INTERVAL_MINUTES,
+                        granularity=rf_config.RF_CANDLE_INTERVAL_MINUTES * 60,
                     )
                     if candle_data is not None and not (
                         hasattr(candle_data, "empty") and candle_data.empty
