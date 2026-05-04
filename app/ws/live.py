@@ -12,6 +12,7 @@ import jwt
 import time
 
 from app.bot.events import event_manager
+from app.core.serializers import ensure_json_serializable
 from app.bot.manager import bot_manager
 from app.core.supabase import supabase
 from app.core.settings import settings
@@ -171,20 +172,20 @@ async def websocket_live(websocket: WebSocket, token: Optional[str] = Query(None
 
         # Send current bot state
         await websocket.send_json(
-            {
+            ensure_json_serializable({
                 "type": "bot_status",
                 **initial_status,
                 "timestamp": datetime.now().isoformat(),
-            }
+            })
         )
 
         # Send current statistics
         await websocket.send_json(
-            {
+            ensure_json_serializable({
                 "type": "statistics",
                 "stats": initial_stats,
                 "timestamp": datetime.now().isoformat(),
-            }
+            })
         )
 
         # Keep connection alive and handle incoming messages
