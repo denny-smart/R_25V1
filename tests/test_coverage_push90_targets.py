@@ -49,7 +49,7 @@ def test_strategy_analyze_consolidation_and_exec_level_branches(monkeypatch):
     monkeypatch.setattr(indicators, "detect_price_movement", lambda *_a, **_k: (0.1, 0.1, False))
     monkeypatch.setattr(indicators, "detect_consolidation", lambda *_a, **_k: (False, 0.0, 0.0))
     monkeypatch.setattr(st_mod.config, "REQUIRE_CONSOLIDATION_BASE", True, raising=False)
-    out = s.analyze(df, df, df, df, df, df, symbol="R_25")
+    out = s.analyze(df, df, df, df, df, df, symbol="R_TEST")
     assert out["can_trade"] is False
     assert "consolidation base" in out["details"]["reason"].lower()
 
@@ -62,7 +62,7 @@ def test_strategy_analyze_consolidation_and_exec_level_branches(monkeypatch):
     monkeypatch.setattr(s, "_find_trading_range", lambda *_a, **_k: (90.0, 110.0))
     monkeypatch.setattr(s, "_is_in_middle_zone", lambda *_a, **_k: False)
     monkeypatch.setattr(s, "_find_nearest_level", lambda *_a, **_k: None)
-    out2 = s.analyze(df, df, df, df, df, df, symbol="R_25")
+    out2 = s.analyze(df, df, df, df, df, df, symbol="R_TEST")
     assert out2["can_trade"] is False
     assert "No execution level found" in out2["details"]["reason"]
 

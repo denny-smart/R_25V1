@@ -37,7 +37,7 @@ CONTRACT_TYPE_DOWN = "MULTDOWN"  # Multiplier Down (for DOWN/SELL signals)
 BLOCKED_SYMBOLS = {"1HZ100V", "1HZ30V"}
 
 # Removed R_10: 400x multiplier incompatible with 0.5% SL (would exceed stake on Deriv multipliers)
-SYMBOLS = ["R_25", "R_50", "R_75", "R_100", "1HZ25V", "1HZ50V", "1HZ75V", "1HZ90V", "stpRNG5", "stpRNG4"]
+SYMBOLS = ["R_25"]
 
 # Asset-specific configuration
 ASSET_CONFIG = {
@@ -47,71 +47,8 @@ ASSET_CONFIG = {
         "tick_size": 0.01,
         "movement_threshold_pct": 0.5,  # Adjusted based on production data
         "entry_distance_pct": 0.5  # Max entry distance from level
-    },
-    "R_50": {
-        "multiplier": 80,
-        "description": "Volatility 50 Index",
-        "tick_size": 0.01,
-        "movement_threshold_pct": 0.7,  # Observed rejections at 0.59-0.67%
-        "entry_distance_pct": 0.7  # Max entry distance from level
-    },
-    "R_75": {
-        "multiplier": 50,
-        "description": "Volatility 75 Index",
-        "tick_size": 0.01,
-        "movement_threshold_pct": 0.8,  # Increased to allow more entries (still rejects >0.8%)
-        "entry_distance_pct": 0.8  # Max entry distance from level
-    },
-    "R_100": {
-        "multiplier": 40,
-        "description": "Volatility 100 Index",
-        "tick_size": 0.01,
-        "movement_threshold_pct": 1.0,  # Observed rejections at 0.66-0.77%
-        "entry_distance_pct": 1.0  # Max entry distance from level
-    },
-    "1HZ25V": {
-        "multiplier": 160,
-        "description": "Volatility 25 (1s) Index",
-        "tick_size": 0.01,
-        "movement_threshold_pct": 0.9,
-        "entry_distance_pct": 0.9
-    },
-    "1HZ50V": {
-        "multiplier": 80,
-        "description": "Volatility 50 (1s) Index",
-        "tick_size": 0.01,
-        "movement_threshold_pct": 1.1,
-        "entry_distance_pct": 1.1
-    },
-    "1HZ75V": {
-        "multiplier": 50,
-        "description": "Volatility 75 (1s) Index",
-        "tick_size": 0.01,
-        "movement_threshold_pct": 1.2,
-        "entry_distance_pct": 1.2
-    },
-    "1HZ90V": {
-        "multiplier": 45,
-        "description": "Volatility 90 (1s) Index",
-        "tick_size": 0.01,
-        "movement_threshold_pct": 1.3,
-        "entry_distance_pct": 1.3
-    },
-    "stpRNG5": {
-        "multiplier": 100,
-        "description": "Step Index 500",
-        "tick_size": 0.1,
-        "movement_threshold_pct": 0.8,
-        "entry_distance_pct": 0.8
-    },
-    "stpRNG4": {
-        "multiplier": 200,
-        "description": "Step Index 400",
-        "tick_size": 0.1,
-        "movement_threshold_pct": 0.7,
-        "entry_distance_pct": 0.7
     }
-} 
+}
 
 
 MARKET = "synthetic_index"         # Market type
@@ -156,6 +93,7 @@ PRIORITIZE_BY_SIGNAL_STRENGTH = True  # Trade strongest signals first
 # ==================== DATA FETCHING ====================
 CANDLES_1M = 150                   # 1-minute candles
 CANDLES_5M = 120                   # 5-minute candles
+CANDLES_15M = 150                  # 15-minute candles
 MAX_RETRIES = 3
 RETRY_DELAY = 2
 
@@ -226,7 +164,7 @@ CANDLES_1W = 52                    # 1 year of weekly candles
 CANDLES_1D = 100                   # ~3 months of daily candles
 CANDLES_4H = 200                   # ~33 days of 4H candles
 CANDLES_1H = 200                   # ~8 days of hourly candles
-# CANDLES_5M and CANDLES_1M already defined above
+# CANDLES_15M, CANDLES_5M and CANDLES_1M already defined above
 
 # ==================== LEVEL DETECTION SETTINGS ====================
 MIN_LEVEL_TOUCHES = 2              # Minimum touches to qualify as "tested level"

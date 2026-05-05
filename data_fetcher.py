@@ -457,11 +457,12 @@ class DataFetcher:
             symbol: Trading symbol (e.g., 'R_25', 'R_50')
         
         Returns:
-            Dictionary with keys: '1m', '5m', '1h', '4h', '1d', '1w'
+            Dictionary with keys: '1m', '5m', '15m', '1h', '4h', '1d', '1w'
         """
         timeframes = {
             '1m': config.CANDLES_1M,
             '5m': config.CANDLES_5M,
+            '15m': config.CANDLES_15M,
             '1h': config.CANDLES_1H,
             '4h': config.CANDLES_4H,
             '1d': config.CANDLES_1D,

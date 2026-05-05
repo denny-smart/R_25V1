@@ -154,7 +154,7 @@ def test_strategy_analyze_success_up(strategy, base_ohlc):
         mp.setattr(config, "MIN_TP_DISTANCE_PCT", 0.1)
         mp.setattr(strategy, "min_rr_ratio", 1.5)
         
-        res = strategy.analyze(base_ohlc, base_ohlc, base_ohlc, base_ohlc, base_ohlc, base_ohlc, symbol="R_25")
+        res = strategy.analyze(base_ohlc, base_ohlc, base_ohlc, base_ohlc, base_ohlc, base_ohlc, symbol="R_TEST")
         assert res["can_trade"] is True
         assert res["signal"] == "UP"
         assert res["take_profit"] == 120.0

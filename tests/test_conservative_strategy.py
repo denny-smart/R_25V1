@@ -21,6 +21,7 @@ def test_analyze_delegation(mock_trading_strategy):
     kwargs = {
         'data_1m': pd.DataFrame({'close': [1]}),
         'data_5m': pd.DataFrame({'close': [2]}),
+        'data_15m': pd.DataFrame({'close': [2.5]}),
         'data_1h': pd.DataFrame({'close': [3]}),
         'data_4h': pd.DataFrame({'close': [4]}),
         'data_1d': pd.DataFrame({'close': [5]}),
@@ -44,6 +45,7 @@ def test_analyze_missing_data(mock_trading_strategy):
     kwargs = {
         'data_1m': pd.DataFrame({'close': [1]}),
         'data_5m': pd.DataFrame({'close': [2]}),
+        'data_15m': pd.DataFrame({'close': [2.5]}),
         'data_1h': pd.DataFrame({'close': [3]}),
         'data_4h': pd.DataFrame({'close': [4]}),
         'data_1d': pd.DataFrame({'close': [5]}),
@@ -61,4 +63,5 @@ def test_metadata():
     assert strategy.get_strategy_name() == "Conservative"
     assert "1m" in strategy.get_required_timeframes()
     assert "1w" in strategy.get_required_timeframes()
-    assert len(strategy.get_required_timeframes()) == 6
+    assert "15m" in strategy.get_required_timeframes()
+    assert len(strategy.get_required_timeframes()) == 7

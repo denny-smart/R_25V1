@@ -36,6 +36,7 @@ class ConservativeStrategy(BaseStrategy):
         # Extract timeframe data from kwargs
         data_1m = kwargs.get('data_1m')
         data_5m = kwargs.get('data_5m')
+        data_15m = kwargs.get('data_15m')
         data_1h = kwargs.get('data_1h')
         data_4h = kwargs.get('data_4h')
         data_1d = kwargs.get('data_1d')
@@ -52,6 +53,7 @@ class ConservativeStrategy(BaseStrategy):
         return self.strategy.analyze(
             data_1m=data_1m,
             data_5m=data_5m,
+            data_15m=data_15m,
             data_1h=data_1h,
             data_4h=data_4h,
             data_1d=data_1d,
@@ -64,9 +66,9 @@ class ConservativeStrategy(BaseStrategy):
         Get list of timeframes required by conservative strategy.
         
         Returns:
-            ['1w', '1d', '4h', '1h', '5m', '1m']
+            ['1w', '1d', '4h', '1h', '15m', '5m', '1m']
         """
-        return ['1w', '1d', '4h', '1h', '5m', '1m']
+        return ['1w', '1d', '4h', '1h', '15m', '5m', '1m']
 
     def get_symbols(self) -> List[str]:
         """Return conservative symbol universe from conservative config."""

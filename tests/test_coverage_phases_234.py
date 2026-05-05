@@ -208,12 +208,12 @@ def test_phase3_strategy_additional_analyze_paths(monkeypatch):
     # parabolic rejection
     monkeypatch.setattr(indicators, "detect_price_movement", lambda *_a, **_k: (1.0, 1.0, True))
     monkeypatch.setattr(indicators, "detect_consolidation", lambda *_a, **_k: (True, 1, 1))
-    r = s.analyze(df, df, df, df, df, df, symbol="R_25")
+    r = s.analyze(df, df, df, df, df, df, symbol="R_TEST")
     assert r["can_trade"] is False and "Parabolic" in r["details"]["reason"]
 
     # movement too high rejection
     monkeypatch.setattr(indicators, "detect_price_movement", lambda *_a, **_k: (99.0, 1.0, False))
-    r = s.analyze(df, df, df, df, df, df, symbol="R_25")
+    r = s.analyze(df, df, df, df, df, df, symbol="R_TEST")
     assert r["can_trade"] is False and "late entry rejected" in r["details"]["reason"].lower()
 
     # force no target path after trend alignment
@@ -221,7 +221,7 @@ def test_phase3_strategy_additional_analyze_paths(monkeypatch):
     monkeypatch.setattr(indicators, "detect_consolidation", lambda *_a, **_k: (True, 1, 1))
     monkeypatch.setattr(s, "_determine_trend", lambda *_a, **_k: "UP")
     monkeypatch.setattr(s, "_identify_tp_sl_levels", lambda *_a, **_k: (None, 95.0))
-    r = s.analyze(df, df, df, df, df, df, symbol="R_25")
+    r = s.analyze(df, df, df, df, df, df, symbol="R_TEST")
     assert r["can_trade"] is False and "No clear Structure Level" in r["details"]["reason"]
 
     # helper branch checks

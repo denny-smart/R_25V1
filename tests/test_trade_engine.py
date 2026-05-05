@@ -30,7 +30,7 @@ class DummyRiskManager:
 async def test_get_asset_multiplier_valid_and_invalid():
     engine = TradeEngine(api_token="TEST", app_id="1089")
     # Valid symbol
-    assert engine.get_asset_multiplier("R_50") == config.ASSET_CONFIG["R_50"]["multiplier"]
+    assert engine.get_asset_multiplier("R_25") == config.ASSET_CONFIG["R_25"]["multiplier"]
     # Invalid symbol falls back to default MULTIPLIER (160 default if missing)
     fallback = getattr(config, "MULTIPLIER", 160)
     assert engine.get_asset_multiplier("BAD_SYMBOL") == fallback
@@ -55,7 +55,7 @@ async def test_get_proposal_builds_request_and_parses_response(monkeypatch):
         # Verify constructed request basics
         assert req["proposal"] == 1
         assert req["basis"] == "stake"
-        assert req["symbol"] == "R_50"
+        assert req["symbol"] == "R_25"
         assert req["contract_type"] in (config.CONTRACT_TYPE, config.CONTRACT_TYPE_DOWN)
         # Return a well-formed proposal
         return {
@@ -70,13 +70,13 @@ async def test_get_proposal_builds_request_and_parses_response(monkeypatch):
     engine.send_request = fake_send
 
     # Direction mapping check (UP -> CONTRACT_TYPE)
-    p = await engine.get_proposal(direction="UP", stake=1.0, symbol="R_50")
+    p = await engine.get_proposal(direction="UP", stake=1.0, symbol="R_25")
     assert p is not None
     assert p["id"] == "PID123"
     assert p["ask_price"] == pytest.approx(1.23)
     assert p["payout"] == pytest.approx(2.0)
     assert p["spot"] == pytest.approx(100.5)
-    assert p["multiplier"] == config.ASSET_CONFIG["R_50"]["multiplier"]
+    assert p["multiplier"] == config.ASSET_CONFIG["R_25"]["multiplier"]
 
 
 @pytest.mark.asyncio
@@ -198,10 +198,10 @@ async def test_open_trade_happy_path_and_symbol_validation(mock_notifier, monkey
     engine.get_proposal = fake_prop
     engine.buy_with_proposal = fake_buy
 
-    trade = await engine.open_trade("UP", 2.5, symbol="R_50", tp_price=101.0, sl_price=99.0)
+    trade = await engine.open_trade("UP", 2.5, symbol="R_25", tp_price=101.0, sl_price=99.0)
     assert trade is not None
     assert trade["contract_id"] == 999
-    assert trade["symbol"] == "R_50"
+    assert trade["symbol"] == "R_25"
     assert trade["stake"] == 2.5
     assert trade["multiplier"] == 80
 
@@ -254,10 +254,10 @@ async def test_monitor_trade_risk_manager_close_path(monkeypatch):
     # Close trade mock
     engine.close_trade = AsyncMock(return_value={"sold_for": 1.2})
 
-    result = await engine.monitor_trade("CLOSE_ME", {"symbol": "R_50", "entry_spot": 100.0}, risk_manager=rm)
+    result = await engine.monitor_trade("CLOSE_ME", {"symbol": "R_25", "entry_spot": 100.0}, risk_manager=rm)
     assert result is not None
     assert result["exit_reason"] == "rule"
-    assert result["symbol"] == "R_50"
+    assert result["symbol"] == "R_25"
     assert "duration" in result
 
 
@@ -340,7 +340,7 @@ async def test_open_trade_fallback_to_proposal_spot_when_entry_zero(mock_notifie
     engine.buy_with_proposal = fake_buy
     engine.apply_tp_sl_limits = AsyncMock()
 
-    trade = await engine.open_trade("UP", 1.0, symbol="R_50")  # No TP/SL provided
+    trade = await engine.open_trade("UP", 1.0, symbol="R_25")  # No TP/SL provided
     assert trade is not None
     assert trade["contract_id"] == 42
     # Fallback from 0.0 entry_spot to proposal spot
@@ -374,7 +374,7 @@ async def test_open_trade_sets_buy_failed_reason_when_buy_never_succeeds():
     engine.get_proposal = fake_prop
     engine.buy_with_proposal = AsyncMock(return_value=None)
 
-    trade = await engine.open_trade("UP", 1.0, symbol="R_50", max_retries=1)
+    trade = await engine.open_trade("UP", 1.0, symbol="R_25", max_retries=1)
     assert trade is None
     assert engine.last_execution_reason == "buy_failed"
 

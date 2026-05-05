@@ -121,7 +121,7 @@ def test_strategy_additional_rsi_and_entry_branches(monkeypatch):
 
     # RSI weak UP
     monkeypatch.setattr(st_mod, "calculate_rsi", lambda _x: pd.Series([10] * len(d)))
-    r1 = s.analyze(d, d, d, d, d, d, symbol="R_25")
+    r1 = s.analyze(d, d, d, d, d, d, symbol="R_TEST")
     assert r1["can_trade"] is False
     assert "RSI too weak for UP" in r1["details"]["reason"]
 
@@ -129,7 +129,7 @@ def test_strategy_additional_rsi_and_entry_branches(monkeypatch):
     monkeypatch.setattr(st_mod, "calculate_rsi", lambda _x: pd.Series([99] * len(d)))
     monkeypatch.setattr(st_mod.config, "RSI_BUY_THRESHOLD", 50, raising=False)
     monkeypatch.setattr(st_mod.config, "RSI_MAX_THRESHOLD", 75, raising=False)
-    r2 = s.analyze(d, d, d, d, d, d, symbol="R_25")
+    r2 = s.analyze(d, d, d, d, d, d, symbol="R_TEST")
     assert r2["can_trade"] is False
     assert "RSI Overbought" in r2["details"]["reason"]
 
