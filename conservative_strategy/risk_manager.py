@@ -430,11 +430,8 @@ class RiskManager:
                 else:
                     logger.warning(f"⚠️ Low R:R: {msg}")
 
-            # Check 2: Maximum Risk Percentage
-            max_risk_pct = config.MAX_RISK_PCT
-            if amounts.get('risk_pct', 0) > max_risk_pct:
-                logger.warning(f"❌ REJECTED: Risk {amounts.get('risk_pct', 0):.1f}% > {max_risk_pct}%")
-                return False, f"Risk too high: {amounts.get('risk_pct', 0):.1f}% of stake"
+            # Check 2: Maximum Risk Percentage — DISABLED (managed by stagnation exit)
+            # Trades are no longer rejected based on risk_pct; stagnation & trailing stops handle exit.
 
             # Check 3: Signal Strength
             min_strength = config.MIN_SIGNAL_STRENGTH

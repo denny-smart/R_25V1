@@ -545,10 +545,17 @@ class TelegramNotifier:
         reason_short = self._compact_text(execution_reason, 80)
         risk_short = self._compact_text(risk_summary, 80)
 
+        # Market price at signal detection time
+        market_price = self._to_float(
+            signal.get("entry_price") or signal.get("current_price"), 0.0
+        )
+        price_line = f"Market Price: <b>{market_price:.4f}</b>\n" if market_price > 0 else ""
+
         message = (
             f"{badge} <b>SIGNAL DETECTED: {symbol}</b>\n"
             f"Strategy: <b>{strategy_type}</b> | User: <code>{user_id}</code>\n"
             f"Direction: <b>{direction_label}</b>\n"
+            f"{price_line}"
             f"Strength: {strength_bar} ({score:.1f})\n"
             f"Risk: {risk_short}\n"
             f"RSI/ADX: {rsi:.1f} / {adx:.1f}\n"

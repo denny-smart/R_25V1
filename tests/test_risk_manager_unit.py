@@ -83,13 +83,20 @@ def test_validate_trade_parameters(rm):
     valid, reason = rm.validate_trade_parameters("R_25", 10.0, signal_dict=signal)
     assert valid is True
 
-    # High risk
+    # High risk (Now Accepted - Gate Disabled)
     signal_high_risk = signal.copy()
-    signal_high_risk["stop_loss"] = 98.0 # 2% distance -> 20% risk
+    signal_high_risk["stop_loss"] = 98.0 # 2% distance -> 20% risk (multiplier 10)
     signal_high_risk["take_profit"] = 105.0 # 5% profit -> R:R 2.5 (Passes R:R 1.0)
     valid, reason = rm.validate_trade_parameters("R_25", 10.0, signal_dict=signal_high_risk)
+    assert valid is True
+    assert "Valid" in reason
+
+    # Low Signal Strength (Still Rejected)
+    signal_weak = signal.copy()
+    signal_weak["score"] = 2.0
+    valid, reason = rm.validate_trade_parameters("R_25", 10.0, signal_dict=signal_weak)
     assert valid is False
-    assert "Risk too high" in reason
+    assert "Signal too weak" in reason
 
 def test_record_trade_open_and_close(rm):
     """Test open/close lifecycle and stats update."""
