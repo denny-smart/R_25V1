@@ -883,39 +883,38 @@ class TradingStrategy:
 
     def _analyze_fake_breakout(self, data_15m: pd.DataFrame, data_1d: pd.DataFrame, data_1w: pd.DataFrame, symbol: str) -> Dict[str, Any]:
         """
-        Implementation of the Fake Breakout Reversal Strategy specifically for R_25.
-        Primary bias: Weekly
-        Secondary bias: Daily
-        Execution: M15
+        Fake Breakout Reversal Strategy for R_25.
+        Primary bias: Weekly | Secondary: Daily | Execution: M15
+
+        Fixes applied:
+        - Uses config.FAKE_BREAKOUT_MAX_CANDLES (not hardcoded 5)
+        - Spike min/max PCT range validation
+        - Proper price-HH / RSI-LH divergence check
+        - SL uses config.SL_BUFFER_PCT above spike high
+        - Dynamic confluence scoring
         """
         passed_checks = []
         response = {
-            "can_trade": False,
-            "signal": None,
-            "score": 0,
-            "confidence": 0,
-            "take_profit": None,
-            "stop_loss": None,
-            "risk_reward_ratio": 0.0,
-            "details": {
-                "passed_checks": passed_checks
-            }
+            "can_trade": False, "signal": None, "score": 0, "confidence": 0,
+            "take_profit": None, "stop_loss": None, "risk_reward_ratio": 0.0,
+            "details": {"passed_checks": passed_checks}
         }
 
-        def _step_log(step: int, message: str, emoji: str = "ℹ️", level: str = "info") -> None:
+        def _step_log(step, message, emoji="ℹ️", level="info"):
             ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            line = f"[CONSERVATIVE][{symbol}][FAKE_BREAKOUT] STEP {step}/6 | {ts} | {emoji} {message}"
-            getattr(logger, level)(line)
+            getattr(logger, level)(
+                f"[CONSERVATIVE][{symbol}][FAKE_BREAKOUT] STEP {step}/6 | {ts} | {emoji} {message}"
+            )
 
-        # 0. Data Validation
+        # ── 0. Data validation ─────────────────────────────────────────
         if data_15m is None or data_15m.empty or data_1d is None or data_1d.empty or data_1w is None or data_1w.empty:
             response["details"]["reason"] = "Insufficient data across W1, D1, M15 timeframes"
             return response
-            
+
         passed_checks.append("Data Validated")
         current_price = data_15m['close'].iloc[-1]
 
-        # 1. Trend Bias Logic
+        # ── 1. Trend bias ──────────────────────────────────────────────
         weekly_trend = self._determine_trend(data_1w, "Weekly")
         daily_trend = self._determine_trend(data_1d, "Daily")
 
@@ -923,157 +922,190 @@ class TradingStrategy:
             response["details"]["reason"] = "Weekly trend is NEUTRAL. Waiting for clear direction."
             return response
 
-        # 2. Zone Detection
-        # Gather levels from 15m (local), 1D, 1W (macro)
+        direction = "DOWN" if weekly_trend == "DOWN" else "UP"
+        conflict = (weekly_trend != daily_trend)
+        passed_checks.append(f"Bias: W={weekly_trend} D={daily_trend} conflict={conflict}")
+
+        # ── 2. Zone detection ──────────────────────────────────────────
         all_levels = []
         all_levels.extend(self._find_levels(data_1w, "1w"))
         all_levels.extend(self._find_levels(data_1d, "1d"))
         all_levels.extend(self._find_levels(data_15m, "15m"))
-        
-        # Determine setup direction based on Weekly bias
-        direction = "DOWN" if weekly_trend == "DOWN" else "UP"
-        
-        # Conflict Handling Flag
-        conflict = (weekly_trend != daily_trend)
 
-        # We look back up to 5 candles for a fake breakout
-        recent_data = data_15m.tail(6)
-        if len(recent_data) < 6:
-             response["details"]["reason"] = "Not enough 15m data for breakout check"
-             return response
+        # ── 3. Read config constants ───────────────────────────────────
+        max_candles = getattr(config, 'FAKE_BREAKOUT_MAX_CANDLES', 5)
+        min_spike_pct = getattr(config, 'FAKE_BREAKOUT_MIN_PCT', 0.05) / 100.0
+        max_spike_pct = getattr(config, 'FAKE_BREAKOUT_MAX_PCT', 0.8) / 100.0
+        wick_ratio_min = getattr(config, 'WICK_REJECTION_MIN_RATIO', 1.5)
+        body_atr_min = getattr(config, 'REVERSAL_BODY_ATR_MIN', 1.2)
+        rsi_div_enabled = getattr(config, 'RSI_DIVERGENCE_ENABLED', True)
+        rsi_div_lookback = getattr(config, 'RSI_DIVERGENCE_LOOKBACK', 10)
+        sl_buffer_pct = getattr(config, 'SL_BUFFER_PCT', 0.15)
+        exhaustion_on_conflict = getattr(config, 'EXHAUSTION_REQUIRED_WHEN_CONFLICT', True)
 
-        # ATR on 15m
+        lookback_candles = max_candles + 2
+        recent_data = data_15m.tail(lookback_candles)
+        if len(recent_data) < lookback_candles:
+            response["details"]["reason"] = "Not enough 15m data for breakout check"
+            return response
+
         atr_15m = self._calculate_atr(data_15m, period=14)
         if atr_15m == 0:
-             response["details"]["reason"] = "ATR is 0"
-             return response
-             
-        # Find nearest level we interacted with recently
-        # A fake breakout means price went past the level, and then reversed back inside.
-        # DOWN (Sell) setup: Price broke ABOVE resistance, then reversed BELOW it.
-        # UP (Buy) setup: Price broke BELOW support, then reversed ABOVE it.
-        
+            response["details"]["reason"] = "ATR is 0"
+            return response
+
+        # ── 4. Fake breakout scan ──────────────────────────────────────
         setup_found = False
         target_level = None
         sl_price = None
         entry_reason = ""
-        
+        wick_ok = False
+        body_ok = False
+        rsi_div_ok = False
+
+        current_candle = recent_data.iloc[-1]
+        curr_body = abs(current_candle['close'] - current_candle['open'])
+
         for level_dict in all_levels:
             level_price = level_dict['price']
-            
-            # Check the last 5 candles for a fake breakout of this level
-            # Current candle (idx -1) must be the strong momentum reversal candle.
-            current_candle = recent_data.iloc[-1]
-            body_size = abs(current_candle['close'] - current_candle['open'])
-            
+
             if direction == "DOWN":
-                # Looking for Sell Setup: Fake Breakout ABOVE resistance
-                # Find if any of the last 5 candles broke above the level
+                # ── SELL: spike ABOVE resistance, reverse below ─────────
+                highest_wick = 0.0
                 broke_above = False
-                highest_wick = 0
-                for i in range(5):
-                    candle = recent_data.iloc[-(i+2)] # Skip current candle, check previous 5
-                    if candle['high'] > level_price:
+
+                for i in range(max_candles):
+                    idx = -(i + 2)  # skip current candle
+                    if abs(idx) > len(recent_data):
+                        break
+                    candle = recent_data.iloc[idx]
+                    spike_pct = (candle['high'] - level_price) / level_price if level_price else 0
+
+                    # Spike must be within [min_spike_pct, max_spike_pct]
+                    if spike_pct >= min_spike_pct and spike_pct <= max_spike_pct:
                         broke_above = True
                         if candle['high'] > highest_wick:
                             highest_wick = candle['high']
-                
-                if broke_above and current_candle['close'] < level_price:
-                    # Current candle is a reversal back below the level
-                    # Check Momentum
-                    if body_size >= (1.2 * atr_15m):
-                        # Strong bearish close
-                        # Check Conflict Exhaustion
-                        if conflict:
-                            # 1. Wick Rejection on the breakout candles (or current)
-                            wick_valid = False
-                            for i in range(1, 6):
-                                c = recent_data.iloc[-i]
-                                if c['high'] > level_price:
-                                    upper_wick = c['high'] - max(c['open'], c['close'])
-                                    c_body = abs(c['close'] - c['open'])
-                                    if c_body > 0 and upper_wick >= (1.5 * c_body):
-                                        wick_valid = True
-                                        break
-                                        
-                            # 3. RSI Bearish Divergence (Exhaustion)
-                            rsi_data = calculate_rsi(data_15m)
-                            if not rsi_data.empty and len(rsi_data) > 10:
-                                rsi_val = rsi_data.iloc[-1]
-                                prev_rsi = rsi_data.iloc[-5:-1].max()
-                                # Price was making a high (the breakout), but RSI is weakening
-                                rsi_valid = rsi_val < prev_rsi or rsi_val < 70
-                            else:
-                                rsi_valid = True # Fallback if data insufficient
-                            
-                            if not wick_valid or not rsi_valid:
-                                continue # Fails exhaustion confirmation
-                        
-                        setup_found = True
-                        target_level = self._find_next_zone(all_levels, level_price, "DOWN")
-                        sl_price = highest_wick + (atr_15m * 0.1) # Stop above highest wick
-                        entry_reason = "Fake Breakout Reversal (SELL) detected"
+
+                if not broke_above or current_candle['close'] >= level_price:
+                    continue
+
+                # ── Signal B: reversal body >= body_atr_min × ATR ──────
+                body_ok = curr_body >= (body_atr_min * atr_15m)
+                if not body_ok:
+                    continue
+
+                # ── Signal A: wick rejection check ─────────────────────
+                wick_ok = False
+                for i in range(1, max_candles + 1):
+                    if i >= len(recent_data):
                         break
-                        
+                    c = recent_data.iloc[-i]
+                    if c['high'] > level_price:
+                        upper_wick = c['high'] - max(c['open'], c['close'])
+                        c_body = abs(c['close'] - c['open'])
+                        if c_body > 0 and upper_wick >= (wick_ratio_min * c_body):
+                            wick_ok = True
+                            break
+
+                # ── Signal C: RSI bearish divergence ───────────────────
+                rsi_div_ok = False
+                if rsi_div_enabled:
+                    rsi_div_ok = self._check_rsi_divergence(
+                        data_15m, highest_wick, rsi_div_lookback, "bearish"
+                    )
+
+                # ── Evaluate exhaustion requirement ────────────────────
+                if conflict and exhaustion_on_conflict:
+                    if not (wick_ok and body_ok and rsi_div_ok):
+                        _step_log(4, f"Conflict mode: missing signals "
+                                  f"wick={wick_ok} body={body_ok} rsi={rsi_div_ok}", "⚠️")
+                        continue
+                else:
+                    if not (wick_ok and body_ok):
+                        continue
+
+                # SL: above spike high + SL_BUFFER_PCT
+                sl_buffer = (sl_buffer_pct / 100.0) * highest_wick
+                sl_price = highest_wick + sl_buffer
+
+                setup_found = True
+                target_level = self._find_next_zone(all_levels, level_price, "DOWN")
+                entry_reason = "Fake Breakout Reversal (SELL) detected"
+                break
+
             elif direction == "UP":
-                # Looking for Buy Setup: Fake Breakout BELOW support
-                broke_below = False
+                # ── BUY: spike BELOW support, reverse above ────────────
                 lowest_wick = float('inf')
-                for i in range(5):
-                    candle = recent_data.iloc[-(i+2)]
-                    if candle['low'] < level_price:
+                broke_below = False
+
+                for i in range(max_candles):
+                    idx = -(i + 2)
+                    if abs(idx) > len(recent_data):
+                        break
+                    candle = recent_data.iloc[idx]
+                    spike_pct = (level_price - candle['low']) / level_price if level_price else 0
+
+                    if spike_pct >= min_spike_pct and spike_pct <= max_spike_pct:
                         broke_below = True
                         if candle['low'] < lowest_wick:
                             lowest_wick = candle['low']
-                
-                if broke_below and current_candle['close'] > level_price:
-                    if body_size >= (1.2 * atr_15m):
-                        if conflict:
-                            # 1. Wick Rejection
-                            wick_valid = False
-                            for i in range(1, 6):
-                                c = recent_data.iloc[-i]
-                                if c['low'] < level_price:
-                                    lower_wick = min(c['open'], c['close']) - c['low']
-                                    c_body = abs(c['close'] - c['open'])
-                                    if c_body > 0 and lower_wick >= (1.5 * c_body):
-                                        wick_valid = True
-                                        break
-                            
-                            # 3. RSI Bullish Divergence (Exhaustion)
-                            rsi_data = calculate_rsi(data_15m)
-                            if not rsi_data.empty and len(rsi_data) > 10:
-                                rsi_val = rsi_data.iloc[-1]
-                                prev_rsi = rsi_data.iloc[-5:-1].min()
-                                rsi_valid = rsi_val > prev_rsi or rsi_val > 30
-                            else:
-                                rsi_valid = True
-                                
-                            if not wick_valid or not rsi_valid:
-                                continue
-                        
-                        setup_found = True
-                        target_level = self._find_next_zone(all_levels, level_price, "UP")
-                        sl_price = lowest_wick - (atr_15m * 0.1) # Stop below lowest wick
-                        entry_reason = "Fake Breakout Reversal (BUY) detected"
+
+                if not broke_below or current_candle['close'] <= level_price:
+                    continue
+
+                body_ok = curr_body >= (body_atr_min * atr_15m)
+                if not body_ok:
+                    continue
+
+                wick_ok = False
+                for i in range(1, max_candles + 1):
+                    if i >= len(recent_data):
                         break
+                    c = recent_data.iloc[-i]
+                    if c['low'] < level_price:
+                        lower_wick = min(c['open'], c['close']) - c['low']
+                        c_body = abs(c['close'] - c['open'])
+                        if c_body > 0 and lower_wick >= (wick_ratio_min * c_body):
+                            wick_ok = True
+                            break
+
+                rsi_div_ok = False
+                if rsi_div_enabled:
+                    rsi_div_ok = self._check_rsi_divergence(
+                        data_15m, lowest_wick, rsi_div_lookback, "bullish"
+                    )
+
+                if conflict and exhaustion_on_conflict:
+                    if not (wick_ok and body_ok and rsi_div_ok):
+                        _step_log(4, f"Conflict mode: missing signals "
+                                  f"wick={wick_ok} body={body_ok} rsi={rsi_div_ok}", "⚠️")
+                        continue
+                else:
+                    if not (wick_ok and body_ok):
+                        continue
+
+                sl_buffer = (sl_buffer_pct / 100.0) * lowest_wick
+                sl_price = lowest_wick - sl_buffer
+
+                setup_found = True
+                target_level = self._find_next_zone(all_levels, level_price, "UP")
+                entry_reason = "Fake Breakout Reversal (BUY) detected"
+                break
 
         if not setup_found:
-             response["details"]["reason"] = "No Fake Breakout Reversal pattern found within 5 candles"
-             return response
-             
-        if not target_level:
-             response["details"]["reason"] = "No next zone found for Take Profit"
-             return response
+            response["details"]["reason"] = f"No Fake Breakout pattern within {max_candles} candles"
+            return response
 
-        # Check RR
+        if not target_level:
+            response["details"]["reason"] = "No next zone found for Take Profit"
+            return response
+
+        # ── 5. R:R validation ──────────────────────────────────────────
         distance_to_tp = abs(target_level - current_price)
         distance_to_sl = abs(current_price - sl_price)
-        
-        if distance_to_sl == 0:
-            rr_ratio = 0.0
-        else:
-            rr_ratio = distance_to_tp / distance_to_sl
+
+        rr_ratio = (distance_to_tp / distance_to_sl) if distance_to_sl > 0 else 0.0
 
         if rr_ratio < self.min_rr_ratio:
             response["details"]["reason"] = f"Poor R:R Ratio ({rr_ratio:.2f} < {self.min_rr_ratio})"
@@ -1082,20 +1114,100 @@ class TradingStrategy:
             response["risk_reward_ratio"] = round(rr_ratio, 2)
             return response
 
-        passed_checks.append("RR Check Passed")
+        passed_checks.append(f"R:R OK ({rr_ratio:.2f})")
+
+        # ── 6. Dynamic confluence score ────────────────────────────────
+        score = 0
+        score += 2 if weekly_trend == direction else 0
+        score += 2 if daily_trend == direction else 1  # 1pt if neutral
+        score += 2  # fake breakout + reversal confirmed
+        score += 1 if wick_ok else 0
+        score += 1 if body_ok else 0
+        score += 1 if rsi_div_ok else 0
+        score += 1 if wick_ok and body_ok else 0  # double-confirm bonus
+
+        confidence = min((score / 10.0) * 100, 100)
 
         response["can_trade"] = True
         response["signal"] = direction
         response["entry_price"] = current_price
         response["take_profit"] = target_level
         response["stop_loss"] = sl_price
+        response["spike_high"] = highest_wick if direction == "DOWN" else lowest_wick
         response["risk_reward_ratio"] = round(rr_ratio, 2)
-        response["score"] = 10
-        response["confidence"] = 100
-        response["details"]["reason"] = entry_reason
-        response["details"]["passed_checks"] = passed_checks
+        response["score"] = score
+        response["confidence"] = round(confidence, 1)
+        response["details"] = {
+            "reason": entry_reason,
+            "bias": direction,
+            "weekly_trend": weekly_trend,
+            "daily_trend": daily_trend,
+            "strict_exhaustion": conflict and exhaustion_on_conflict,
+            "wick_rejection": wick_ok,
+            "body_momentum": body_ok,
+            "rsi_divergence": rsi_div_ok,
+            "passed_checks": passed_checks,
+        }
+
+        _step_log(6, f"{direction} signal | Entry: {current_price:.3f} | "
+                  f"TP: {target_level:.3f} | SL: {sl_price:.3f} | "
+                  f"R:R: {rr_ratio:.2f} | Score: {score}", "🎯")
 
         return response
+
+    def _check_rsi_divergence(self, df: pd.DataFrame, spike_price: float,
+                              lookback: int, div_type: str) -> bool:
+        """
+        Proper RSI divergence check.
+        - bearish: price HH but RSI LH (at spike candle vs prior window)
+        - bullish: price LL but RSI HL (at spike candle vs prior window)
+        """
+        window = lookback * 2 + 5
+        recent = df.tail(window).reset_index(drop=True)
+        if len(recent) < lookback + 2:
+            return False
+
+        try:
+            rsi_series = calculate_rsi(recent)
+        except Exception:
+            return False
+        if rsi_series is None or rsi_series.empty:
+            return False
+
+        rsi_vals = rsi_series.values
+        prices = recent["high"].values if div_type == "bearish" else recent["low"].values
+
+        # Find spike candle index (candle whose extreme matches spike_price)
+        if div_type == "bearish":
+            spike_idx = int(np.argmax(prices))
+        else:
+            spike_idx = int(np.argmin(prices))
+
+        if spike_idx >= len(rsi_vals) or pd.isna(rsi_vals[spike_idx]):
+            return False
+        rsi_at_spike = float(rsi_vals[spike_idx])
+
+        # Prior window
+        prior_start = max(0, spike_idx - lookback)
+        prior_rsi = rsi_vals[prior_start:spike_idx]
+        prior_rsi = prior_rsi[~np.isnan(prior_rsi)]
+        prior_prices = prices[prior_start:spike_idx]
+
+        if len(prior_rsi) == 0 or len(prior_prices) == 0:
+            return False
+
+        if div_type == "bearish":
+            price_hh = spike_price >= float(np.max(prior_prices))
+            rsi_lh = rsi_at_spike < float(np.max(prior_rsi))
+            result = price_hh and rsi_lh
+        else:
+            price_ll = spike_price <= float(np.min(prior_prices))
+            rsi_hl = rsi_at_spike > float(np.min(prior_rsi))
+            result = price_ll and rsi_hl
+
+        if result:
+            logger.info(f"[{div_type.upper()}] RSI divergence confirmed at spike {spike_price:.3f}")
+        return result
         
     def _find_next_zone(self, levels: List[Dict], current_level: float, direction: str) -> Optional[float]:
         if direction == "DOWN":

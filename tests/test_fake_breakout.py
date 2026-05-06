@@ -34,36 +34,40 @@ def test_analyze_fake_breakout_no_setup(strategy):
         
         res = strategy._analyze_fake_breakout(d15m, d1d, d1w, "R_25")
         assert res["can_trade"] is False
-        assert "No Fake Breakout Reversal" in res["details"]["reason"]
+        assert "No Fake Breakout pattern" in res["details"]["reason"]
 
 def test_analyze_fake_breakout_success_sell(strategy):
     # Resistance at 110.0
     # Price breaks above 110.0 and then reverses below it.
     
-    # M15 Data
-    close = [100.0] * 140 + [110.5, 111.0, 110.5, 109.0] # Reversed below 110
-    high = [101.0] * 140 + [111.0, 112.0, 111.0, 110.0]
-    low = [99.0] * 140 + [110.0, 110.5, 110.0, 108.5]
-    d15m = _make_df(144, close_vals=close, high_vals=high, low_vals=low)
+    # M15 Data — need realistic opens so wick/body ratios work
+    # Spike candles: open near close, big upper wick (wick >> body)
+    # Reversal candle: big bearish body closing below 110
+    n_flat = 140
+    opens  = [100.0] * n_flat + [109.8, 109.9, 109.8, 110.0]
+    close  = [100.0] * n_flat + [109.9, 110.0, 109.9, 108.0]  # Last reverses below 110
+    high   = [101.0] * n_flat + [110.6, 110.7, 110.5, 110.0]  # Spike ~0.5-0.64% above 110
+    low    = [99.0]  * n_flat + [109.7, 109.8, 109.7, 107.5]
+    d15m = pd.DataFrame({'open': opens, 'high': high, 'low': low, 'close': close})
     
-    # Weekly UP (Bias SELL allowed)
+    # Weekly + Daily
     d1w = _make_df(52, close_vals=[100.0]*52)
-    # Daily UP (No conflict)
     d1d = _make_df(100, close_vals=[100.0]*100)
     
     with pytest.MonkeyPatch.context() as mp:
         # Mock levels: 110.0 resistance, 100.0 support
         mp.setattr(strategy, "_find_levels", lambda *_a, **_k: [{'price': 110.0, 'type': 'resistance'}, {'price': 100.0, 'type': 'support'}])
-        mp.setattr(strategy, "_determine_trend", lambda df, tf: "DOWN" if tf == "Weekly" else "DOWN") # Force DOWN bias
-        mp.setattr(strategy, "_calculate_atr", lambda *_a, **_k: 1.0) # ATR 1.0
+        mp.setattr(strategy, "_determine_trend", lambda df, tf: "DOWN")
+        mp.setattr(strategy, "_calculate_atr", lambda *_a, **_k: 1.0)
         
         res = strategy._analyze_fake_breakout(d15m, d1d, d1w, "R_25")
         
-        # Check if trade was identified
-        # Current candle: close 109.0, open 100.0? Wait, _make_df sets open to 100.0. 
-        # Body size = abs(109 - 100) = 9. ATR 1.0. 9 >= 1.2 * 1.0 is True.
-        # It should trigger.
+        # Spike candle idx -3: high=110.7, open=109.9, close=110.0
+        #   upper_wick = 110.7 - 110.0 = 0.7, body = 0.1, ratio = 7.0 >= 1.5 ✓
+        # Reversal candle: open=110.0, close=108.0, body=2.0 >= 1.2*ATR(1.0) ✓
+        # spike_pct = (110.7-110)/110 = 0.636% within [0.05%, 0.8%] ✓
         assert res["can_trade"] is True
         assert res["signal"] == "DOWN"
-        assert res["take_profit"] == 100.0 # Next level down
-        assert res["stop_loss"] > 111.0 # Above highest wick
+        assert res["take_profit"] == 100.0  # Next level down
+        assert res["stop_loss"] > 110.7     # Above highest wick (110.7 + buffer)
+

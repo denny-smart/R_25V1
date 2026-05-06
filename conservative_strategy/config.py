@@ -178,6 +178,43 @@ WEAK_RETEST_MAX_PCT = 30           # Max 30% retracement qualifies as "weak" ret
 MIDDLE_ZONE_PCT = 40               # Avoid middle 40% between levels (dangerous zone)
 REQUIRE_LEVEL_PROXIMITY = True     # Must be within 0.2% of a key level to enter
 
+# ==================== FAKE BREAKOUT / EXHAUSTION SETTINGS ====================
+# These govern the R_25 entry logic: spike above zone → reversal entry
+# Referenced directly by conservative_strategy/strategy.py _analyze_fake_breakout()
+
+# Wick Rejection (primary exhaustion signal)
+WICK_REJECTION_MIN_RATIO = 1.5    # Upper wick must be >= 1.5x candle body
+                                   # Confirms liquidity grab / rejection
+
+# Reversal Candle (momentum confirmation)
+REVERSAL_BODY_ATR_MIN = 1.2       # Reversal body must be >= 1.2x ATR
+                                   # Confirms sellers taking control
+
+# RSI Divergence (exhaustion confirmation)
+RSI_DIVERGENCE_ENABLED = True     # Check RSI bearish divergence on 15m
+RSI_DIVERGENCE_LOOKBACK = 10      # Candles to look back for prior RSI high
+                                   # Price makes higher high but RSI makes lower high
+
+# Reversal timing window
+FAKE_BREAKOUT_MAX_CANDLES = 5     # Max candles after spike before reversal must occur
+                                   # Stale if reversal takes > 5 candles
+
+# Spike definition: how far above zone qualifies as a "fake breakout"
+FAKE_BREAKOUT_MIN_PCT = 0.05      # Spike must go >= 0.05% above zone to qualify
+FAKE_BREAKOUT_MAX_PCT = 0.8       # Spike must NOT exceed 0.8% (too extended = real breakout)
+
+# SL placement rule
+SL_ABOVE_SPIKE_HIGH = True        # SL sits above the highest point of the fake breakout wick
+
+# ==================== WEEKLY vs DAILY BIAS RULES ====================
+# Weekly is primary. Daily is secondary.
+# If they agree (both bearish): only wick + reversal body required (RSI optional)
+# If they conflict (weekly bullish, daily bearish): ALL 3 exhaustion signals required
+
+WEEKLY_DAILY_AGREE_REQUIRE_RSI = False    # RSI optional when both TFs agree
+WEEKLY_DAILY_CONFLICT_REQUIRE_RSI = True  # RSI mandatory when TFs conflict
+EXHAUSTION_REQUIRED_WHEN_CONFLICT = True  # All 3 signals needed on conflict
+
 # ==================== MARKET STRUCTURE ANALYSIS ====================
 SWING_LOOKBACK = 20                # Candles for swing high/low detection
 REQUIRE_STRUCTURE_SHIFT = True     # Must see structure shift to reverse bias
